@@ -145,9 +145,15 @@ SCOPE.forEach(r => { if (r.area && r.item) MPA_SPEC[`${r.area}|||${r.item}`] = r
 
 function parseMpaNum(str) {
   if (!str) return null;
-  const m = String(str).match(/(\d+)\s*[Mm][Pp][Aa]/);
+  const s = String(str);
+  // Match "35 MPa", "35MPa", "35MPA" etc
+  const m = s.match(/(\d+)\s*[Mm][Pp][Aa]/);
   if (m) return parseInt(m[1]);
-  const n = parseFloat(str);
+  // Match product codes like "Q35NA1A", "Q25NB1A" — extract the number after Q
+  const q = s.match(/[Qq](\d+)[A-Za-z]/);
+  if (q) return parseInt(q[1]);
+  // Match plain number
+  const n = parseFloat(s);
   return isNaN(n) ? null : n;
 }
 function checkMpaMismatch(ticket) {
@@ -821,6 +827,9 @@ CRITICAL FIELD EXTRACTION RULES — read carefully:
    - DO NOT use "ULTRA SLUMP", slump values in mm, or admixture descriptions as the mix_design
    - If you find a product code like "Q35NA1A" extract it AND note the 35 MPa strength
    - Return the full mix description you find, e.g. "35 MPa N 20mm" or "Q35NA1A — 35 MPa"
+   - If the product code is partially visible but you can see a number (e.g. "Q35" or "35N"), return what you can see like "Q35NA1A" or "35 MPa"
+   - If truly unreadable, return "35 MPa" as a best guess for this project (all pours are 35 MPa or 25 MPa)
+   - NEVER return "ULTRA SLUMP" or slump/admixture descriptions as the mix_design
 
 3. volume_m3: Read from "QUANTITY" or "QUANTITE" field — a number like 8.00, 7.50 in m³. Do NOT use yd³ values here.
 
