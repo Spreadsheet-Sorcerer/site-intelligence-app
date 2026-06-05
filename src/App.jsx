@@ -9,44 +9,24 @@ const C = {
   muted: "#6B7280", text: "#F9FAFB", sub: "#9CA3AF", teal: "#14B8A6",
 };
 
-// ─── UPSTASH STORAGE HELPERS ─────────────────────────────────────────────────
-// Uses Upstash Redis REST API — set these two env vars in your Vercel project:
-//   VITE_UPSTASH_REDIS_REST_URL  (e.g. https://xxxx.upstash.io)
-//   VITE_UPSTASH_REDIS_REST_TOKEN
-const UPSTASH_URL   = import.meta.env.VITE_UPSTASH_REDIS_REST_KV_REST_API_URL;
-const UPSTASH_TOKEN = import.meta.env.VITE_UPSTASH_REDIS_REST_KV_REST_API_TOKEN;
-// Fallback: also check alternate names Vercel sometimes generates
-const _UPSTASH_URL   = UPSTASH_URL   || import.meta.env.VITE_UPSTASH_REDIS_REST_REDIS_URL   || import.meta.env.VITE_UPSTASH_REDIS_REST_KV_URL;
-const _UPSTASH_TOKEN = UPSTASH_TOKEN || import.meta.env.VITE_UPSTASH_REDIS_REST_KV_REST_API_READ_ONLY_TOKEN;
-
-async function upstashCmd(...args) {
-  const url   = UPSTASH_URL   || _UPSTASH_URL;
-  const token = UPSTASH_TOKEN || _UPSTASH_TOKEN;
-  if (!url || !token) return null;
-  try {
-    const res = await fetch(`${url}/${args.map(encodeURIComponent).join("/")}`, {
-      headers: { Authorization: `Bearer ${token}` }
-    });
-    const data = await res.json();
-    return data.result ?? null;
-  } catch { return null; }
-}
-
+// ─── LOCAL STORAGE HELPERS ───────────────────────────────────────────────────
+// Uses browser localStorage — no sign up or setup required.
+// Data persists across page refreshes on the same device/browser.
 async function storageGet(key) {
   try {
-    const raw = await upstashCmd("GET", key);
+    const raw = localStorage.getItem(key);
     return raw ? JSON.parse(raw) : null;
   } catch { return null; }
 }
 async function storageSet(key, value) {
   try {
-    await upstashCmd("SET", key, JSON.stringify(value));
+    localStorage.setItem(key, JSON.stringify(value));
     return true;
   } catch { return false; }
 }
 async function storageDel(key) {
   try {
-    await upstashCmd("DEL", key);
+    localStorage.removeItem(key);
     return true;
   } catch { return false; }
 }
