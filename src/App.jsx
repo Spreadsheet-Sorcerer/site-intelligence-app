@@ -325,7 +325,7 @@ Return ONLY valid JSON (no markdown):
   "notes": "any other relevant info such as restrictions or endorsements, else null"
 }`;
 
-    const res = await fetch("https://api.anthropic.com/v1/messages", {
+    const res = await fetch("/api/claude", {
       method:"POST",
       headers:{ "Content-Type":"application/json" },
       body: JSON.stringify({ model:"claude-sonnet-4-6", max_tokens:1000,
@@ -810,7 +810,7 @@ CRITICAL FIELD EXTRACTION RULES — read carefully:
 
 Return ONLY a valid JSON array (even if only one ticket). No markdown, no explanation:
 [{"date":"YYYY-MM-DD","ticket_number":"7-8 digit from TICKET NO field","supplier":"supplier name","mix_design":"MPa strength and mix code e.g. 35 MPa N 20mm or Q35NA1A","volume_m3":number or null,"volume_yd3":number or null,"area":"best match from area list or null","item":"best match from element list or null","invoice_number":"string or null","driver":"string or null","truck_number":"string or null","notes":"string or null"}]`;
-    const res = await fetch("https://api.anthropic.com/v1/messages",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({model:"claude-sonnet-4-6",max_tokens:4000,messages:[{role:"user",content:[block,{type:"text",text:prompt}]}]})});
+    const res = await fetch("/api/claude",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({model:"claude-sonnet-4-6",max_tokens:4000,messages:[{role:"user",content:[block,{type:"text",text:prompt}]}]})});
     const data = await res.json();
     if(data.error) throw new Error("API error: "+(data.error.message||JSON.stringify(data.error)));
     const text = data.content?.map(b=>b.text||"").join("")||"";
@@ -826,7 +826,7 @@ Return ONLY a valid JSON array (even if only one ticket). No markdown, no explan
     const prompt = `You are a construction accounts assistant. Extract ALL information from this concrete supplier invoice.
 Return ONLY valid JSON (no markdown):
 {"invoice_number":"string","invoice_date":"YYYY-MM-DD","supplier":"name","total_amount":number or null,"currency":"CAD/USD/AUD","ticket_numbers":["array"],"total_volume_m3":number or null,"total_volume_yd3":number or null,"line_items":[{"description":"string","quantity":number or null,"unit":"string","unit_price":number or null,"amount":number or null}],"notes":"string or null"}`;
-    const res = await fetch("https://api.anthropic.com/v1/messages",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({model:"claude-sonnet-4-6",max_tokens:1500,messages:[{role:"user",content:[block,{type:"text",text:prompt}]}]})});
+    const res = await fetch("/api/claude",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({model:"claude-sonnet-4-6",max_tokens:1500,messages:[{role:"user",content:[block,{type:"text",text:prompt}]}]})});
     const data = await res.json();
     if(data.error) throw new Error("API error: "+(data.error.message||JSON.stringify(data.error)));
     const text = data.content?.map(b=>b.text||"").join("")||"";
