@@ -10,25 +10,14 @@ const C = {
 };
 
 // ─── LOCAL STORAGE HELPERS ───────────────────────────────────────────────────
-// Uses browser localStorage — no sign up or setup required.
-// Data persists across page refreshes on the same device/browser.
 async function storageGet(key) {
-  try {
-    const raw = localStorage.getItem(key);
-    return raw ? JSON.parse(raw) : null;
-  } catch { return null; }
+  try { const raw = localStorage.getItem(key); return raw ? JSON.parse(raw) : null; } catch { return null; }
 }
 async function storageSet(key, value) {
-  try {
-    localStorage.setItem(key, JSON.stringify(value));
-    return true;
-  } catch { return false; }
+  try { localStorage.setItem(key, JSON.stringify(value)); return true; } catch { return false; }
 }
 async function storageDel(key) {
-  try {
-    localStorage.removeItem(key);
-    return true;
-  } catch { return false; }
+  try { localStorage.removeItem(key); return true; } catch { return false; }
 }
 
 // ─── CERT TYPES ───────────────────────────────────────────────────────────────
@@ -285,7 +274,6 @@ function CertsModule({ onBack }) {
   const [storageReady, setStorageReady] = useState(false);
   const fileRef = useRef();
 
-  // ── Load from storage on mount ──
   useEffect(() => {
     storageGet("certs-data").then(saved => {
       if (saved?.certs) setCerts(saved.certs);
@@ -293,7 +281,6 @@ function CertsModule({ onBack }) {
     });
   }, []);
 
-  // ── Save to storage whenever certs change ──
   useEffect(() => {
     if (!storageReady) return;
     storageSet("certs-data", { certs });
@@ -531,9 +518,7 @@ Return ONLY valid JSON (no markdown):
           </div>
         </div>
         <div style={{ display:"flex", gap:8, alignItems:"center" }}>
-          <span style={{ fontSize:11, color:storageReady?C.green:C.muted, fontWeight:700 }}>
-            {storageReady ? "💾 Auto-saved" : "⏳ Loading..."}
-          </span>
+          <span style={{ fontSize:11, color:storageReady?C.green:C.muted, fontWeight:700 }}>{storageReady ? "💾 Auto-saved" : "⏳ Loading..."}</span>
           <button onClick={async()=>{ if(!window.confirm("Clear ALL certificates? This cannot be undone.")) return; await storageDel("certs-data"); setCerts([]); showToast("All data cleared."); }} style={{ background:"transparent", color:C.red, border:`1px solid ${C.red}44`, borderRadius:7, padding:"5px 11px", fontSize:11, fontWeight:700, cursor:"pointer" }}>🗑 Clear Data</button>
           <button onClick={exportXLSX} style={{ background:C.green, color:"#052e16", border:"none", borderRadius:9, padding:"10px 22px", fontWeight:800, fontSize:14, cursor:"pointer" }}>⬇ Export .xlsx</button>
         </div>
@@ -780,7 +765,6 @@ function ConcreteModule({ onBack }) {
   const fileRef    = useRef();
   const invFileRef = useRef();
 
-  // ── Load from storage on mount ──
   useEffect(() => {
     storageGet("concrete-data").then(saved => {
       if (saved?.tickets)  setTickets(saved.tickets);
@@ -789,7 +773,6 @@ function ConcreteModule({ onBack }) {
     });
   }, []);
 
-  // ── Save to storage whenever tickets or invoices change ──
   useEffect(() => {
     if (!storageReady) return;
     storageSet("concrete-data", { tickets, invoices });
@@ -1082,9 +1065,7 @@ function extractJSON(text) {
           </div>
         </div>
         <div style={{display:"flex",gap:8,alignItems:"center"}}>
-          <span style={{fontSize:11,color:storageReady?C.green:C.muted,fontWeight:700}}>
-            {storageReady ? "💾 Auto-saved" : "⏳ Loading..."}
-          </span>
+          <span style={{fontSize:11,color:storageReady?C.green:C.muted,fontWeight:700}}>{storageReady ? "💾 Auto-saved" : "⏳ Loading..."}</span>
           <button onClick={async()=>{ if(!window.confirm("Clear ALL tickets and invoices? This cannot be undone.")) return; await storageDel("concrete-data"); setTickets([]); setInvoices([]); showToast("All data cleared."); }} style={{background:"transparent",color:C.red,border:`1px solid ${C.red}44`,borderRadius:7,padding:"5px 11px",fontSize:11,fontWeight:700,cursor:"pointer"}}>🗑 Clear Data</button>
           <button onClick={exportXLSX} style={{background:C.green,color:"#052e16",border:"none",borderRadius:9,padding:"10px 22px",fontWeight:800,fontSize:14,cursor:"pointer"}}>⬇ Export .xlsx</button>
         </div>
