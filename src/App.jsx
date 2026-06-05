@@ -9,16 +9,34 @@ const C = {
   muted: "#6B7280", text: "#F9FAFB", sub: "#9CA3AF", teal: "#14B8A6",
 };
 
-// ─── LOCAL STORAGE HELPERS ───────────────────────────────────────────────────
+// ─── SUPABASE STORAGE HELPERS ────────────────────────────────────────────────
+// Calls server-side API routes which talk to Supabase.
+// Data is shared across all devices and users.
+function tableFor(key) {
+  return key === "concrete-data" ? "concrete_data" : "certs_data";
+}
 async function storageGet(key) {
-  try { const raw = localStorage.getItem(key); return raw ? JSON.parse(raw) : null; } catch { return null; }
+  try {
+    const res = await fetch(`/api/data-get?table=${tableFor(key)}`);
+    if (!res.ok) return null;
+    return await res.json();
+  } catch { return null; }
 }
 async function storageSet(key, value) {
-  try { localStorage.setItem(key, JSON.stringify(value)); return true; } catch { return false; }
+  try {
+    const res = await fetch("/api/data-set", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ table: tableFor(key), data: value }),
+    });
+    return res.ok;
+  } catch { return false; }
 }
 async function storageDel(key) {
-  try { localStorage.removeItem(key); return true; } catch { return false; }
+  const empty = key === "concrete-data" ? { tickets: [], invoices: [] } : { certs: [] };
+  return storageSet(key, empty);
 }
+
 
 // ─── CERT TYPES ───────────────────────────────────────────────────────────────
 const CERT_TYPES = [
