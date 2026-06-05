@@ -137,6 +137,16 @@ const SCOPE = [
 ];
 
 const TOTAL_SCOPE_M3 = SCOPE.reduce((s,r) => s + r.m3, 0);
+
+// ─── PUMP BUDGET ──────────────────────────────────────────────────────────────
+const PUMP_BUDGET = [
+  { category: "Mud Slabs",          volume_m3: 185.00,   hours: 6.16   },
+  { category: "Foundations",        volume_m3: 785.00,   hours: 39.25  },
+  { category: "Slab on Grade",      volume_m3: 305.00,   hours: 19.04  },
+  { category: "Sus Slabs up to L6", volume_m3: 166.55,   hours: 3331.0 },
+  { category: "Verticals up to L6", volume_m3: 1102.00,  hours: 92.0   },
+];
+const TOTAL_PUMP_BUDGET_M3 = PUMP_BUDGET.reduce((s,r) => s + r.volume_m3, 0);
 const M3_TO_YD3 = 1.30795;
 const AREAS = [...new Set(SCOPE.map(r => r.area))];
 const ITEMS = [...new Set(SCOPE.map(r => r.item).filter(Boolean))];
@@ -785,6 +795,7 @@ function ConcreteModule({ onBack }) {
   const [ratePerM3, setRatePerM3] = useState("");
   const [manual, setManual] = useState({ date:"",ticket_number:"",supplier:"",mix_design:"",volume_m3:"",volume_yd3:"",area:"",item:"",invoice_number:"",notes:"" });
   const [reviewQueue, setReviewQueue] = useState([]); // tickets pending area/element confirmation
+  const [tests, setTests] = useState([]);
   const [storageReady, setStorageReady] = useState(false);
   const fileRef    = useRef();
   const invFileRef = useRef();
@@ -793,14 +804,15 @@ function ConcreteModule({ onBack }) {
     storageGet("concrete-data").then(saved => {
       if (saved?.tickets)  setTickets(saved.tickets);
       if (saved?.invoices) setInvoices(saved.invoices);
+      if (saved?.tests)    setTests(saved.tests);
       setStorageReady(true);
     });
   }, []);
 
   useEffect(() => {
     if (!storageReady) return;
-    storageSet("concrete-data", { tickets, invoices });
-  }, [tickets, invoices, storageReady]);
+    storageSet("concrete-data", { tickets, invoices, tests });
+  }, [tickets, invoices, tests, storageReady]);
 
   function showToast(msg, type="ok") { setToast({msg,type}); setTimeout(()=>setToast(null),3500); }
   async function toB64(file) { return new Promise((res,rej)=>{ const r=new FileReader(); r.onload=()=>res(r.result.split(",")[1]); r.onerror=rej; r.readAsDataURL(file); }); }
@@ -835,8 +847,13 @@ CRITICAL FIELD EXTRACTION RULES — read carefully:
 
 4. date: The delivery/load date on the ticket in YYYY-MM-DD format.
 
+5. pumping: Look for a line item labelled "Pumping", "Pump", or "Pompage" on the ticket. If found, extract:
+   - pump_volume_m3: the volume pumped in m³ (e.g. 8.00)
+   - pump_cost: the dollar amount charged for pumping (e.g. 450.00, as a number without $ sign)
+   If no pumping line item exists on this ticket, return null for both.
+
 Return ONLY a valid JSON array (even if only one ticket). No markdown, no explanation:
-[{"date":"YYYY-MM-DD","ticket_number":"7-8 digit from TICKET NO field","supplier":"supplier name","mix_design":"MPa strength and mix code e.g. 35 MPa N 20mm or Q35NA1A","volume_m3":number or null,"volume_yd3":number or null,"area":"best match from area list or null","item":"best match from element list or null","invoice_number":"string or null","driver":"string or null","truck_number":"string or null","notes":"string or null"}]`;
+[{"date":"YYYY-MM-DD","ticket_number":"7-8 digit from TICKET NO field","supplier":"supplier name","mix_design":"MPa strength and mix code e.g. 35 MPa N 20mm or Q35NA1A","volume_m3":number or null,"volume_yd3":number or null,"pump_volume_m3":number or null,"pump_cost":number or null,"area":"best match from area list or null","item":"best match from element list or null","invoice_number":"string or null","driver":"string or null","truck_number":"string or null","notes":"string or null"}]`;
     const res = await fetch("/api/claude",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({model:"claude-sonnet-4-6",max_tokens:4000,messages:[{role:"user",content:[block,{type:"text",text:prompt}]}]})});
     const data = await res.json();
     if(data.error) throw new Error("API error: "+(data.error.message||JSON.stringify(data.error)));
@@ -937,6 +954,63 @@ function extractJSON(text) {
     return {matched,unmatched,ticketsOnInvoice,ticketVolume,invoiceVolume,volumeMatch};
   }
 
+  async function extractTest(file) {
+    const b64 = await toB64(file);
+    const isPDF = file.type === "application/pdf";
+    const block = isPDF
+      ? { type:"document", source:{ type:"base64", media_type:"application/pdf", data:b64 } }
+      : { type:"image",    source:{ type:"base64", media_type:file.type,          data:b64 } };
+    const prompt = `You are a construction quality control assistant. Extract data from this concrete cylinder break / compressive strength test report.
+Project areas: ${AREAS.join(", ")}.
+
+Extract ALL of the following:
+1. report_number: lab report or sample ID number
+2. date_sampled: date concrete was sampled (YYYY-MM-DD)
+3. date_cast: date cylinders were cast (YYYY-MM-DD)
+4. pour_area: which project area this test relates to — match to one of: ${AREAS.join(", ")} (or null if unclear)
+5. pour_element: element type e.g. "Slab", "Wall", "Column" (or null)
+6. mix_design: concrete mix or MPa strength e.g. "35 MPa" or product code
+7. supplier: concrete supplier name
+8. ticket_number: delivery ticket number if shown
+9. slump_mm: slump value in mm (number only)
+10. air_content_pct: air content percentage (number only)
+11. results: array of break results, each with:
+    - age_days: number (7, 14, 28, 56 etc)
+    - strength_mpa: compressive strength in MPa (number)
+    - break_date: date of break test (YYYY-MM-DD or null)
+    - result: "pass" if meets spec, "fail" if below spec, "pending" if not yet tested
+12. specified_mpa: the specified design strength in MPa (number)
+13. lab_name: testing laboratory name
+14. technician: technician name if shown
+15. notes: any other relevant notes
+
+Return ONLY valid JSON, no markdown:
+{"report_number":"string","date_sampled":"YYYY-MM-DD","date_cast":"YYYY-MM-DD","pour_area":"area or null","pour_element":"element or null","mix_design":"string","supplier":"string or null","ticket_number":"string or null","slump_mm":number or null,"air_content_pct":number or null,"specified_mpa":number or null,"lab_name":"string or null","technician":"string or null","results":[{"age_days":number,"strength_mpa":number or null,"break_date":"YYYY-MM-DD or null","result":"pass|fail|pending"}],"notes":"string or null"}`;
+    const res = await fetch("/api/claude", { method:"POST", headers:{"Content-Type":"application/json"}, body:JSON.stringify({ model:"claude-sonnet-4-6", max_tokens:2000, messages:[{ role:"user", content:[block, { type:"text", text:prompt }] }] }) });
+    const data = await res.json();
+    if (data.error) throw new Error("API error: " + (data.error.message || JSON.stringify(data.error)));
+    const text = data.content?.map(b => b.text||"").join("") || "";
+    const clean = text.replace(/```json|```/g,"").trim();
+    return { ...JSON.parse(clean), id: Date.now() + Math.random(), file_name: file.name };
+  }
+
+  async function handleTestFiles(files) {
+    if (!files?.length) return;
+    setLoading(true);
+    for (const file of Array.from(files)) {
+      setLoadMsg(`Reading test report "${file.name}"…`);
+      try {
+        const extracted = await extractTest(file);
+        setTests(prev => [extracted, ...prev]);
+        showToast(`Test report ${extracted.report_number || file.name} added ✓`);
+      } catch(e) {
+        showToast(`Failed to read ${file.name}: ${e.message}`, "err");
+      }
+    }
+    setLoading(false);
+    setLoadMsg("");
+  }
+
   async function handleTicketFiles(files) {
     if(!files?.length) return; setLoading(true);
     const pending = [];
@@ -979,6 +1053,10 @@ function extractJSON(text) {
 
   const totalPoured=tickets.reduce((s,t)=>s+(parseFloat(t.volume_m3)||0),0);
   const totalYd3=tickets.reduce((s,t)=>s+(parseFloat(t.volume_yd3)||0),0);
+  const totalPumpM3   = tickets.reduce((s,t) => s + (parseFloat(t.pump_volume_m3)||0), 0);
+  const totalPumpCost = tickets.reduce((s,t) => s + (parseFloat(t.pump_cost)||0), 0);
+  const pumpRemaining = Math.max(0, TOTAL_PUMP_BUDGET_M3 - totalPumpM3);
+  const pumpPct       = TOTAL_PUMP_BUDGET_M3 > 0 ? Math.min(100,(totalPumpM3/TOTAL_PUMP_BUDGET_M3)*100) : 0;
   const remaining=Math.max(0,TOTAL_SCOPE_M3-totalPoured);
   const pct=(totalPoured/TOTAL_SCOPE_M3)*100;
   const mpaMismatches=tickets.filter(t=>checkMpaMismatch(t));
@@ -1107,6 +1185,8 @@ function extractJSON(text) {
         {TAB("dashboard","📊 Dashboard")}
         {TAB("tickets",`🧾 Tickets (${tickets.length})${mpaMismatches.length>0?" ⚠":""}`)}
         {TAB("invoices",`💰 Invoices (${invoices.length})${invoicesWithIssues>0?` ⚠${invoicesWithIssues}`:""}`)}
+        {TAB("pumping","💧 Pumping")}
+        {TAB("testing",`🔬 Testing (${tests.length})`)}
         {TAB("remaining","🔮 Remaining Works")}
         {TAB("mpa","🧪 By MPa")}
         {TAB("scope","📋 Full Scope")}
@@ -1119,6 +1199,7 @@ function extractJSON(text) {
               <Stat label="Total Poured"   value={`${fmt(totalPoured)} m³`}  sub={`${fmt(totalYd3)} yd³`}             color={C.accent}/>
               <Stat label="Remaining"      value={`${fmt(remaining)} m³`}    sub={`${fmt(remaining*M3_TO_YD3)} yd³`}  color={remaining>0?C.yellow:C.green}/>
               <Stat label="Tickets"        value={tickets.length}             sub="dockets scanned"                    color={C.blue}/>
+              <Stat label="Pump Used"      value={`${fmt(totalPumpM3)} m³`}  sub={`$${totalPumpCost.toLocaleString(undefined,{minimumFractionDigits:2,maximumFractionDigits:2})} charged`} color={pumpPct>90?C.red:C.teal}/>
               <Stat label="MPa Mismatches" value={mpaMismatches.length}       sub={mpaMismatches.length>0?"⚠ review required":"✓ all clear"} color={mpaMismatches.length>0?C.red:C.green}/>
               <Stat label="Invoices"       value={invoices.length}            sub={invoicesWithIssues>0?`⚠ ${invoicesWithIssues} need review`:invoices.length>0?"✓ all matched":"none yet"} color={invoicesWithIssues>0?C.red:C.purple}/>
             </div>
@@ -1293,6 +1374,127 @@ function extractJSON(text) {
                 </div>
               </div>);
             })}
+          </div>
+        )}
+
+        {tab==="pumping"&&(
+          <div>
+            <div style={{display:"flex",gap:14,flexWrap:"wrap",marginBottom:24}}>
+              <Stat label="Total Pumped"    value={`${fmt(totalPumpM3)} m³`}        sub={`of ${fmt(TOTAL_PUMP_BUDGET_M3)} m³ budgeted`} color={pumpPct>100?C.red:C.teal}/>
+              <Stat label="Pump Remaining"  value={`${fmt(pumpRemaining)} m³`}      sub="budget left"                                    color={pumpRemaining<50?C.red:C.yellow}/>
+              <Stat label="Total Charged"   value={`$${totalPumpCost.toLocaleString(undefined,{minimumFractionDigits:2,maximumFractionDigits:2})}`} sub="from tickets"  color={C.green}/>
+              <Stat label="Tickets w/ Pump" value={tickets.filter(t=>parseFloat(t.pump_volume_m3)>0).length} sub="of total tickets" color={C.blue}/>
+            </div>
+            <div style={{background:C.card,border:`1px solid ${C.border}`,borderRadius:14,padding:"20px 24px",marginBottom:24}}>
+              <div style={{display:"flex",justifyContent:"space-between",marginBottom:10}}><span style={{fontWeight:700}}>Overall Pump Usage vs Budget</span><span style={{color:pumpPct>90?C.red:C.teal,fontWeight:800,fontFamily:"monospace"}}>{fmt(pumpPct,1)}%</span></div>
+              <Bar pct={pumpPct} color={pumpPct>100?C.red:pumpPct>80?C.yellow:C.teal}/>
+              <div style={{display:"flex",justifyContent:"space-between",marginTop:8,color:C.muted,fontSize:12}}><span>{fmt(totalPumpM3)} m³ used</span><span>{fmt(TOTAL_PUMP_BUDGET_M3)} m³ budgeted</span></div>
+            </div>
+            <div style={{fontWeight:800,fontSize:15,marginBottom:12}}>Budget Breakdown by Category</div>
+            {PUMP_BUDGET.map(row => {
+              const used = tickets.filter(t => {
+                if (!t.area || !parseFloat(t.pump_volume_m3)) return false;
+                const a = t.area.toLowerCase();
+                const c = row.category.toLowerCase();
+                if (c.includes("mud")) return a.includes("sog") || a.includes("mud");
+                if (c.includes("foundation")) return a.includes("foundation");
+                if (c.includes("slab on grade")) return a.includes("sog") || a.includes("grade");
+                if (c.includes("sus slab")) return ["level 1","2nd","3rd","4th","5th","6th","7th","8th","9th","10th","11th","12th","13th","14th","15th","16th","17th","penthouse"].some(l => a.includes(l));
+                if (c.includes("vertical")) return a.includes("p1") || a.includes("p2") || a.includes("wall") || a.includes("column");
+                return false;
+              }).reduce((s,t) => s + (parseFloat(t.pump_volume_m3)||0), 0);
+              const pct2 = row.volume_m3 > 0 ? Math.min(100,(used/row.volume_m3)*100) : 0;
+              const over = used > row.volume_m3;
+              return (
+                <div key={row.category} style={{background:C.card,border:`1px solid ${over?C.red+"66":C.border}`,borderRadius:13,padding:"16px 20px",marginBottom:10}}>
+                  <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:8,flexWrap:"wrap",gap:8}}>
+                    <span style={{fontWeight:700}}>{row.category}</span>
+                    <div style={{display:"flex",gap:8,alignItems:"center"}}>
+                      {over && <Badge color={C.red}>⚠ Over Budget</Badge>}
+                      <Badge color={C.teal}>{fmt(used)} / {fmt(row.volume_m3)} m³</Badge>
+                      <Badge color={C.muted}>{row.hours} hrs budgeted</Badge>
+                    </div>
+                  </div>
+                  <Bar pct={pct2} color={over?C.red:pct2>80?C.yellow:C.teal}/>
+                  <div style={{display:"flex",justifyContent:"space-between",marginTop:6,color:C.muted,fontSize:12}}>
+                    <span>{fmt(used)} m³ used</span>
+                    <span style={{color:over?C.red:C.muted}}>{over ? `⚠ ${fmt(used-row.volume_m3)} m³ over` : `${fmt(row.volume_m3-used)} m³ remaining`}</span>
+                  </div>
+                </div>
+              );
+            })}
+            <div style={{marginTop:20,fontWeight:800,fontSize:15,marginBottom:12}}>Tickets with Pumping</div>
+            {tickets.filter(t=>parseFloat(t.pump_volume_m3)>0).length===0
+              ? <div style={{color:C.muted,textAlign:"center",padding:"40px 0"}}>No tickets with pumping charges yet</div>
+              : tickets.filter(t=>parseFloat(t.pump_volume_m3)>0).map(t=>(
+                <div key={t.id} style={{background:C.card,border:`1px solid ${C.border}`,borderRadius:12,padding:"14px 18px",marginBottom:8,display:"flex",justifyContent:"space-between",alignItems:"center",flexWrap:"wrap",gap:8}}>
+                  <div><span style={{fontWeight:700}}>#{t.ticket_number||"—"}</span><span style={{color:C.muted,fontSize:12,marginLeft:10}}>{t.date}</span>{t.area&&<span style={{color:C.sub,fontSize:12,marginLeft:10}}>📍 {t.area}{t.item?` — ${t.item}`:""}</span>}</div>
+                  <div style={{display:"flex",gap:8,flexWrap:"wrap"}}>
+                    <Badge color={C.teal}>{fmt(parseFloat(t.pump_volume_m3))} m³ pumped</Badge>
+                    {t.pump_cost&&<Badge color={C.green}>${parseFloat(t.pump_cost).toLocaleString(undefined,{minimumFractionDigits:2,maximumFractionDigits:2})}</Badge>}
+                  </div>
+                </div>
+              ))
+            }
+          </div>
+        )}
+
+        {tab==="testing"&&(
+          <div>
+            <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:20,flexWrap:"wrap",gap:12}}>
+              <div>
+                <div style={{fontWeight:800,fontSize:18}}>Concrete Test Reports</div>
+                <div style={{color:C.muted,fontSize:13,marginTop:2}}>{tests.length} report{tests.length!==1?"s":""} uploaded · cylinder break results</div>
+              </div>
+              <div onDragOver={e=>{e.preventDefault();}} onDrop={e=>{e.preventDefault();handleTestFiles(e.dataTransfer.files);}} onClick={()=>{ const i=document.createElement("input"); i.type="file"; i.multiple=true; i.accept="image/*,application/pdf"; i.onchange=e=>handleTestFiles(e.target.files); i.click(); }} style={{border:`2px dashed ${C.border}`,borderRadius:12,padding:"16px 24px",textAlign:"center",cursor:"pointer",background:C.card}}>
+                <div style={{fontSize:22,marginBottom:4}}>🔬</div>
+                <div style={{fontWeight:700,fontSize:13}}>Upload Test Reports</div>
+                <div style={{color:C.muted,fontSize:11}}>PDF or photo · AI extracts results</div>
+              </div>
+            </div>
+            {tests.length===0
+              ? <div style={{color:C.muted,textAlign:"center",padding:"60px 0",fontSize:15}}>No test reports uploaded yet<br/><span style={{fontSize:13}}>Upload lab cylinder break reports to track 7/14/28 day results</span></div>
+              : tests.map(test => {
+                const allPass = test.results?.every(r=>r.result==="pass"||r.result==="pending");
+                const anyFail = test.results?.some(r=>r.result==="fail");
+                const latestBreak = test.results?.filter(r=>r.strength_mpa).sort((a,b)=>b.age_days-a.age_days)[0];
+                return (
+                  <div key={test.id} style={{background:C.card,border:`1px solid ${anyFail?C.red+"66":allPass?C.green+"33":C.border}`,borderRadius:14,padding:"18px 22px",marginBottom:14}}>
+                    <div style={{display:"flex",justifyContent:"space-between",alignItems:"flex-start",flexWrap:"wrap",gap:10,marginBottom:14}}>
+                      <div>
+                        <div style={{fontWeight:800,fontSize:15}}>Report #{test.report_number||"—"}</div>
+                        <div style={{color:C.muted,fontSize:12,marginTop:3}}>
+                          Sampled: {test.date_sampled||"—"} · {test.lab_name||"Lab unknown"}
+                          {test.pour_area&&<span style={{marginLeft:10,color:C.sub}}>📍 {test.pour_area}{test.pour_element?` — ${test.pour_element}`:""}</span>}
+                        </div>
+                      </div>
+                      <div style={{display:"flex",gap:7,flexWrap:"wrap",alignItems:"center"}}>
+                        {test.mix_design&&<Badge color={C.accent}>{test.mix_design}</Badge>}
+                        {anyFail?<Badge color={C.red}>⚠ FAIL</Badge>:allPass&&test.results?.some(r=>r.result==="pass")?<Badge color={C.green}>✓ PASS</Badge>:<Badge color={C.yellow}>⏳ Pending</Badge>}
+                        <button onClick={()=>setTests(prev=>prev.filter(x=>x.id!==test.id))} style={{background:"transparent",border:`1px solid ${C.red}44`,color:C.red,borderRadius:6,padding:"3px 9px",fontSize:12,fontWeight:700,cursor:"pointer"}}>✕</button>
+                      </div>
+                    </div>
+                    <div style={{display:"flex",gap:10,flexWrap:"wrap",marginBottom:12}}>
+                      {test.slump_mm!=null&&<div style={{background:C.bg,borderRadius:8,padding:"8px 14px",fontSize:12}}><span style={{color:C.muted}}>Slump </span><span style={{fontWeight:700}}>{test.slump_mm} mm</span></div>}
+                      {test.air_content_pct!=null&&<div style={{background:C.bg,borderRadius:8,padding:"8px 14px",fontSize:12}}><span style={{color:C.muted}}>Air </span><span style={{fontWeight:700}}>{test.air_content_pct}%</span></div>}
+                      {test.specified_mpa!=null&&<div style={{background:C.bg,borderRadius:8,padding:"8px 14px",fontSize:12}}><span style={{color:C.muted}}>Spec </span><span style={{fontWeight:700}}>{test.specified_mpa} MPa</span></div>}
+                      {latestBreak&&<div style={{background:C.bg,borderRadius:8,padding:"8px 14px",fontSize:12}}><span style={{color:C.muted}}>Latest ({latestBreak.age_days}d) </span><span style={{fontWeight:700,color:latestBreak.result==="fail"?C.red:C.green}}>{latestBreak.strength_mpa} MPa</span></div>}
+                    </div>
+                    <div style={{display:"flex",gap:8,flexWrap:"wrap"}}>
+                      {(test.results||[]).map((r,i)=>(
+                        <div key={i} style={{background:r.result==="fail"?C.red+"22":r.result==="pass"?C.green+"22":C.bg,border:`1px solid ${r.result==="fail"?C.red+"66":r.result==="pass"?C.green+"44":C.border}`,borderRadius:10,padding:"10px 16px",minWidth:90,textAlign:"center"}}>
+                          <div style={{color:C.muted,fontSize:11,fontWeight:700}}>{r.age_days} DAY</div>
+                          <div style={{fontWeight:800,fontSize:18,color:r.result==="fail"?C.red:r.result==="pass"?C.green:C.muted,margin:"4px 0"}}>{r.strength_mpa!=null?`${r.strength_mpa}`:"—"}<span style={{fontSize:11,fontWeight:400}}> MPa</span></div>
+                          <div style={{fontSize:11,color:r.result==="fail"?C.red:r.result==="pass"?C.green:C.muted,fontWeight:700}}>{r.result==="pending"?"PENDING":r.result?.toUpperCase()}</div>
+                          {r.break_date&&<div style={{fontSize:10,color:C.muted,marginTop:3}}>{r.break_date}</div>}
+                        </div>
+                      ))}
+                    </div>
+                    {test.notes&&<div style={{marginTop:12,color:C.muted,fontSize:12,borderTop:`1px solid ${C.border}`,paddingTop:10}}>📝 {test.notes}</div>}
+                  </div>
+                );
+              })
+            }
           </div>
         )}
 
