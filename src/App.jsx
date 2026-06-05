@@ -1,4 +1,4 @@
-import { useState, useRef } from "react";
+import { useState, useRef, useEffect } from "react";
 import * as XLSX from "xlsx";
 
 // ─── COLORS ───────────────────────────────────────────────────────────────────
@@ -8,6 +8,43 @@ const C = {
   yellow: "#EAB308", red: "#EF4444", purple: "#A855F7",
   muted: "#6B7280", text: "#F9FAFB", sub: "#9CA3AF", teal: "#14B8A6",
 };
+
+// ─── UPSTASH STORAGE HELPERS ─────────────────────────────────────────────────
+// Uses Upstash Redis REST API — set these two env vars in your Vercel project:
+//   VITE_UPSTASH_REDIS_REST_URL  (e.g. https://xxxx.upstash.io)
+//   VITE_UPSTASH_REDIS_REST_TOKEN
+const UPSTASH_URL   = import.meta.env.VITE_UPSTASH_REDIS_REST_KV_REST_API_URL;
+const UPSTASH_TOKEN = import.meta.env.VITE_UPSTASH_REDIS_REST_KV_REST_API_TOKEN;
+
+async function upstashCmd(...args) {
+  if (!UPSTASH_URL || !UPSTASH_TOKEN) return null;
+  try {
+    const res = await fetch(`${UPSTASH_URL}/${args.map(encodeURIComponent).join("/")}`, {
+      headers: { Authorization: `Bearer ${UPSTASH_TOKEN}` }
+    });
+    const data = await res.json();
+    return data.result ?? null;
+  } catch { return null; }
+}
+
+async function storageGet(key) {
+  try {
+    const raw = await upstashCmd("GET", key);
+    return raw ? JSON.parse(raw) : null;
+  } catch { return null; }
+}
+async function storageSet(key, value) {
+  try {
+    await upstashCmd("SET", key, JSON.stringify(value));
+    return true;
+  } catch { return false; }
+}
+async function storageDel(key) {
+  try {
+    await upstashCmd("DEL", key);
+    return true;
+  } catch { return false; }
+}
 
 // ─── CERT TYPES ───────────────────────────────────────────────────────────────
 const CERT_TYPES = [
@@ -260,7 +297,22 @@ function CertsModule({ onBack }) {
   const [manualOpen, setManualOpen] = useState(false);
   const [manual, setManual] = useState({ worker_name:"", employer:"", cert_type:"", issued_date:"", expiry_date:"", cert_number:"", notes:"" });
   const [filterExpiry, setFilterExpiry] = useState("all");
+  const [storageReady, setStorageReady] = useState(false);
   const fileRef = useRef();
+
+  // ── Load from storage on mount ──
+  useEffect(() => {
+    storageGet("certs-data").then(saved => {
+      if (saved?.certs) setCerts(saved.certs);
+      setStorageReady(true);
+    });
+  }, []);
+
+  // ── Save to storage whenever certs change ──
+  useEffect(() => {
+    if (!storageReady) return;
+    storageSet("certs-data", { certs });
+  }, [certs, storageReady]);
 
   function showToast(msg, type="ok") {
     setToast({ msg, type });
@@ -301,9 +353,9 @@ Return ONLY valid JSON (no markdown):
   "notes": "any other relevant info such as restrictions or endorsements, else null"
 }`;
 
-    const res = await fetch("/api/claude", {
+    const res = await fetch("https://api.anthropic.com/v1/messages", {
       method:"POST",
-      headers:{ "Content-Type":"application/json", },
+      headers:{ "Content-Type":"application/json" },
       body: JSON.stringify({ model:"claude-sonnet-4-6", max_tokens:1000,
         messages:[{ role:"user", content:[block, { type:"text", text:prompt }] }] })
     });
@@ -493,7 +545,13 @@ Return ONLY valid JSON (no markdown):
             <div style={{ color:C.muted, fontSize:12 }}>{certs.length} certificates · {workers.length} workers{expired.length>0?` · ⚠ ${expired.length} expired`:""}{ critical.length>0?` · ⚠ ${critical.length} expiring soon`:""}</div>
           </div>
         </div>
-        <button onClick={exportXLSX} style={{ background:C.green, color:"#052e16", border:"none", borderRadius:9, padding:"10px 22px", fontWeight:800, fontSize:14, cursor:"pointer" }}>⬇ Export .xlsx</button>
+        <div style={{ display:"flex", gap:8, alignItems:"center" }}>
+          <span style={{ fontSize:11, color:storageReady?C.green:C.muted, fontWeight:700 }}>
+            {storageReady ? "💾 Auto-saved" : "⏳ Loading..."}
+          </span>
+          <button onClick={async()=>{ if(!window.confirm("Clear ALL certificates? This cannot be undone.")) return; await storageDel("certs-data"); setCerts([]); showToast("All data cleared."); }} style={{ background:"transparent", color:C.red, border:`1px solid ${C.red}44`, borderRadius:7, padding:"5px 11px", fontSize:11, fontWeight:700, cursor:"pointer" }}>🗑 Clear Data</button>
+          <button onClick={exportXLSX} style={{ background:C.green, color:"#052e16", border:"none", borderRadius:9, padding:"10px 22px", fontWeight:800, fontSize:14, cursor:"pointer" }}>⬇ Export .xlsx</button>
+        </div>
       </div>
 
       {/* Alert bar */}
@@ -583,7 +641,10 @@ Return ONLY valid JSON (no markdown):
                         <span style={{ fontWeight:800, fontSize:15 }}>👷 {c.worker_name||"Unknown Worker"}</span>
                         {c.employer && <span style={{ color:C.muted, fontSize:12, marginLeft:10 }}>{c.employer}</span>}
                       </div>
-                      <Badge color={s.color}>{s.label}</Badge>
+                      <div style={{ display:"flex", gap:7, alignItems:"center" }}>
+                        <Badge color={s.color}>{s.label}</Badge>
+                        <button onClick={e=>{ e.stopPropagation(); if(window.confirm(`Delete cert for ${c.worker_name}?`)) setCerts(prev=>prev.filter(x=>x.id!==c.id)); }} style={{ background:"transparent", border:`1px solid ${C.red}44`, color:C.red, borderRadius:6, padding:"3px 9px", fontSize:12, fontWeight:700, cursor:"pointer" }}>✕</button>
+                      </div>
                     </div>
                     <div style={{ fontWeight:600, color:C.teal, fontSize:14, marginBottom:6 }}>{c.cert_type||"Unknown Cert"}</div>
                     <div style={{ display:"flex", gap:16, fontSize:12, color:C.sub, flexWrap:"wrap" }}>
@@ -730,27 +791,24 @@ function ConcreteModule({ onBack }) {
   const [ratePerM3, setRatePerM3] = useState("");
   const [manual, setManual] = useState({ date:"",ticket_number:"",supplier:"",mix_design:"",volume_m3:"",volume_yd3:"",area:"",item:"",invoice_number:"",notes:"" });
   const [reviewQueue, setReviewQueue] = useState([]); // tickets pending area/element confirmation
-  // ── Pumping ──────────────────────────────────────────────────────────────────
-  // Each category has a volume estimate ($/m³) and hourly estimate ($/hr)
-  const PUMP_CATEGORIES = [
-    { key:"mud_slabs",       label:"Mud Slabs",          est_volume: 185,    est_hourly: 6.16   },
-    { key:"foundations",     label:"Foundations",        est_volume: 785,    est_hourly: 39.25  },
-    { key:"slab_on_grade",   label:"Slab on Grade",      est_volume: 305,    est_hourly: 19.04  },
-    { key:"sus_slabs_l6",    label:"Sus Slabs up to L6", est_volume: 166.55, est_hourly: 3331   },
-    { key:"verticals_l6",   label:"Verticals up to L6", est_volume: 1102,   est_hourly: 92     },
-  ];
-  const TOTAL_PUMP_BUDGET = PUMP_CATEGORIES.reduce((s,c)=>s+c.est_volume+c.est_hourly, 0);
-  const [pumpCharges, setPumpCharges]   = useState([]); // {id, date, ticket_number, category, charge_type, volume_m3, rate_per_m3, flat_amount, amount, notes}
-  const [pumpForm, setPumpForm]         = useState({ date:"", ticket_number:"", category:"", charge_type:"volume", volume_m3:"", rate_per_m3:"", flat_amount:"", notes:"" });
-  const [pumpFormOpen, setPumpFormOpen] = useState(false);
-  // ── Concrete Tests ────────────────────────────────────────────────────────────
-  const [testReports, setTestReports]   = useState([]); // {id, area, date, notes, filename, dataURL}
-  const [testForm, setTestForm]         = useState({ area:"", date:"", notes:"" });
-  const [testFormOpen, setTestFormOpen] = useState(false);
-  const testFileRef = useRef();
-
+  const [storageReady, setStorageReady] = useState(false);
   const fileRef    = useRef();
   const invFileRef = useRef();
+
+  // ── Load from storage on mount ──
+  useEffect(() => {
+    storageGet("concrete-data").then(saved => {
+      if (saved?.tickets)  setTickets(saved.tickets);
+      if (saved?.invoices) setInvoices(saved.invoices);
+      setStorageReady(true);
+    });
+  }, []);
+
+  // ── Save to storage whenever tickets or invoices change ──
+  useEffect(() => {
+    if (!storageReady) return;
+    storageSet("concrete-data", { tickets, invoices });
+  }, [tickets, invoices, storageReady]);
 
   function showToast(msg, type="ok") { setToast({msg,type}); setTimeout(()=>setToast(null),3500); }
   async function toB64(file) { return new Promise((res,rej)=>{ const r=new FileReader(); r.onload=()=>res(r.result.split(",")[1]); r.onerror=rej; r.readAsDataURL(file); }); }
@@ -784,7 +842,7 @@ CRITICAL FIELD EXTRACTION RULES — read carefully:
 
 Return ONLY a valid JSON array (even if only one ticket). No markdown, no explanation:
 [{"date":"YYYY-MM-DD","ticket_number":"7-8 digit from TICKET NO field","supplier":"supplier name","mix_design":"MPa strength and mix code e.g. 35 MPa N 20mm or Q35NA1A","volume_m3":number or null,"volume_yd3":number or null,"area":"best match from area list or null","item":"best match from element list or null","invoice_number":"string or null","driver":"string or null","truck_number":"string or null","notes":"string or null"}]`;
-    const res = await fetch("/api/claude",{method:"POST",headers:{"Content-Type":"application/json",},body:JSON.stringify({model:"claude-sonnet-4-6",max_tokens:4000,messages:[{role:"user",content:[block,{type:"text",text:prompt}]}]})});
+    const res = await fetch("https://api.anthropic.com/v1/messages",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({model:"claude-sonnet-4-6",max_tokens:4000,messages:[{role:"user",content:[block,{type:"text",text:prompt}]}]})});
     const data = await res.json();
     if(data.error) throw new Error("API error: "+(data.error.message||JSON.stringify(data.error)));
     const text = data.content?.map(b=>b.text||"").join("")||"";
@@ -800,7 +858,7 @@ Return ONLY a valid JSON array (even if only one ticket). No markdown, no explan
     const prompt = `You are a construction accounts assistant. Extract ALL information from this concrete supplier invoice.
 Return ONLY valid JSON (no markdown):
 {"invoice_number":"string","invoice_date":"YYYY-MM-DD","supplier":"name","total_amount":number or null,"currency":"CAD/USD/AUD","ticket_numbers":["array"],"total_volume_m3":number or null,"total_volume_yd3":number or null,"line_items":[{"description":"string","quantity":number or null,"unit":"string","unit_price":number or null,"amount":number or null}],"notes":"string or null"}`;
-    const res = await fetch("/api/claude",{method:"POST",headers:{"Content-Type":"application/json",},body:JSON.stringify({model:"claude-sonnet-4-6",max_tokens:1500,messages:[{role:"user",content:[block,{type:"text",text:prompt}]}]})});
+    const res = await fetch("https://api.anthropic.com/v1/messages",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({model:"claude-sonnet-4-6",max_tokens:1500,messages:[{role:"user",content:[block,{type:"text",text:prompt}]}]})});
     const data = await res.json();
     if(data.error) throw new Error("API error: "+(data.error.message||JSON.stringify(data.error)));
     const text = data.content?.map(b=>b.text||"").join("")||"";
@@ -967,146 +1025,6 @@ function extractJSON(text) {
     else showToast("Ticket added ✓");
   }
 
-  // ── Pumping helpers ─────────────────────────────────────────────────────────
-  function addPumpCharge() {
-    const f = pumpForm;
-    if (!f.date && !f.ticket_number) { showToast("Enter at least a date or ticket #.","err"); return; }
-    const vol  = parseFloat(f.volume_m3)   || 0;
-    const rate = parseFloat(f.rate_per_m3) || 0;
-    const flat = parseFloat(f.flat_amount) || 0;
-    const amount = flat > 0 ? flat : (vol * rate);
-    setPumpCharges(prev => [...prev, { id: Date.now(), ...f, volume_m3: vol||null, rate_per_m3: rate||null, flat_amount: flat||null, amount }]);
-    setPumpForm({ date:"", ticket_number:"", category:"", charge_type:"volume", volume_m3:"", rate_per_m3:"", flat_amount:"", notes:"" });
-    setPumpFormOpen(false);
-    showToast("Pump charge added ✓");
-  }
-
-  function PumpModal() {
-    const [lf, setLf] = useState(pumpForm);
-    const cat = PUMP_CATEGORIES.find(c=>c.key===lf.category);
-    const vol  = parseFloat(lf.volume_m3)   || 0;
-    const rate = parseFloat(lf.rate_per_m3) || 0;
-    const flat = parseFloat(lf.flat_amount) || 0;
-    const previewAmt = flat > 0 ? flat : vol * rate;
-    return (
-      <div style={{position:"fixed",inset:0,background:"#000b",zIndex:100,display:"flex",alignItems:"center",justifyContent:"center"}} onClick={e=>e.target===e.currentTarget&&setPumpFormOpen(false)}>
-        <div style={{background:C.card,border:`1px solid ${C.border}`,borderRadius:16,padding:30,width:"92%",maxWidth:480,maxHeight:"90vh",overflowY:"auto"}}>
-          <div style={{fontWeight:800,fontSize:18,marginBottom:20}}>💧 Add Pump Charge</div>
-
-          <div style={{display:"flex",gap:10,marginBottom:12}}>
-            <div style={{flex:1}}>
-              <label style={{display:"block",color:C.muted,fontSize:10,fontWeight:700,letterSpacing:1,textTransform:"uppercase",marginBottom:4}}>Date</label>
-              <input type="date" value={lf.date} onChange={e=>setLf(p=>({...p,date:e.target.value}))} style={{width:"100%",background:C.bg,border:`1px solid ${C.border}`,borderRadius:8,padding:"9px 12px",color:C.text,fontSize:14,boxSizing:"border-box"}}/>
-            </div>
-            <div style={{flex:1}}>
-              <label style={{display:"block",color:C.muted,fontSize:10,fontWeight:700,letterSpacing:1,textTransform:"uppercase",marginBottom:4}}>Ticket #</label>
-              <input type="text" value={lf.ticket_number} onChange={e=>setLf(p=>({...p,ticket_number:e.target.value}))} style={{width:"100%",background:C.bg,border:`1px solid ${C.border}`,borderRadius:8,padding:"9px 12px",color:C.text,fontSize:14,boxSizing:"border-box"}}/>
-            </div>
-          </div>
-
-          <div style={{marginBottom:12}}>
-            <label style={{display:"block",color:C.muted,fontSize:10,fontWeight:700,letterSpacing:1,textTransform:"uppercase",marginBottom:4}}>Pump Category</label>
-            <select value={lf.category} onChange={e=>setLf(p=>({...p,category:e.target.value}))} style={{width:"100%",background:C.bg,border:`1px solid ${C.border}`,borderRadius:8,padding:"9px 12px",color:C.text,fontSize:14,boxSizing:"border-box"}}>
-              <option value="">— select category —</option>
-              {PUMP_CATEGORIES.map(c=><option key={c.key} value={c.key}>{c.label}</option>)}
-            </select>
-            {cat&&<div style={{marginTop:6,fontSize:12,color:C.muted}}>Estimates — <span style={{color:C.teal}}>Volume: ${cat.est_volume.toLocaleString()}</span> · <span style={{color:C.purple}}>Hourly: ${cat.est_hourly.toLocaleString()}</span></div>}
-          </div>
-
-          <div style={{marginBottom:12}}>
-            <label style={{display:"block",color:C.muted,fontSize:10,fontWeight:700,letterSpacing:1,textTransform:"uppercase",marginBottom:6}}>Charge Type</label>
-            <div style={{display:"flex",gap:8}}>
-              {[["volume","📦 Volume"],["hourly","⏱ Hourly"],["flat","💵 Flat"]].map(([t,l])=>(
-                <button key={t} onClick={()=>setLf(p=>({...p,charge_type:t}))} style={{flex:1,padding:"8px 0",borderRadius:8,border:`1px solid ${lf.charge_type===t?C.teal:C.border}`,background:lf.charge_type===t?C.teal+"22":"transparent",color:lf.charge_type===t?C.teal:C.muted,fontWeight:700,fontSize:12,cursor:"pointer"}}>{l}</button>
-              ))}
-            </div>
-          </div>
-
-          {lf.charge_type==="flat" ? (
-            <div style={{marginBottom:12}}>
-              <label style={{display:"block",color:C.muted,fontSize:10,fontWeight:700,letterSpacing:1,textTransform:"uppercase",marginBottom:4}}>Flat Amount ($)</label>
-              <input type="number" value={lf.flat_amount} onChange={e=>setLf(p=>({...p,flat_amount:e.target.value}))} style={{width:"100%",background:C.bg,border:`1px solid ${C.border}`,borderRadius:8,padding:"9px 12px",color:C.text,fontSize:14,boxSizing:"border-box"}}/>
-            </div>
-          ) : (
-            <div style={{display:"flex",gap:10,marginBottom:12}}>
-              <div style={{flex:1}}>
-                <label style={{display:"block",color:C.muted,fontSize:10,fontWeight:700,letterSpacing:1,textTransform:"uppercase",marginBottom:4}}>{lf.charge_type==="hourly"?"Hours":"Volume (m³)"}</label>
-                <input type="number" value={lf.volume_m3} onChange={e=>setLf(p=>({...p,volume_m3:e.target.value}))} style={{width:"100%",background:C.bg,border:`1px solid ${C.border}`,borderRadius:8,padding:"9px 12px",color:C.text,fontSize:14,boxSizing:"border-box"}}/>
-              </div>
-              <div style={{flex:1}}>
-                <label style={{display:"block",color:C.muted,fontSize:10,fontWeight:700,letterSpacing:1,textTransform:"uppercase",marginBottom:4}}>{lf.charge_type==="hourly"?"Rate ($/hr)":"Rate ($/m³)"}</label>
-                <input type="number" value={lf.rate_per_m3} onChange={e=>setLf(p=>({...p,rate_per_m3:e.target.value}))} style={{width:"100%",background:C.bg,border:`1px solid ${C.border}`,borderRadius:8,padding:"9px 12px",color:C.text,fontSize:14,boxSizing:"border-box"}}/>
-              </div>
-            </div>
-          )}
-
-          <div style={{marginBottom:16}}>
-            <label style={{display:"block",color:C.muted,fontSize:10,fontWeight:700,letterSpacing:1,textTransform:"uppercase",marginBottom:4}}>Notes</label>
-            <input type="text" value={lf.notes} onChange={e=>setLf(p=>({...p,notes:e.target.value}))} style={{width:"100%",background:C.bg,border:`1px solid ${C.border}`,borderRadius:8,padding:"9px 12px",color:C.text,fontSize:14,boxSizing:"border-box"}}/>
-          </div>
-
-          {previewAmt > 0 && (
-            <div style={{background:"#1a2e1a",border:`1px solid ${C.green}44`,borderRadius:8,padding:"10px 14px",marginBottom:12,fontSize:13,color:C.green}}>
-              Charge: <b>${previewAmt.toFixed(2)}</b>
-              {lf.charge_type!=="flat"&&vol>0&&<span style={{color:C.muted,marginLeft:8}}>· {vol} {lf.charge_type==="hourly"?"hrs":"m³"} × ${rate}/{lf.charge_type==="hourly"?"hr":"m³"}</span>}
-            </div>
-          )}
-
-          <div style={{display:"flex",gap:10,marginTop:4}}>
-            <button onClick={()=>{setPumpForm(lf);addPumpCharge();}} style={{background:C.teal,color:"#fff",border:"none",borderRadius:9,padding:"11px 0",fontWeight:800,cursor:"pointer",flex:1}}>Add Charge</button>
-            <button onClick={()=>setPumpFormOpen(false)} style={{background:C.bg,color:C.muted,border:`1px solid ${C.border}`,borderRadius:9,padding:"11px 18px",fontWeight:700,cursor:"pointer"}}>Cancel</button>
-          </div>
-        </div>
-      </div>
-    );
-  }
-  // ── Test report helpers ─────────────────────────────────────────────────────
-  async function handleTestFiles(files) {
-    if (!files?.length) return;
-    for (const file of Array.from(files)) {
-      if (file.type !== "application/pdf") { showToast("Only PDFs accepted for test reports.","err"); continue; }
-      const dataURL = await toDataURL(file);
-      const entry = { id: Date.now()+Math.random(), filename: file.name, dataURL, added_at: new Date().toISOString(), ...testForm };
-      setTestReports(prev => [...prev, entry]);
-      showToast(`Test report "${file.name}" saved ✓`);
-    }
-    setTestForm({ area:"", date:"", notes:"" });
-    setTestFormOpen(false);
-  }
-
-  function TestModal() {
-    const [lf, setLf] = useState(testForm);
-    const localFileRef = useRef();
-    return (
-      <div style={{position:"fixed",inset:0,background:"#000b",zIndex:100,display:"flex",alignItems:"center",justifyContent:"center"}} onClick={e=>e.target===e.currentTarget&&setTestFormOpen(false)}>
-        <div style={{background:C.card,border:`1px solid ${C.border}`,borderRadius:16,padding:30,width:"92%",maxWidth:460}}>
-          <div style={{fontWeight:800,fontSize:18,marginBottom:20}}>🧪 Attach Test Report</div>
-          <div style={{marginBottom:12}}>
-            <label style={{display:"block",color:C.muted,fontSize:10,fontWeight:700,letterSpacing:1,textTransform:"uppercase",marginBottom:4}}>Area</label>
-            <select value={lf.area} onChange={e=>setLf(p=>({...p,area:e.target.value}))} style={{width:"100%",background:C.bg,border:`1px solid ${C.border}`,borderRadius:8,padding:"9px 12px",color:C.text,fontSize:14,boxSizing:"border-box"}}>
-              <option value="">— select —</option>{AREAS.map(a=><option key={a} value={a}>{a}</option>)}
-            </select>
-          </div>
-          <div style={{marginBottom:12}}>
-            <label style={{display:"block",color:C.muted,fontSize:10,fontWeight:700,letterSpacing:1,textTransform:"uppercase",marginBottom:4}}>Pour Date</label>
-            <input type="date" value={lf.date} onChange={e=>setLf(p=>({...p,date:e.target.value}))} style={{width:"100%",background:C.bg,border:`1px solid ${C.border}`,borderRadius:8,padding:"9px 12px",color:C.text,fontSize:14,boxSizing:"border-box"}}/>
-          </div>
-          <div style={{marginBottom:16}}>
-            <label style={{display:"block",color:C.muted,fontSize:10,fontWeight:700,letterSpacing:1,textTransform:"uppercase",marginBottom:4}}>Notes</label>
-            <input type="text" value={lf.notes} onChange={e=>setLf(p=>({...p,notes:e.target.value}))} placeholder="e.g. P1 Slab — Set 1" style={{width:"100%",background:C.bg,border:`1px solid ${C.border}`,borderRadius:8,padding:"9px 12px",color:C.text,fontSize:14,boxSizing:"border-box"}}/>
-          </div>
-          <div onClick={()=>localFileRef.current.click()} style={{border:`2px dashed ${C.border}`,borderRadius:12,padding:"24px 20px",textAlign:"center",cursor:"pointer",marginBottom:16,background:C.bg}}>
-            <div style={{fontSize:28,marginBottom:6}}>📄</div>
-            <div style={{fontWeight:700,fontSize:14,marginBottom:3}}>Choose PDF Report</div>
-            <div style={{color:C.muted,fontSize:12}}>Tap to browse</div>
-            <input ref={localFileRef} type="file" accept="application/pdf" multiple style={{display:"none"}} onChange={e=>{setTestForm(lf);handleTestFiles(e.target.files);}}/>
-          </div>
-          <button onClick={()=>setTestFormOpen(false)} style={{background:C.bg,color:C.muted,border:`1px solid ${C.border}`,borderRadius:9,padding:"11px 18px",fontWeight:700,cursor:"pointer",width:"100%"}}>Cancel</button>
-        </div>
-      </div>
-    );
-  }
-
   const TAB=(t,label)=>(<button onClick={()=>setTab(t)} style={{padding:"8px 16px",borderRadius:8,cursor:"pointer",fontWeight:700,fontSize:12,border:"none",background:tab===t?C.accent:"transparent",color:tab===t?"#fff":C.muted,transition:"all .15s",whiteSpace:"nowrap"}}>{label}</button>);
   const INPUT=(key,label,type="text",opts=null)=>(<div style={{marginBottom:12}}><label style={{display:"block",color:C.muted,fontSize:10,fontWeight:700,letterSpacing:1,textTransform:"uppercase",marginBottom:4}}>{label}</label>{opts?<select value={manual[key]} onChange={e=>setManual(m=>({...m,[key]:e.target.value}))} style={{width:"100%",background:C.bg,border:`1px solid ${C.border}`,borderRadius:8,padding:"9px 12px",color:C.text,fontSize:14,boxSizing:"border-box"}}><option value="">— select —</option>{opts.map(o=><option key={o} value={o}>{o}</option>)}</select>:<input type={type} value={manual[key]} onChange={e=>setManual(m=>({...m,[key]:e.target.value}))} style={{width:"100%",background:C.bg,border:`1px solid ${C.border}`,borderRadius:8,padding:"9px 12px",color:C.text,fontSize:14,boxSizing:"border-box"}}/>}</div>);
 
@@ -1178,7 +1096,13 @@ function extractJSON(text) {
             <div style={{color:C.muted,fontSize:12}}>9133.5 m³ scope · {tickets.length} tickets · {invoices.length} invoices{mpaMismatches.length>0?` · ⚠ ${mpaMismatches.length} MPa mismatch${mpaMismatches.length>1?"es":""}`:""}</div>
           </div>
         </div>
-        <button onClick={exportXLSX} style={{background:C.green,color:"#052e16",border:"none",borderRadius:9,padding:"10px 22px",fontWeight:800,fontSize:14,cursor:"pointer"}}>⬇ Export .xlsx</button>
+        <div style={{display:"flex",gap:8,alignItems:"center"}}>
+          <span style={{fontSize:11,color:storageReady?C.green:C.muted,fontWeight:700}}>
+            {storageReady ? "💾 Auto-saved" : "⏳ Loading..."}
+          </span>
+          <button onClick={async()=>{ if(!window.confirm("Clear ALL tickets and invoices? This cannot be undone.")) return; await storageDel("concrete-data"); setTickets([]); setInvoices([]); showToast("All data cleared."); }} style={{background:"transparent",color:C.red,border:`1px solid ${C.red}44`,borderRadius:7,padding:"5px 11px",fontSize:11,fontWeight:700,cursor:"pointer"}}>🗑 Clear Data</button>
+          <button onClick={exportXLSX} style={{background:C.green,color:"#052e16",border:"none",borderRadius:9,padding:"10px 22px",fontWeight:800,fontSize:14,cursor:"pointer"}}>⬇ Export .xlsx</button>
+        </div>
       </div>
 
       {mpaMismatches.length>0&&<div style={{background:"#450a0a",borderBottom:`1px solid ${C.red}`,padding:"10px 28px",display:"flex",alignItems:"center",gap:12}}>
@@ -1190,10 +1114,8 @@ function extractJSON(text) {
         {TAB("dashboard","📊 Dashboard")}
         {TAB("tickets",`🧾 Tickets (${tickets.length})${mpaMismatches.length>0?" ⚠":""}`)}
         {TAB("invoices",`💰 Invoices (${invoices.length})${invoicesWithIssues>0?` ⚠${invoicesWithIssues}`:""}`)}
-        {TAB("pumping",`💧 Pumping (${pumpCharges.length})`)}
-        {TAB("tests",`🧪 Test Reports (${testReports.length})`)}
         {TAB("remaining","🔮 Remaining Works")}
-        {TAB("mpa","📐 By MPa")}
+        {TAB("mpa","🧪 By MPa")}
         {TAB("scope","📋 Full Scope")}
       </div>
 
@@ -1206,8 +1128,6 @@ function extractJSON(text) {
               <Stat label="Tickets"        value={tickets.length}             sub="dockets scanned"                    color={C.blue}/>
               <Stat label="MPa Mismatches" value={mpaMismatches.length}       sub={mpaMismatches.length>0?"⚠ review required":"✓ all clear"} color={mpaMismatches.length>0?C.red:C.green}/>
               <Stat label="Invoices"       value={invoices.length}            sub={invoicesWithIssues>0?`⚠ ${invoicesWithIssues} need review`:invoices.length>0?"✓ all matched":"none yet"} color={invoicesWithIssues>0?C.red:C.purple}/>
-              <Stat label="Pump Charged"   value={`$${pumpCharges.reduce((s,c)=>s+(c.amount||0),0).toLocaleString("en-CA",{minimumFractionDigits:0,maximumFractionDigits:0})}`} sub={`${fmt(pumpCharges.reduce((s,c)=>s+(c.volume_m3||0),0),1)} m³ pumped`} color={C.teal}/>
-              <Stat label="Test Reports"   value={testReports.length}         sub="PDFs attached"                      color={C.purple}/>
             </div>
             <div style={{background:C.card,border:`1px solid ${C.border}`,borderRadius:14,padding:"20px 24px",marginBottom:24}}>
               <div style={{display:"flex",justifyContent:"space-between",marginBottom:10}}><span style={{fontWeight:700}}>Overall Progress</span><span style={{color:C.accent,fontWeight:800,fontFamily:"monospace"}}>{fmt(pct,1)}%</span></div>
@@ -1338,10 +1258,11 @@ function extractJSON(text) {
               return(<div key={t.id} onClick={()=>setSelectedTicket(t)} style={{background:C.card,border:`1px solid ${mismatch?C.red+"88":C.border}`,borderRadius:12,padding:"15px 20px",marginBottom:12,cursor:"pointer"}}>
                 <div style={{display:"flex",justifyContent:"space-between",alignItems:"flex-start",marginBottom:8,flexWrap:"wrap",gap:8}}>
                   <div><span style={{fontWeight:800,fontSize:15}}>{t.ticket_number||"No ticket #"}</span><span style={{color:C.muted,fontSize:12,marginLeft:10}}>{t.date||"No date"}</span></div>
-                  <div style={{display:"flex",gap:7,flexWrap:"wrap"}}>
+                  <div style={{display:"flex",gap:7,flexWrap:"wrap",alignItems:"center"}}>
                     {t.volume_m3&&<Badge color={C.accent}>{parseFloat(t.volume_m3).toFixed(2)} m³</Badge>}
                     {t.mix_design&&<Badge color={mismatch?C.red:C.green}>{t.mix_design}{mismatch?" ⚠":""}</Badge>}
                     {specMpa&&!mismatch&&<Badge color={C.muted}>spec: {specMpa}</Badge>}
+                    <button onClick={e=>{ e.stopPropagation(); if(window.confirm(`Delete ticket #${t.ticket_number||"this ticket"}?`)) setTickets(prev=>prev.filter(x=>x.id!==t.id)); }} style={{background:"transparent",border:`1px solid ${C.red}44`,color:C.red,borderRadius:6,padding:"3px 9px",fontSize:12,fontWeight:700,cursor:"pointer"}}>✕</button>
                   </div>
                 </div>
                 <div style={{display:"flex",gap:16,flexWrap:"wrap",fontSize:13,color:C.sub}}>
@@ -1367,7 +1288,9 @@ function extractJSON(text) {
               return(<div key={inv.id} onClick={()=>setSelectedInvoice(inv)} style={{background:C.card,border:`1px solid ${hasIssues?C.red+"66":C.border}`,borderRadius:12,padding:"16px 20px",marginBottom:12,cursor:"pointer"}}>
                 <div style={{display:"flex",justifyContent:"space-between",alignItems:"flex-start",marginBottom:10,flexWrap:"wrap",gap:8}}>
                   <div><span style={{fontWeight:800,fontSize:15}}>Invoice {inv.invoice_number||"—"}</span><span style={{color:C.muted,fontSize:12,marginLeft:10}}>{inv.invoice_date}</span></div>
-                  <div style={{display:"flex",gap:7,flexWrap:"wrap"}}>{inv.total_amount>0&&<Badge color={C.green}>{inv.currency||""} {inv.total_amount?.toLocaleString()}</Badge>}<Badge color={hasIssues?C.red:C.green}>{hasIssues?"⚠ Review":"✓ Matched"}</Badge></div>
+                  <div style={{display:"flex",gap:7,flexWrap:"wrap",alignItems:"center"}}>{inv.total_amount>0&&<Badge color={C.green}>{inv.currency||""} {inv.total_amount?.toLocaleString()}</Badge>}<Badge color={hasIssues?C.red:C.green}>{hasIssues?"⚠ Review":"✓ Matched"}</Badge>
+                    <button onClick={e=>{ e.stopPropagation(); if(window.confirm(`Delete invoice ${inv.invoice_number||"this invoice"}?`)) setInvoices(prev=>prev.filter(x=>x.id!==inv.id)); }} style={{background:"transparent",border:`1px solid ${C.red}44`,color:C.red,borderRadius:6,padding:"3px 9px",fontSize:12,fontWeight:700,cursor:"pointer"}}>✕</button>
+                  </div>
                 </div>
                 <div style={{display:"flex",gap:20,fontSize:13,color:C.sub,flexWrap:"wrap"}}>
                   {inv.supplier&&<span>🏭 {inv.supplier}</span>}
@@ -1549,190 +1472,6 @@ function extractJSON(text) {
           );
         })()}
 
-        {tab==="pumping"&&(()=>{
-          const totalPumpCost = pumpCharges.reduce((s,c)=>s+(c.amount||0),0);
-          const totalPumpVol  = pumpCharges.reduce((s,c)=>s+(c.volume_m3||0),0);
-          const totalBudget   = TOTAL_PUMP_BUDGET;
-          const remaining_pump = Math.max(0, totalBudget - totalPumpCost);
-          const pumpPct = totalBudget>0 ? Math.min(100,(totalPumpCost/totalBudget)*100) : 0;
-
-          // Per-category rollup
-          const catTotals = {};
-          PUMP_CATEGORIES.forEach(c => { catTotals[c.key] = { volume: 0, hourly: 0, flat: 0, total: 0, count: 0 }; });
-          pumpCharges.forEach(c => {
-            if (!catTotals[c.category]) return;
-            catTotals[c.category].total  += c.amount||0;
-            catTotals[c.category].count  += 1;
-            if (c.charge_type==="volume") catTotals[c.category].volume += c.amount||0;
-            else if (c.charge_type==="hourly") catTotals[c.category].hourly += c.amount||0;
-            else catTotals[c.category].flat += c.amount||0;
-          });
-
-          return(
-            <div>
-              <div style={{fontWeight:700,fontSize:18,marginBottom:6}}>Pumping Charges</div>
-              <div style={{color:C.muted,fontSize:13,marginBottom:24}}>Tracked against project estimated budget by category</div>
-
-              {/* Overall summary */}
-              <div style={{background:C.card,border:`1px solid ${C.border}`,borderRadius:14,padding:"20px 24px",marginBottom:20}}>
-                <div style={{fontWeight:700,fontSize:15,marginBottom:14}}>Overall Budget</div>
-                <div style={{display:"flex",gap:14,flexWrap:"wrap",marginBottom:14}}>
-                  <div style={{flex:1,minWidth:120}}>
-                    <div style={{color:C.muted,fontSize:11,fontWeight:700,textTransform:"uppercase",letterSpacing:1,marginBottom:4}}>Total Estimated</div>
-                    <div style={{color:C.sub,fontSize:22,fontWeight:800,fontFamily:"monospace"}}>${totalBudget.toLocaleString("en-CA",{minimumFractionDigits:2,maximumFractionDigits:2})}</div>
-                  </div>
-                  <div style={{flex:1,minWidth:120}}>
-                    <div style={{color:C.muted,fontSize:11,fontWeight:700,textTransform:"uppercase",letterSpacing:1,marginBottom:4}}>Charged to Date</div>
-                    <div style={{color:C.accent,fontSize:22,fontWeight:800,fontFamily:"monospace"}}>${totalPumpCost.toLocaleString("en-CA",{minimumFractionDigits:2,maximumFractionDigits:2})}</div>
-                  </div>
-                  <div style={{flex:1,minWidth:120}}>
-                    <div style={{color:C.muted,fontSize:11,fontWeight:700,textTransform:"uppercase",letterSpacing:1,marginBottom:4}}>Remaining</div>
-                    <div style={{color:remaining_pump<=0?C.red:C.green,fontSize:22,fontWeight:800,fontFamily:"monospace"}}>${remaining_pump.toLocaleString("en-CA",{minimumFractionDigits:2,maximumFractionDigits:2})}</div>
-                  </div>
-                  <div style={{flex:1,minWidth:120}}>
-                    <div style={{color:C.muted,fontSize:11,fontWeight:700,textTransform:"uppercase",letterSpacing:1,marginBottom:4}}>Volume Pumped</div>
-                    <div style={{color:C.teal,fontSize:22,fontWeight:800,fontFamily:"monospace"}}>{fmt(totalPumpVol,2)} m³</div>
-                  </div>
-                </div>
-                <div style={{display:"flex",justifyContent:"space-between",marginBottom:6,fontSize:13}}>
-                  <span style={{color:C.muted}}>Budget used</span>
-                  <span style={{fontWeight:700,color:pumpPct>=90?C.red:pumpPct>=70?C.yellow:C.green}}>{fmt(pumpPct,1)}%</span>
-                </div>
-                <Bar pct={pumpPct} color={pumpPct>=90?C.red:pumpPct>=70?C.yellow:C.green}/>
-              </div>
-
-              {/* Per-category breakdown table */}
-              <div style={{background:C.card,border:`1px solid ${C.border}`,borderRadius:14,padding:"18px 22px",marginBottom:20}}>
-                <div style={{fontWeight:700,fontSize:14,marginBottom:14}}>Budget by Category</div>
-                <div style={{overflowX:"auto"}}>
-                  <table style={{width:"100%",borderCollapse:"collapse",fontSize:13}}>
-                    <thead>
-                      <tr style={{color:C.muted,textAlign:"left"}}>
-                        {["Category","Est. Volume","Est. Hourly","Est. Total","Charged","Remaining","Used"].map(h=>(
-                          <th key={h} style={{padding:"7px 12px",borderBottom:`1px solid ${C.border}`,fontWeight:700,whiteSpace:"nowrap"}}>{h}</th>
-                        ))}
-                      </tr>
-                    </thead>
-                    <tbody>
-                      {PUMP_CATEGORIES.map((cat,i)=>{
-                        const ct = catTotals[cat.key]||{total:0};
-                        const estTotal = cat.est_volume + cat.est_hourly;
-                        const rem = Math.max(0, estTotal - ct.total);
-                        const pct = estTotal>0 ? Math.min(100,(ct.total/estTotal)*100) : 0;
-                        return(
-                          <tr key={cat.key} style={{borderBottom:`1px solid ${C.border}22`,background:i%2===0?"transparent":C.card+"88"}}>
-                            <td style={{padding:"9px 12px",fontWeight:600}}>{cat.label}</td>
-                            <td style={{padding:"9px 12px",fontFamily:"monospace",color:C.teal}}>${cat.est_volume.toLocaleString()}</td>
-                            <td style={{padding:"9px 12px",fontFamily:"monospace",color:C.purple}}>${cat.est_hourly.toLocaleString()}</td>
-                            <td style={{padding:"9px 12px",fontFamily:"monospace",color:C.sub}}>${estTotal.toLocaleString()}</td>
-                            <td style={{padding:"9px 12px",fontFamily:"monospace",color:ct.total>0?C.accent:C.muted,fontWeight:ct.total>0?700:400}}>{ct.total>0?`$${fmt(ct.total,2)}`:"—"}</td>
-                            <td style={{padding:"9px 12px",fontFamily:"monospace",color:rem<=0?C.red:C.green}}>${fmt(rem,2)}</td>
-                            <td style={{padding:"9px 12px"}}>
-                              {ct.total>0
-                                ? <div style={{display:"flex",alignItems:"center",gap:8}}>
-                                    <div style={{flex:1,background:C.border,borderRadius:99,height:5,minWidth:50,overflow:"hidden"}}>
-                                      <div style={{height:"100%",width:`${pct}%`,background:pct>=90?C.red:pct>=70?C.yellow:C.green,borderRadius:99}}/>
-                                    </div>
-                                    <span style={{fontSize:11,color:pct>=90?C.red:pct>=70?C.yellow:C.green,fontWeight:700,whiteSpace:"nowrap"}}>{fmt(pct,0)}%</span>
-                                  </div>
-                                : <span style={{color:C.muted,fontSize:12}}>—</span>
-                              }
-                            </td>
-                          </tr>
-                        );
-                      })}
-                      <tr style={{borderTop:`2px solid ${C.border}`,fontWeight:800}}>
-                        <td style={{padding:"10px 12px"}}>TOTAL</td>
-                        <td style={{padding:"10px 12px",fontFamily:"monospace",color:C.teal}}>${PUMP_CATEGORIES.reduce((s,c)=>s+c.est_volume,0).toLocaleString()}</td>
-                        <td style={{padding:"10px 12px",fontFamily:"monospace",color:C.purple}}>${PUMP_CATEGORIES.reduce((s,c)=>s+c.est_hourly,0).toLocaleString()}</td>
-                        <td style={{padding:"10px 12px",fontFamily:"monospace",color:C.sub}}>${totalBudget.toLocaleString()}</td>
-                        <td style={{padding:"10px 12px",fontFamily:"monospace",color:C.accent}}>${fmt(totalPumpCost,2)}</td>
-                        <td style={{padding:"10px 12px",fontFamily:"monospace",color:remaining_pump<=0?C.red:C.green}}>${fmt(remaining_pump,2)}</td>
-                        <td style={{padding:"10px 12px"}}><Badge color={pumpPct>=90?C.red:pumpPct>=70?C.yellow:C.green}>{fmt(pumpPct,1)}%</Badge></td>
-                      </tr>
-                    </tbody>
-                  </table>
-                </div>
-              </div>
-
-              <button onClick={()=>setPumpFormOpen(true)} style={{background:C.teal,color:"#fff",border:"none",borderRadius:9,padding:"10px 22px",fontWeight:800,fontSize:14,cursor:"pointer",marginBottom:20}}>+ Add Pump Charge</button>
-
-              {pumpCharges.length===0 && <div style={{color:C.muted,textAlign:"center",padding:"30px 0",fontSize:14}}>No pump charges recorded yet.</div>}
-              {pumpCharges.length>0&&(
-                <div style={{overflowX:"auto"}}>
-                  <table style={{width:"100%",borderCollapse:"collapse",fontSize:13}}>
-                    <thead><tr style={{color:C.muted,textAlign:"left"}}>{["Date","Ticket #","Category","Type","Qty","Rate","Charge ($)","Notes",""].map(h=><th key={h} style={{padding:"8px 14px",borderBottom:`1px solid ${C.border}`,fontWeight:700,whiteSpace:"nowrap"}}>{h}</th>)}</tr></thead>
-                    <tbody>
-                      {pumpCharges.map((c,i)=>{
-                        const catLabel = PUMP_CATEGORIES.find(x=>x.key===c.category)?.label || c.category || "—";
-                        return(
-                          <tr key={c.id} style={{borderBottom:`1px solid ${C.border}22`,background:i%2===0?"transparent":C.card+"88"}}>
-                            <td style={{padding:"9px 14px",color:C.sub}}>{c.date||"—"}</td>
-                            <td style={{padding:"9px 14px",fontFamily:"monospace"}}>{c.ticket_number||"—"}</td>
-                            <td style={{padding:"9px 14px",fontWeight:600}}>{catLabel}</td>
-                            <td style={{padding:"9px 14px"}}><Badge color={c.charge_type==="volume"?C.teal:c.charge_type==="hourly"?C.purple:C.accent}>{c.charge_type||"—"}</Badge></td>
-                            <td style={{padding:"9px 14px",fontFamily:"monospace",color:C.teal}}>{c.volume_m3?fmt(c.volume_m3,2):"—"}</td>
-                            <td style={{padding:"9px 14px",fontFamily:"monospace"}}>{c.rate_per_m3?`$${fmt(c.rate_per_m3,2)}`:"—"}</td>
-                            <td style={{padding:"9px 14px",fontFamily:"monospace",color:C.accent,fontWeight:700}}>${fmt(c.amount,2)}</td>
-                            <td style={{padding:"9px 14px",color:C.muted,fontSize:12,fontStyle:"italic"}}>{c.notes||""}</td>
-                            <td style={{padding:"9px 14px"}}><button onClick={()=>setPumpCharges(prev=>prev.filter(x=>x.id!==c.id))} style={{background:C.red+"22",color:C.red,border:`1px solid ${C.red}44`,borderRadius:6,padding:"3px 10px",fontSize:11,fontWeight:700,cursor:"pointer"}}>✕</button></td>
-                          </tr>
-                        );
-                      })}
-                      <tr style={{borderTop:`2px solid ${C.border}`,fontWeight:800}}>
-                        <td colSpan={6} style={{padding:"10px 14px",color:C.muted}}>TOTAL</td>
-                        <td style={{padding:"10px 14px",fontFamily:"monospace",color:C.accent}}>${fmt(totalPumpCost,2)}</td>
-                        <td colSpan={2}/>
-                      </tr>
-                    </tbody>
-                  </table>
-                </div>
-              )}
-            </div>
-          );
-        })()}
-
-        {tab==="tests"&&(()=>{
-          const grouped = {};
-          testReports.forEach(r => { const k = r.area||"Unassigned"; if(!grouped[k]) grouped[k]=[]; grouped[k].push(r); });
-          return(
-            <div>
-              <div style={{fontWeight:700,fontSize:18,marginBottom:6}}>Concrete Test Reports</div>
-              <div style={{color:C.muted,fontSize:13,marginBottom:24}}>PDF test reports attached by area and pour date</div>
-
-              <button onClick={()=>setTestFormOpen(true)} style={{background:C.purple,color:"#fff",border:"none",borderRadius:9,padding:"10px 22px",fontWeight:800,fontSize:14,cursor:"pointer",marginBottom:24}}>+ Attach Test Report</button>
-
-              {testReports.length===0 && <div style={{color:C.muted,textAlign:"center",padding:"40px 0",fontSize:14}}>No test reports attached yet. Tap the button above to attach a PDF.</div>}
-
-              {Object.entries(grouped).sort(([a],[b])=>a.localeCompare(b)).map(([area,reports])=>(
-                <div key={area} style={{background:C.card,border:`1px solid ${C.border}`,borderRadius:14,padding:"18px 22px",marginBottom:16}}>
-                  <div style={{fontWeight:800,fontSize:15,marginBottom:14}}>📍 {area} <span style={{color:C.muted,fontWeight:400,fontSize:13}}>({reports.length} report{reports.length!==1?"s":""})</span></div>
-                  {reports.sort((a,b)=>(b.date||"").localeCompare(a.date||"")).map(r=>(
-                    <div key={r.id} style={{background:C.bg,borderRadius:10,padding:"13px 16px",marginBottom:10,border:`1px solid ${C.border}`,display:"flex",justifyContent:"space-between",alignItems:"center",flexWrap:"wrap",gap:10}}>
-                      <div>
-                        <div style={{fontWeight:700,fontSize:14,marginBottom:4}}>📄 {r.filename}</div>
-                        <div style={{display:"flex",gap:14,fontSize:12,color:C.sub,flexWrap:"wrap"}}>
-                          {r.date&&<span>Pour date: <b style={{color:C.text}}>{r.date}</b></span>}
-                          {r.notes&&<span style={{fontStyle:"italic",color:C.muted}}>{r.notes}</span>}
-                          <span style={{color:C.muted}}>Added: {new Date(r.added_at).toLocaleDateString()}</span>
-                        </div>
-                      </div>
-                      <div style={{display:"flex",gap:8,alignItems:"center"}}>
-                        <a href={r.dataURL} download={r.filename}
-                          style={{background:C.purple+"22",color:C.purple,border:`1px solid ${C.purple}44`,borderRadius:7,padding:"6px 14px",fontSize:12,fontWeight:700,cursor:"pointer",textDecoration:"none"}}>
-                          ⬇ Download
-                        </a>
-                        <button onClick={()=>setTestReports(prev=>prev.filter(x=>x.id!==r.id))}
-                          style={{background:C.red+"22",color:C.red,border:`1px solid ${C.red}44`,borderRadius:6,padding:"6px 10px",fontSize:11,fontWeight:700,cursor:"pointer"}}>✕</button>
-                      </div>
-                    </div>
-                  ))}
-                </div>
-              ))}
-            </div>
-          );
-        })()}
-
         {tab==="scope"&&(<div>
           <div style={{fontWeight:700,fontSize:18,marginBottom:20}}>Full Project Scope</div>
           <div style={{overflowX:"auto"}}>
@@ -1769,8 +1508,6 @@ function extractJSON(text) {
           </div>
         </div>
       )}
-      {pumpFormOpen && <PumpModal />}
-      {testFormOpen && <TestModal />}
     </div>
   );
 }
