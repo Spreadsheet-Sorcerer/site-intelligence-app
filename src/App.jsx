@@ -1364,7 +1364,7 @@ Return ONLY valid JSON, no markdown:
                     {t.volume_m3&&<Badge color={C.accent}>{parseFloat(t.volume_m3).toFixed(2)} m³</Badge>}
                     {t.mix_design&&<Badge color={mismatch?C.red:C.green}>{t.mix_design}{mismatch?" ⚠":""}</Badge>}
                     {specMpa&&!mismatch&&<Badge color={C.muted}>spec: {specMpa}</Badge>}
-                    {t.file_url&&<button onClick={e=>{ e.stopPropagation(); window.open(t.file_url,"_blank"); }} style={{background:"transparent",border:`1px solid ${C.blue}44`,color:C.blue,borderRadius:6,padding:"3px 9px",fontSize:12,fontWeight:700,cursor:"pointer"}}>📄 View</button>}
+                    {(t.file_url||t.originalFile)&&<button onClick={e=>{ e.stopPropagation(); if(t.file_url){window.open(t.file_url,"_blank");}else{const w=window.open();w.document.write(`<iframe src="${t.originalFile}" width="100%" height="100%" style="border:none"></iframe>`);} }} style={{background:"transparent",border:`1px solid ${C.blue}44`,color:C.blue,borderRadius:6,padding:"3px 9px",fontSize:12,fontWeight:700,cursor:"pointer"}}>📄 View</button>}
                     <button onClick={e=>{ e.stopPropagation(); if(window.confirm(`Delete ticket #${t.ticket_number||"this ticket"}?`)) setTickets(prev=>prev.filter(x=>x.id!==t.id)); }} style={{background:"transparent",border:`1px solid ${C.red}44`,color:C.red,borderRadius:6,padding:"3px 9px",fontSize:12,fontWeight:700,cursor:"pointer"}}>✕</button>
                   </div>
                 </div>
@@ -1392,7 +1392,7 @@ Return ONLY valid JSON, no markdown:
                 <div style={{display:"flex",justifyContent:"space-between",alignItems:"flex-start",marginBottom:10,flexWrap:"wrap",gap:8}}>
                   <div><span style={{fontWeight:800,fontSize:15}}>Invoice {inv.invoice_number||"—"}</span><span style={{color:C.muted,fontSize:12,marginLeft:10}}>{inv.invoice_date}</span></div>
                   <div style={{display:"flex",gap:7,flexWrap:"wrap",alignItems:"center"}}>{inv.total_amount>0&&<Badge color={C.green}>{inv.currency||""} {inv.total_amount?.toLocaleString()}</Badge>}<Badge color={hasIssues?C.red:C.green}>{hasIssues?"⚠ Review":"✓ Matched"}</Badge>
-                    {inv.file_url&&<button onClick={e=>{ e.stopPropagation(); window.open(inv.file_url,"_blank"); }} style={{background:"transparent",border:`1px solid ${C.blue}44`,color:C.blue,borderRadius:6,padding:"3px 9px",fontSize:12,fontWeight:700,cursor:"pointer"}}>📄 View</button>}
+                    {(inv.file_url||inv.originalFile)&&<button onClick={e=>{ e.stopPropagation(); if(inv.file_url){window.open(inv.file_url,"_blank");}else{const w=window.open();w.document.write(`<iframe src="${inv.originalFile}" width="100%" height="100%" style="border:none"></iframe>`);} }} style={{background:"transparent",border:`1px solid ${C.blue}44`,color:C.blue,borderRadius:6,padding:"3px 9px",fontSize:12,fontWeight:700,cursor:"pointer"}}>📄 View</button>}
                     <button onClick={e=>{ e.stopPropagation(); if(window.confirm(`Delete invoice ${inv.invoice_number||"this invoice"}?`)) setInvoices(prev=>prev.filter(x=>x.id!==inv.id)); }} style={{background:"transparent",border:`1px solid ${C.red}44`,color:C.red,borderRadius:6,padding:"3px 9px",fontSize:12,fontWeight:700,cursor:"pointer"}}>✕</button>
                   </div>
                 </div>
