@@ -954,6 +954,20 @@ function extractJSON(text) {
     return {matched,unmatched,ticketsOnInvoice,ticketVolume,invoiceVolume,volumeMatch};
   }
 
+  // ── Upload file to Supabase Storage and return public URL ──
+  async function uploadFile(file, folder) {
+    try {
+      const formData = new FormData();
+      formData.append("file", file);
+      formData.append("folder", folder);
+      formData.append("fileName", file.name);
+      const res = await fetch("/api/file-upload", { method: "POST", body: formData });
+      if (!res.ok) return null;
+      const data = await res.json();
+      return data.url || null;
+    } catch { return null; }
+  }
+
   async function extractTest(file) {
     const b64 = await toB64(file);
     const isPDF = file.type === "application/pdf";
@@ -1001,7 +1015,9 @@ Return ONLY valid JSON, no markdown:
       setLoadMsg(`Reading test report "${file.name}"…`);
       try {
         const extracted = await extractTest(file);
-        setTests(prev => [extracted, ...prev]);
+        setLoadMsg(`Saving "${file.name}" to storage…`);
+        const fileUrl = await uploadFile(file, "tests");
+        setTests(prev => [{ ...extracted, file_url: fileUrl }, ...prev]);
         showToast(`Test report ${extracted.report_number || file.name} added ✓`);
       } catch(e) {
         showToast(`Failed to read ${file.name}: ${e.message}`, "err");
@@ -1336,6 +1352,7 @@ Return ONLY valid JSON, no markdown:
                     {t.volume_m3&&<Badge color={C.accent}>{parseFloat(t.volume_m3).toFixed(2)} m³</Badge>}
                     {t.mix_design&&<Badge color={mismatch?C.red:C.green}>{t.mix_design}{mismatch?" ⚠":""}</Badge>}
                     {specMpa&&!mismatch&&<Badge color={C.muted}>spec: {specMpa}</Badge>}
+                    {t.file_url&&<button onClick={e=>{ e.stopPropagation(); window.open(t.file_url,"_blank"); }} style={{background:"transparent",border:`1px solid ${C.blue}44`,color:C.blue,borderRadius:6,padding:"3px 9px",fontSize:12,fontWeight:700,cursor:"pointer"}}>📄 View</button>}
                     <button onClick={e=>{ e.stopPropagation(); if(window.confirm(`Delete ticket #${t.ticket_number||"this ticket"}?`)) setTickets(prev=>prev.filter(x=>x.id!==t.id)); }} style={{background:"transparent",border:`1px solid ${C.red}44`,color:C.red,borderRadius:6,padding:"3px 9px",fontSize:12,fontWeight:700,cursor:"pointer"}}>✕</button>
                   </div>
                 </div>
@@ -1363,6 +1380,7 @@ Return ONLY valid JSON, no markdown:
                 <div style={{display:"flex",justifyContent:"space-between",alignItems:"flex-start",marginBottom:10,flexWrap:"wrap",gap:8}}>
                   <div><span style={{fontWeight:800,fontSize:15}}>Invoice {inv.invoice_number||"—"}</span><span style={{color:C.muted,fontSize:12,marginLeft:10}}>{inv.invoice_date}</span></div>
                   <div style={{display:"flex",gap:7,flexWrap:"wrap",alignItems:"center"}}>{inv.total_amount>0&&<Badge color={C.green}>{inv.currency||""} {inv.total_amount?.toLocaleString()}</Badge>}<Badge color={hasIssues?C.red:C.green}>{hasIssues?"⚠ Review":"✓ Matched"}</Badge>
+                    {inv.file_url&&<button onClick={e=>{ e.stopPropagation(); window.open(inv.file_url,"_blank"); }} style={{background:"transparent",border:`1px solid ${C.blue}44`,color:C.blue,borderRadius:6,padding:"3px 9px",fontSize:12,fontWeight:700,cursor:"pointer"}}>📄 View</button>}
                     <button onClick={e=>{ e.stopPropagation(); if(window.confirm(`Delete invoice ${inv.invoice_number||"this invoice"}?`)) setInvoices(prev=>prev.filter(x=>x.id!==inv.id)); }} style={{background:"transparent",border:`1px solid ${C.red}44`,color:C.red,borderRadius:6,padding:"3px 9px",fontSize:12,fontWeight:700,cursor:"pointer"}}>✕</button>
                   </div>
                 </div>
@@ -1471,6 +1489,7 @@ Return ONLY valid JSON, no markdown:
                       <div style={{display:"flex",gap:7,flexWrap:"wrap",alignItems:"center"}}>
                         {test.mix_design&&<Badge color={C.accent}>{test.mix_design}</Badge>}
                         {anyFail?<Badge color={C.red}>⚠ FAIL</Badge>:allPass&&test.results?.some(r=>r.result==="pass")?<Badge color={C.green}>✓ PASS</Badge>:<Badge color={C.yellow}>⏳ Pending</Badge>}
+                        {test.file_url&&<button onClick={()=>window.open(test.file_url,"_blank")} style={{background:"transparent",border:`1px solid ${C.blue}44`,color:C.blue,borderRadius:6,padding:"3px 9px",fontSize:12,fontWeight:700,cursor:"pointer"}}>📄 View</button>}
                         <button onClick={()=>setTests(prev=>prev.filter(x=>x.id!==test.id))} style={{background:"transparent",border:`1px solid ${C.red}44`,color:C.red,borderRadius:6,padding:"3px 9px",fontSize:12,fontWeight:700,cursor:"pointer"}}>✕</button>
                       </div>
                     </div>
