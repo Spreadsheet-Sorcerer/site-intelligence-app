@@ -957,27 +957,27 @@ function extractJSON(text) {
   // ── Upload file to Supabase Storage and return public URL ──
   async function uploadFile(file, folder) {
     try {
-      // Convert file to base64
+      console.log("uploadFile: starting for", file.name, folder);
       const base64 = await new Promise((resolve, reject) => {
         const reader = new FileReader();
         reader.onload = () => resolve(reader.result.split(",")[1]);
         reader.onerror = reject;
         reader.readAsDataURL(file);
       });
+      console.log("uploadFile: base64 ready, length:", base64.length);
       const res = await fetch("/api/file-upload", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          base64,
-          fileName: file.name,
-          mimeType: file.type,
-          folder,
-        }),
+        body: JSON.stringify({ base64, fileName: file.name, mimeType: file.type, folder }),
       });
-      if (!res.ok) return null;
+      console.log("uploadFile: response status:", res.status);
       const data = await res.json();
+      console.log("uploadFile: response data:", data);
       return data.url || null;
-    } catch { return null; }
+    } catch(e) {
+      console.error("uploadFile error:", e);
+      return null;
+    }
   }
 
   async function extractTest(file) {
