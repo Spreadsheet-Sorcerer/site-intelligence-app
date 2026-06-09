@@ -1,8 +1,3 @@
-import { IncomingForm } from 'formidable';
-import fs from 'fs';
-
-export const config = { api: { bodyParser: false } };
-
 export default async function handler(req, res) {
   if (req.method !== "POST") return res.status(405).json({ error: "Method not allowed" });
 
@@ -11,22 +6,13 @@ export default async function handler(req, res) {
   if (!supabaseUrl || !supabaseKey) return res.status(500).json({ error: "Supabase not configured" });
 
   try {
-    const form = new IncomingForm();
-    const [fields, files] = await new Promise((resolve, reject) => {
-      form.parse(req, (err, fields, files) => {
-        if (err) reject(err);
-        else resolve([fields, files]);
-      });
-    });
+    const { base64, fileName, mimeType, folder } = req.body;
+    if (!base64 || !fileName) return res.status(400).json({ error: "Missing file data" });
 
-    const file = Array.isArray(files.file) ? files.file[0] : files.file;
-    const folder = Array.isArray(fields.folder) ? fields.folder[0] : (fields.folder || "misc");
-    const fileName = Array.isArray(fields.fileName) ? fields.fileName[0] : fields.fileName;
-
-    const fileBuffer = fs.readFileSync(file.filepath);
-    const mimeType = file.mimetype || "application/octet-stream";
-    const safeName = fileName || file.originalFilename || `file-${Date.now()}`;
-    const path = `${folder}/${Date.now()}-${safeName.replace(/[^a-zA-Z0-9._-]/g, "_")}`;
+    // Convert base64 to buffer
+    const buffer = Buffer.from(base64, "base64");
+    const safeName = fileName.replace(/[^a-zA-Z0-9._-]/g, "_");
+    const path = `${folder || "misc"}/${Date.now()}-${safeName}`;
 
     const uploadRes = await fetch(
       `${supabaseUrl}/storage/v1/object/site-documents/${path}`,
@@ -35,10 +21,10 @@ export default async function handler(req, res) {
         headers: {
           "apikey": supabaseKey,
           "Authorization": `Bearer ${supabaseKey}`,
-          "Content-Type": mimeType,
+          "Content-Type": mimeType || "application/octet-stream",
           "x-upsert": "true",
         },
-        body: fileBuffer,
+        body: buffer,
       }
     );
 
@@ -48,9 +34,8 @@ export default async function handler(req, res) {
       return res.status(500).json({ error: err });
     }
 
-    // Return the public URL
     const publicUrl = `${supabaseUrl}/storage/v1/object/public/site-documents/${path}`;
-    return res.status(200).json({ url: publicUrl, path });
+    return res.status(200).json({ url: publicUrl });
 
   } catch (err) {
     console.error("file-upload error:", err);
