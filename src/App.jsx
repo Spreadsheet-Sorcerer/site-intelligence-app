@@ -1354,28 +1354,69 @@ Return ONLY valid JSON, no markdown:
               <input ref={fileRef} type="file" multiple accept="image/*,application/pdf" style={{display:"none"}} onChange={e=>handleTicketFiles(e.target.files)}/>
             </div>
             {tickets.length===0?<div style={{color:C.muted,textAlign:"center",padding:"60px 0"}}>No tickets yet.</div>
-            :[...tickets].reverse().map(t=>{
-              const mismatch=checkMpaMismatch(t);
-              const specMpa=t.area&&t.item?MPA_SPEC[`${t.area}|||${t.item}`]:null;
-              return(<div key={t.id} onClick={()=>setSelectedTicket(t)} style={{background:C.card,border:`1px solid ${mismatch?C.red+"88":C.border}`,borderRadius:12,padding:"15px 20px",marginBottom:12,cursor:"pointer"}}>
-                <div style={{display:"flex",justifyContent:"space-between",alignItems:"flex-start",marginBottom:8,flexWrap:"wrap",gap:8}}>
-                  <div><span style={{fontWeight:800,fontSize:15}}>{t.ticket_number||"No ticket #"}</span><span style={{color:C.muted,fontSize:12,marginLeft:10}}>{t.date||"No date"}</span></div>
-                  <div style={{display:"flex",gap:7,flexWrap:"wrap",alignItems:"center"}}>
-                    {t.volume_m3&&<Badge color={C.accent}>{parseFloat(t.volume_m3).toFixed(2)} m³</Badge>}
-                    {t.mix_design&&<Badge color={mismatch?C.red:C.green}>{t.mix_design}{mismatch?" ⚠":""}</Badge>}
-                    {specMpa&&!mismatch&&<Badge color={C.muted}>spec: {specMpa}</Badge>}
-                    {(t.file_url||t.originalFile)&&<button onClick={e=>{ e.stopPropagation(); const src=t.file_url||t.originalFile; const isImg=/^data:image|\.(jpg|jpeg|png|gif|webp|heic)/i.test(src); const w=window.open(); w.document.write(isImg?`<html><body style="margin:0;background:#000;display:flex;align-items:center;justify-content:center;min-height:100vh"><img src="${src}" style="max-width:100%;max-height:100vh;object-fit:contain"></body></html>`:`<iframe src="${src}" width="100%" height="100%" style="border:none;position:fixed;top:0;left:0"></iframe>`); }} style={{background:"transparent",border:`1px solid ${C.blue}44`,color:C.blue,borderRadius:6,padding:"3px 9px",fontSize:12,fontWeight:700,cursor:"pointer"}}>📄 View</button>}
-                    <button onClick={e=>{ e.stopPropagation(); if(window.confirm(`Delete ticket #${t.ticket_number||"this ticket"}?`)) setTickets(prev=>prev.filter(x=>x.id!==t.id)); }} style={{background:"transparent",border:`1px solid ${C.red}44`,color:C.red,borderRadius:6,padding:"3px 9px",fontSize:12,fontWeight:700,cursor:"pointer"}}>✕</button>
+            :(()=>{
+              // Group tickets by date, sorted newest first
+              const grouped = {};
+              [...tickets].sort((a,b)=>(b.date||"").localeCompare(a.date||"")).forEach(t=>{
+                const key = t.date || "No date";
+                if(!grouped[key]) grouped[key] = [];
+                grouped[key].push(t);
+              });
+              return Object.entries(grouped).map(([date, dayTickets])=>{
+                const dayVol = dayTickets.reduce((s,t)=>s+(parseFloat(t.volume_m3)||0),0);
+                const dayMismatches = dayTickets.filter(t=>checkMpaMismatch(t)).length;
+                const hasPump = dayTickets.some(t=>parseFloat(t.pump_volume_m3)>0);
+                const pumpVol = dayTickets.reduce((s,t)=>s+(parseFloat(t.pump_volume_m3)||0),0);
+                // Format date nicely
+                let displayDate = date;
+                if(date !== "No date") {
+                  try {
+                    const d = new Date(date + "T12:00:00");
+                    displayDate = d.toLocaleDateString("en-CA", { weekday:"long", year:"numeric", month:"long", day:"numeric" });
+                  } catch(e) {}
+                }
+                return (
+                  <div key={date} style={{marginBottom:24}}>
+                    {/* Date group header */}
+                    <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:10,paddingBottom:8,borderBottom:`2px solid ${C.border}`,flexWrap:"wrap",gap:8}}>
+                      <div style={{display:"flex",alignItems:"center",gap:10}}>
+                        <span style={{fontWeight:800,fontSize:15,color:C.text}}>📅 {displayDate}</span>
+                        {dayMismatches>0&&<Badge color={C.red}>⚠ {dayMismatches} mismatch{dayMismatches>1?"es":""}</Badge>}
+                      </div>
+                      <div style={{display:"flex",gap:8,flexWrap:"wrap",alignItems:"center"}}>
+                        <Badge color={C.accent}>{dayTickets.length} ticket{dayTickets.length>1?"s":""}</Badge>
+                        <Badge color={C.blue}>{dayVol.toFixed(2)} m³</Badge>
+                        {hasPump&&<Badge color={C.teal}>💧 {pumpVol.toFixed(2)} m³ pumped</Badge>}
+                      </div>
+                    </div>
+                    {/* Tickets for this date */}
+                    {dayTickets.map(t=>{
+                      const mismatch=checkMpaMismatch(t);
+                      const specMpa=t.area&&t.item?MPA_SPEC[`${t.area}|||${t.item}`]:null;
+                      return(<div key={t.id} onClick={()=>setSelectedTicket(t)} style={{background:C.card,border:`1px solid ${mismatch?C.red+"88":C.border}`,borderRadius:12,padding:"15px 20px",marginBottom:10,cursor:"pointer"}}>
+                        <div style={{display:"flex",justifyContent:"space-between",alignItems:"flex-start",marginBottom:8,flexWrap:"wrap",gap:8}}>
+                          <div><span style={{fontWeight:800,fontSize:15}}>{t.ticket_number||"No ticket #"}</span></div>
+                          <div style={{display:"flex",gap:7,flexWrap:"wrap",alignItems:"center"}}>
+                            {t.volume_m3&&<Badge color={C.accent}>{parseFloat(t.volume_m3).toFixed(2)} m³</Badge>}
+                            {t.mix_design&&<Badge color={mismatch?C.red:C.green}>{t.mix_design}{mismatch?" ⚠":""}</Badge>}
+                            {specMpa&&!mismatch&&<Badge color={C.muted}>spec: {specMpa}</Badge>}
+                            {parseFloat(t.pump_volume_m3)>0&&<Badge color={C.teal}>💧 {parseFloat(t.pump_volume_m3).toFixed(2)} m³</Badge>}
+                            {(t.file_url||t.originalFile)&&<button onClick={e=>{ e.stopPropagation(); const src=t.file_url||t.originalFile; const isImg=/^data:image|\.(jpg|jpeg|png|gif|webp|heic)/i.test(src); const w=window.open(); w.document.write(isImg?`<html><body style="margin:0;background:#000;display:flex;align-items:center;justify-content:center;min-height:100vh"><img src="${src}" style="max-width:100%;max-height:100vh;object-fit:contain"></body></html>`:`<iframe src="${src}" width="100%" height="100%" style="border:none;position:fixed;top:0;left:0"></iframe>`); }} style={{background:"transparent",border:`1px solid ${C.blue}44`,color:C.blue,borderRadius:6,padding:"3px 9px",fontSize:12,fontWeight:700,cursor:"pointer"}}>📄 View</button>}
+                            <button onClick={e=>{ e.stopPropagation(); if(window.confirm(`Delete ticket #${t.ticket_number||"this ticket"}?`)) setTickets(prev=>prev.filter(x=>x.id!==t.id)); }} style={{background:"transparent",border:`1px solid ${C.red}44`,color:C.red,borderRadius:6,padding:"3px 9px",fontSize:12,fontWeight:700,cursor:"pointer"}}>✕</button>
+                          </div>
+                        </div>
+                        <div style={{display:"flex",gap:16,flexWrap:"wrap",fontSize:13,color:C.sub}}>
+                          {t.supplier&&<span>🏭 {t.supplier}</span>}
+                          {t.area&&<span>📍 {t.area}{t.item?` — ${t.item}`:""}</span>}
+                          {t.invoice_number&&<span>🧾 Inv: {t.invoice_number}</span>}
+                        </div>
+                        {mismatch&&<div style={{marginTop:8,background:"#450a0a",borderRadius:7,padding:"7px 12px",fontSize:12,color:"#fca5a5",fontWeight:600}}>⚠ MPa mismatch — ticket: {mismatch.ticketMpa} · spec: {mismatch.specMpa}</div>}
+                      </div>);
+                    })}
                   </div>
-                </div>
-                <div style={{display:"flex",gap:16,flexWrap:"wrap",fontSize:13,color:C.sub}}>
-                  {t.supplier&&<span>🏭 {t.supplier}</span>}
-                  {t.area&&<span>📍 {t.area}{t.item?` — ${t.item}`:""}</span>}
-                  {t.invoice_number&&<span>🧾 Inv: {t.invoice_number}</span>}
-                </div>
-                {mismatch&&<div style={{marginTop:8,background:"#450a0a",borderRadius:7,padding:"7px 12px",fontSize:12,color:"#fca5a5",fontWeight:600}}>⚠ MPa mismatch — ticket: {mismatch.ticketMpa} · spec: {mismatch.specMpa}</div>}
-              </div>);
-            })}
+                );
+              });
+            })()}
           </div>
         )}
 
