@@ -52,6 +52,54 @@ const CERT_TYPES = [
   "Excavation / Trenching Safety","Hot Work / Fire Watch Training",
 ];
 
+// ─── TRADE / SAFETY PROGRAM DOCUMENT TYPES ────────────────────────────────────
+const TRADE_DOC_TYPES = [
+  "WCB Clearance Letter",
+  "Safety Data Sheet (SDS)",
+  "COR Certification (or Letter Confirming Process Started)",
+  "CGL Insurance Certificate",
+];
+
+const CGL_MIN_LIMIT = 5000000;
+const CGL_CERT_HOLDER_LABEL = "Summer Wind Holdings Limited";
+const CGL_ADDITIONAL_INSURED_LABELS = ["Summer Wind Holdings Limited", "Southwest Construction Management"];
+
+function normEntity(s) {
+  return (s || "").toLowerCase().replace(/[^a-z0-9]/g, "");
+}
+function isSummerWindHolding(s) {
+  return normEntity(s).includes("summerwindholding");
+}
+function isSouthwestConstruction(s) {
+  return normEntity(s).includes("southwestconstruction");
+}
+function parseLimit(v) {
+  if (v == null) return null;
+  const n = parseFloat(String(v).replace(/[^0-9.]/g, ""));
+  return isNaN(n) ? null : n;
+}
+// Returns an array of human-readable compliance issues for a CGL doc. Empty array = compliant.
+function cglComplianceFlags(doc) {
+  if (doc.doc_type !== "CGL Insurance Certificate") return [];
+  const flags = [];
+  const limit = parseLimit(doc.per_occurrence_limit);
+  if (limit == null || limit < CGL_MIN_LIMIT) {
+    flags.push(`Per-occurrence limit below $5,000,000 (found: ${doc.per_occurrence_limit || "not found"})`);
+  }
+  if (!isSummerWindHolding(doc.certificate_holder)) {
+    flags.push(`Certificate holder is not "${CGL_CERT_HOLDER_LABEL}" (found: ${doc.certificate_holder || "not found"})`);
+  }
+  const insuredList = Array.isArray(doc.additional_insured) ? doc.additional_insured : (doc.additional_insured ? [doc.additional_insured] : []);
+  const insuredText = insuredList.join(" | ");
+  if (!isSummerWindHolding(insuredText)) {
+    flags.push(`"${CGL_CERT_HOLDER_LABEL}" not listed as additional insured`);
+  }
+  if (!isSouthwestConstruction(insuredText)) {
+    flags.push(`"Southwest Construction Management" not listed as additional insured`);
+  }
+  return flags;
+}
+
 // ─── CONCRETE SCOPE ───────────────────────────────────────────────────────────
 const SCOPE = [
   { area:"SOG",         item:"Slabs",                m3:305.0,  mpa:"25 MPa/N-CF" },
@@ -234,10 +282,16 @@ function LandingScreen({ onSelect }) {
       stats: ["Volume tracking","MPa validation","Invoice matching","Export to .xlsx"],
     },
     {
-      id:"certs", emoji:"📋", title:"Training Certificates",
-      desc:"Scan worker certifications, track expiry dates, get alerts before certifications lapse.",
+      id:"certs", emoji:"📋", title:"Worker Certificates",
+      desc:"Scan worker training certifications, track expiry dates, get alerts before certifications lapse.",
       color: C.teal,
       stats: ["25 cert types","Expiry tracking","Worker roster","Email intake ready"],
+    },
+    {
+      id:"tradedocs", emoji:"🦺", title:"Trade Safety Documents",
+      desc:"Track each trade's Safety Program Documents — WCB letters, SDS sheets, COR status, and CGL insurance — with automatic compliance checks.",
+      color: C.purple,
+      stats: ["WCB · SDS · COR · CGL","$5M CGL auto-check","Company roster","Expiry tracking"],
     },
   ];
 
@@ -294,6 +348,30 @@ function LandingScreen({ onSelect }) {
 // ═══════════════════════════════════════════════════════════════════════════════
 // TRAINING CERTIFICATES MODULE
 // ═══════════════════════════════════════════════════════════════════════════════
+function extractJSON(text) {
+  // Strip ALL markdown fences and preamble first
+  let cleaned = text.replace(/```json|```/gi,"").trim();
+  // Remove any preamble before the first [ or {
+  const arrStart = cleaned.indexOf("[");
+  const objStart = cleaned.indexOf("{");
+  let jsonStart = -1;
+  if (arrStart !== -1 && objStart !== -1) jsonStart = Math.min(arrStart, objStart);
+  else if (arrStart !== -1) jsonStart = arrStart;
+  else if (objStart !== -1) jsonStart = objStart;
+  if (jsonStart > 0) cleaned = cleaned.slice(jsonStart);
+  // Find matching end bracket
+  const isArr = cleaned.startsWith("[");
+  const endChar = isArr ? "]" : "}";
+  const endIdx = cleaned.lastIndexOf(endChar);
+  if (endIdx !== -1) cleaned = cleaned.slice(0, endIdx + 1);
+  // Try to parse
+  try { return JSON.parse(cleaned); } catch(e) {}
+  // Last resort — try original stripped
+  const stripped = text.replace(/```json|```/gi,"").trim();
+  try { return JSON.parse(stripped); } catch(e) {}
+  throw new Error("Could not parse response: " + text.slice(0, 120));
+}
+
 function CertsModule({ onBack }) {
   const [certs, setCerts] = useState([]);
   const [tab, setTab] = useState("dashboard");
@@ -319,6 +397,11 @@ function CertsModule({ onBack }) {
     if (!storageReady) return;
     storageSet("certs-data", { certs });
   }, [certs, storageReady]);
+
+  // This module only manages worker certs. Trade documents (added via the
+  // Trade Safety Documents module) share the same storage row but are tagged
+  // category:"trade" and filtered out here so the two never mix.
+  const workerCerts = certs.filter(c => c.category !== "trade");
 
   function showToast(msg, type="ok") {
     setToast({ msg, type });
@@ -386,6 +469,7 @@ Return ONLY valid JSON (no markdown):
           originalFile: dataURL,
           fileType: file.type,
           added_at: new Date().toISOString(),
+          category: "worker",
           ...extracted
         }]);
         added++;
@@ -399,7 +483,7 @@ Return ONLY valid JSON (no markdown):
 
   function addManual() {
     if (!manual.worker_name || !manual.cert_type) { showToast("Worker name and cert type are required.", "err"); return; }
-    setCerts(prev => [...prev, { id:Date.now(), filename:"Manual entry", added_at:new Date().toISOString(), ...manual }]);
+    setCerts(prev => [...prev, { id:Date.now(), filename:"Manual entry", added_at:new Date().toISOString(), category:"worker", ...manual }]);
     setManual({ worker_name:"", employer:"", cert_type:"", issued_date:"", expiry_date:"", cert_number:"", notes:"" });
     setManualOpen(false);
     showToast("Certificate added ✓");
@@ -407,7 +491,7 @@ Return ONLY valid JSON (no markdown):
 
   function exportXLSX() {
     const wb = XLSX.utils.book_new();
-    const ws1 = XLSX.utils.json_to_sheet(certs.map((c,i) => {
+    const ws1 = XLSX.utils.json_to_sheet(workerCerts.map((c,i) => {
       const s = expiryStatus(c.expiry_date);
       return {
         "#":i+1, "Worker":c.worker_name||"", "Employer":c.employer||"",
@@ -421,7 +505,7 @@ Return ONLY valid JSON (no markdown):
     XLSX.utils.book_append_sheet(wb, ws1, "All Certificates");
 
     // Expiring soon sheet
-    const expiring = certs.filter(c => { const d = daysUntilExpiry(c.expiry_date); return d !== null && d <= 60; })
+    const expiring = workerCerts.filter(c => { const d = daysUntilExpiry(c.expiry_date); return d !== null && d <= 60; })
       .sort((a,b) => daysUntilExpiry(a.expiry_date) - daysUntilExpiry(b.expiry_date));
     if (expiring.length > 0) {
       const ws2 = XLSX.utils.json_to_sheet(expiring.map(c => ({
@@ -435,9 +519,9 @@ Return ONLY valid JSON (no markdown):
     }
 
     // Worker roster sheet
-    const workers = [...new Set(certs.map(c=>c.worker_name).filter(Boolean))];
+    const workers = [...new Set(workerCerts.map(c=>c.worker_name).filter(Boolean))];
     const rosterRows = workers.map(w => {
-      const wCerts = certs.filter(c => c.worker_name === w);
+      const wCerts = workerCerts.filter(c => c.worker_name === w);
       const critical = wCerts.filter(c => { const d = daysUntilExpiry(c.expiry_date); return d!==null && d<=30; });
       return {
         "Worker":w,
@@ -456,13 +540,13 @@ Return ONLY valid JSON (no markdown):
   }
 
   // Stats
-  const expired  = certs.filter(c => { const d = daysUntilExpiry(c.expiry_date); return d!==null && d<0; });
-  const critical = certs.filter(c => { const d = daysUntilExpiry(c.expiry_date); return d!==null && d>=0 && d<=30; });
-  const warning  = certs.filter(c => { const d = daysUntilExpiry(c.expiry_date); return d!==null && d>30 && d<=60; });
-  const workers  = [...new Set(certs.map(c=>c.worker_name).filter(Boolean))];
+  const expired  = workerCerts.filter(c => { const d = daysUntilExpiry(c.expiry_date); return d!==null && d<0; });
+  const critical = workerCerts.filter(c => { const d = daysUntilExpiry(c.expiry_date); return d!==null && d>=0 && d<=30; });
+  const warning  = workerCerts.filter(c => { const d = daysUntilExpiry(c.expiry_date); return d!==null && d>30 && d<=60; });
+  const workers  = [...new Set(workerCerts.map(c=>c.worker_name).filter(Boolean))];
 
   // Filtered cert list
-  const filteredCerts = certs.filter(c => {
+  const filteredCerts = workerCerts.filter(c => {
     if (filterExpiry === "expired")  return daysUntilExpiry(c.expiry_date) !== null && daysUntilExpiry(c.expiry_date) < 0;
     if (filterExpiry === "critical") return daysUntilExpiry(c.expiry_date) !== null && daysUntilExpiry(c.expiry_date) >= 0 && daysUntilExpiry(c.expiry_date) <= 30;
     if (filterExpiry === "warning")  return daysUntilExpiry(c.expiry_date) !== null && daysUntilExpiry(c.expiry_date) > 30 && daysUntilExpiry(c.expiry_date) <= 60;
@@ -471,7 +555,7 @@ Return ONLY valid JSON (no markdown):
 
   // Worker detail modal
   function WorkerModal({ name, onClose }) {
-    const wCerts = certs.filter(c => c.worker_name === name);
+    const wCerts = workerCerts.filter(c => c.worker_name === name);
     const employer = wCerts[0]?.employer || "";
     return (
       <div style={{ position:"fixed", inset:0, background:"#000c", zIndex:200, display:"flex", alignItems:"center", justifyContent:"center" }}
@@ -547,13 +631,13 @@ Return ONLY valid JSON (no markdown):
           <button onClick={onBack} style={{ background:"transparent", border:`1px solid ${C.border}`, color:C.muted, borderRadius:8, padding:"6px 13px", fontWeight:700, fontSize:12, cursor:"pointer" }}>← Back</button>
           <div style={{ width:40, height:40, borderRadius:11, background:C.teal, display:"flex", alignItems:"center", justifyContent:"center", fontSize:20 }}>📋</div>
           <div>
-            <div style={{ fontWeight:800, fontSize:17 }}>Training Certificates</div>
-            <div style={{ color:C.muted, fontSize:12 }}>{certs.length} certificates · {workers.length} workers{expired.length>0?` · ⚠ ${expired.length} expired`:""}{ critical.length>0?` · ⚠ ${critical.length} expiring soon`:""}</div>
+            <div style={{ fontWeight:800, fontSize:17 }}>Worker Certificates</div>
+            <div style={{ color:C.muted, fontSize:12 }}>{workerCerts.length} certificates · {workers.length} workers{expired.length>0?` · ⚠ ${expired.length} expired`:""}{ critical.length>0?` · ⚠ ${critical.length} expiring soon`:""}</div>
           </div>
         </div>
         <div style={{ display:"flex", gap:8, alignItems:"center" }}>
           <span style={{ fontSize:11, color:storageReady?C.green:C.muted, fontWeight:700 }}>{storageReady ? "💾 Auto-saved" : "⏳ Loading..."}</span>
-          <button onClick={async()=>{ if(!window.confirm("Clear ALL certificates? This cannot be undone.")) return; await storageDel("certs-data"); setCerts([]); showToast("All data cleared."); }} style={{ background:"transparent", color:C.red, border:`1px solid ${C.red}44`, borderRadius:7, padding:"5px 11px", fontSize:11, fontWeight:700, cursor:"pointer" }}>🗑 Clear Data</button>
+          <button onClick={()=>{ if(!window.confirm("Clear ALL worker certificates? Trade documents are not affected. This cannot be undone.")) return; setCerts(prev=>prev.filter(c=>c.category==="trade")); showToast("Worker certificates cleared."); }} style={{ background:"transparent", color:C.red, border:`1px solid ${C.red}44`, borderRadius:7, padding:"5px 11px", fontSize:11, fontWeight:700, cursor:"pointer" }}>🗑 Clear Data</button>
           <button onClick={exportXLSX} style={{ background:C.green, color:"#052e16", border:"none", borderRadius:9, padding:"10px 22px", fontWeight:800, fontSize:14, cursor:"pointer" }}>⬇ Export .xlsx</button>
         </div>
       </div>
@@ -570,7 +654,7 @@ Return ONLY valid JSON (no markdown):
       {/* Tabs */}
       <div style={{ padding:"14px 28px 0", display:"flex", gap:4, borderBottom:`1px solid ${C.border}`, overflowX:"auto" }}>
         {TAB("dashboard", "📊 Dashboard")}
-        {TAB("certs",     `📋 Certificates (${certs.length})`)}
+        {TAB("certs",     `📋 Certificates (${workerCerts.length})`)}
         {TAB("workers",   `👷 Workers (${workers.length})`)}
         {TAB("expiring",  `⚠ Expiring (${expired.length+critical.length+warning.length})`)}
       </div>
@@ -778,6 +862,520 @@ Return ONLY valid JSON (no markdown):
 }
 
 // ═══════════════════════════════════════════════════════════════════════════════
+// TRADE SAFETY DOCUMENTS MODULE
+// ═══════════════════════════════════════════════════════════════════════════════
+function TradeDocsModule({ onBack }) {
+  const [certs, setCerts] = useState([]);
+  const [tab, setTab] = useState("dashboard");
+  const [loading, setLoading] = useState(false);
+  const [loadMsg, setLoadMsg] = useState("");
+  const [toast, setToast] = useState(null);
+  const [drag, setDrag] = useState(false);
+  const [selectedCompany, setSelectedCompany] = useState(null);
+  const [manualOpen, setManualOpen] = useState(false);
+  const [manual, setManual] = useState({ company_name:"", doc_type:"", issued_date:"", expiry_date:"", doc_number:"", issuing_body:"", per_occurrence_limit:"", certificate_holder:"", additional_insured:"", notes:"" });
+  const [storageReady, setStorageReady] = useState(false);
+  const fileRef = useRef();
+
+  useEffect(() => {
+    storageGet("certs-data").then(saved => {
+      if (saved?.certs) setCerts(saved.certs);
+      setStorageReady(true);
+    });
+  }, []);
+
+  useEffect(() => {
+    if (!storageReady) return;
+    storageSet("certs-data", { certs });
+  }, [certs, storageReady]);
+
+  // This module only manages trade/company documents (category:"trade").
+  // Worker certs (managed by the Worker Certificates module) share the same
+  // storage row but are filtered out here so the two never mix.
+  const tradeDocs = certs.filter(c => c.category === "trade");
+
+  function showToast(msg, type="ok") {
+    setToast({ msg, type });
+    setTimeout(() => setToast(null), 3500);
+  }
+
+  async function toB64(file) {
+    return new Promise((res,rej) => {
+      const r = new FileReader(); r.onload = () => res(r.result.split(",")[1]); r.onerror = rej; r.readAsDataURL(file);
+    });
+  }
+  async function toDataURL(file) {
+    return new Promise((res,rej) => {
+      const r = new FileReader(); r.onload = () => res(r.result); r.onerror = rej; r.readAsDataURL(file);
+    });
+  }
+
+  async function extractTradeDoc(file) {
+    const b64 = await toB64(file);
+    const isPDF = file.type === "application/pdf";
+    const block = isPDF
+      ? { type:"document", source:{ type:"base64", media_type:"application/pdf", data:b64 } }
+      : { type:"image",    source:{ type:"base64", media_type:file.type, data:b64 } };
+
+    const prompt = `You are a construction compliance assistant. Extract all information from this trade/subcontractor Safety Program Document.
+
+Known document types: ${TRADE_DOC_TYPES.join(", ")}
+
+Return ONLY valid JSON (no markdown):
+{
+  "company_name": "the trade/subcontractor company this document belongs to",
+  "doc_type": "best matching document type from the known list, or as written if not listed",
+  "issued_date": "YYYY-MM-DD or as written, else null",
+  "expiry_date": "YYYY-MM-DD or as written, else null — look for expiry/renewal/valid until dates",
+  "doc_number": "policy, certificate, clearance, or letter number if shown, else null",
+  "issuing_body": "organization/insurer/board/broker that issued this document, else null",
+  "per_occurrence_limit": "ONLY for CGL insurance certificates — the per-occurrence coverage limit as a plain number with no currency symbols or commas, else null",
+  "certificate_holder": "ONLY for CGL insurance certificates — the certificate holder name exactly as shown, else null",
+  "additional_insured": "ONLY for CGL insurance certificates — array of all additional insured names exactly as listed, else null",
+  "notes": "any other relevant info such as restrictions, exclusions, or conditions, else null"
+}`;
+
+    const res = await fetch("/api/claude", {
+      method:"POST",
+      headers:{ "Content-Type":"application/json" },
+      body: JSON.stringify({ model:"claude-sonnet-4-6", max_tokens:1000,
+        messages:[{ role:"user", content:[block, { type:"text", text:prompt }] }] })
+    });
+    const data = await res.json();
+    if (data.error) throw new Error("API error: " + (data.error.message || JSON.stringify(data.error)));
+    const text = data.content?.map(b => b.text||"").join("") || "";
+    if (!text) throw new Error("Empty response from API (HTTP " + res.status + ")");
+    return extractJSON(text);
+  }
+
+  async function handleFiles(files) {
+    if (!files?.length) return;
+    setLoading(true);
+    let added = 0;
+    for (const file of Array.from(files)) {
+      setLoadMsg(`Reading: "${file.name}"…`);
+      try {
+        const [extracted, dataURL] = await Promise.all([extractTradeDoc(file), toDataURL(file)]);
+        setCerts(prev => [...prev, {
+          id: Date.now() + Math.random(),
+          filename: file.name,
+          originalFile: dataURL,
+          fileType: file.type,
+          added_at: new Date().toISOString(),
+          category: "trade",
+          ...extracted
+        }]);
+        added++;
+      } catch(e) {
+        showToast(`Could not read "${file.name}": ${e.message}`, "err");
+      }
+    }
+    setLoading(false); setLoadMsg("");
+    if (added) showToast(`${added} document${added>1?"s":""} added ✓`);
+  }
+
+  function addManual() {
+    if (!manual.company_name || !manual.doc_type) { showToast("Company name and document type are required.", "err"); return; }
+    const additional_insured = manual.additional_insured ? manual.additional_insured.split(",").map(s=>s.trim()).filter(Boolean) : [];
+    setCerts(prev => [...prev, { id:Date.now(), filename:"Manual entry", added_at:new Date().toISOString(), category:"trade", ...manual, additional_insured }]);
+    setManual({ company_name:"", doc_type:"", issued_date:"", expiry_date:"", doc_number:"", issuing_body:"", per_occurrence_limit:"", certificate_holder:"", additional_insured:"", notes:"" });
+    setManualOpen(false);
+    showToast("Document added ✓");
+  }
+
+  function exportXLSX() {
+    const wb = XLSX.utils.book_new();
+    const ws1 = XLSX.utils.json_to_sheet(tradeDocs.map((c,i) => {
+      const s = expiryStatus(c.expiry_date);
+      const flags = cglComplianceFlags(c);
+      return {
+        "#":i+1, "Company":c.company_name||"", "Document Type":c.doc_type||"",
+        "Doc #":c.doc_number||"", "Issued":c.issued_date||"", "Expiry":c.expiry_date||"",
+        "Status":s.label, "Days Remaining":daysUntilExpiry(c.expiry_date)??"",
+        "Issuing Body":c.issuing_body||"",
+        "CGL Limit":c.per_occurrence_limit||"", "CGL Certificate Holder":c.certificate_holder||"",
+        "CGL Additional Insured":Array.isArray(c.additional_insured)?c.additional_insured.join("; "):(c.additional_insured||""),
+        "Compliance Issues":flags.join("; "),
+        "Notes":c.notes||"",
+      };
+    }));
+    ws1["!cols"] = [4,24,26,14,14,14,18,14,22,14,26,30,40,22].map(w=>({wch:w}));
+    XLSX.utils.book_append_sheet(wb, ws1, "All Trade Documents");
+
+    const issues = tradeDocs.filter(c => cglComplianceFlags(c).length > 0);
+    if (issues.length > 0) {
+      const ws2 = XLSX.utils.json_to_sheet(issues.map(c => ({
+        "Company":c.company_name||"", "Document Type":c.doc_type||"",
+        "Compliance Issues":cglComplianceFlags(c).join("; "),
+      })));
+      ws2["!cols"] = [24,26,60].map(w=>({wch:w}));
+      XLSX.utils.book_append_sheet(wb, ws2, "⚠ Compliance Issues");
+    }
+
+    const expiring = tradeDocs.filter(c => { const d = daysUntilExpiry(c.expiry_date); return d !== null && d <= 60; })
+      .sort((a,b) => daysUntilExpiry(a.expiry_date) - daysUntilExpiry(b.expiry_date));
+    if (expiring.length > 0) {
+      const ws3 = XLSX.utils.json_to_sheet(expiring.map(c => ({
+        "Company":c.company_name||"", "Document Type":c.doc_type||"", "Expiry":c.expiry_date||"",
+        "Days Remaining":daysUntilExpiry(c.expiry_date),
+        "Status":daysUntilExpiry(c.expiry_date) < 0 ? "EXPIRED" : daysUntilExpiry(c.expiry_date)<=30 ? "CRITICAL" : "WARNING",
+      })));
+      ws3["!cols"] = [24,26,14,14,12].map(w=>({wch:w}));
+      XLSX.utils.book_append_sheet(wb, ws3, "⚠ Expiring Soon");
+    }
+
+    XLSX.writeFile(wb, `trade-safety-documents-${new Date().toISOString().slice(0,10)}.xlsx`);
+    showToast("Spreadsheet downloaded ✓");
+  }
+
+  // Stats
+  const expired  = tradeDocs.filter(c => { const d = daysUntilExpiry(c.expiry_date); return d!==null && d<0; });
+  const critical = tradeDocs.filter(c => { const d = daysUntilExpiry(c.expiry_date); return d!==null && d>=0 && d<=30; });
+  const warning  = tradeDocs.filter(c => { const d = daysUntilExpiry(c.expiry_date); return d!==null && d>30 && d<=60; });
+  const companies = [...new Set(tradeDocs.map(c=>c.company_name).filter(Boolean))];
+  const complianceIssues = tradeDocs.filter(c => cglComplianceFlags(c).length > 0);
+
+  // Company detail modal
+  function CompanyModal({ name, onClose }) {
+    const cDocs = tradeDocs.filter(c => c.company_name === name);
+    return (
+      <div style={{ position:"fixed", inset:0, background:"#000c", zIndex:200, display:"flex", alignItems:"center", justifyContent:"center" }}
+        onClick={e => e.target===e.currentTarget && onClose()}>
+        <div style={{ background:C.card, border:`1px solid ${C.border}`, borderRadius:16, padding:28, width:"94%", maxWidth:560, maxHeight:"90vh", overflowY:"auto" }}>
+          <div style={{ display:"flex", justifyContent:"space-between", alignItems:"center", marginBottom:20 }}>
+            <div style={{ fontWeight:800, fontSize:18 }}>🏢 {name}</div>
+            <Badge color={C.purple}>{cDocs.length} doc{cDocs.length!==1?"s":""}</Badge>
+          </div>
+          {cDocs.sort((a,b) => (daysUntilExpiry(a.expiry_date)??9999) - (daysUntilExpiry(b.expiry_date)??9999)).map(c => {
+            const s = expiryStatus(c.expiry_date);
+            const flags = cglComplianceFlags(c);
+            return (
+              <div key={c.id} style={{ background:C.bg, borderRadius:10, padding:"13px 16px", marginBottom:10, border:`1px solid ${flags.length>0 ? C.red+"66" : s.level==="expired"||s.level==="critical" ? C.red+"44" : s.level==="warning" ? C.yellow+"44" : C.border}` }}>
+                <div style={{ display:"flex", justifyContent:"space-between", alignItems:"flex-start", flexWrap:"wrap", gap:8 }}>
+                  <div style={{ fontWeight:700, fontSize:14 }}>{c.doc_type}</div>
+                  <Badge color={s.color}>{s.label}</Badge>
+                </div>
+                <div style={{ display:"flex", gap:16, marginTop:7, fontSize:12, color:C.sub, flexWrap:"wrap" }}>
+                  {c.issued_date  && <span>Issued: {c.issued_date}</span>}
+                  {c.expiry_date  && <span>Expires: {c.expiry_date}</span>}
+                  {c.doc_number   && <span>Doc #: {c.doc_number}</span>}
+                  {c.issuing_body && <span>By: {c.issuing_body}</span>}
+                </div>
+                {c.doc_type === "CGL Insurance Certificate" && (
+                  <div style={{ marginTop:8, fontSize:12, color:C.sub }}>
+                    {c.per_occurrence_limit && <div>Per-occurrence limit: {c.per_occurrence_limit}</div>}
+                    {c.certificate_holder && <div>Certificate holder: {c.certificate_holder}</div>}
+                    {c.additional_insured && <div>Additional insured: {Array.isArray(c.additional_insured)?c.additional_insured.join(", "):c.additional_insured}</div>}
+                  </div>
+                )}
+                {flags.length > 0 && (
+                  <div style={{ marginTop:8, background:"#450a0a", border:`1px solid ${C.red}44`, borderRadius:7, padding:"8px 12px" }}>
+                    {flags.map((f,i) => <div key={i} style={{ color:"#fca5a5", fontSize:12, fontWeight:600 }}>⚠ {f}</div>)}
+                  </div>
+                )}
+                {c.notes && <div style={{ marginTop:6, fontSize:12, color:C.muted, fontStyle:"italic" }}>{c.notes}</div>}
+              </div>
+            );
+          })}
+          <button onClick={onClose} style={{ background:C.bg, color:C.muted, border:`1px solid ${C.border}`, borderRadius:9, padding:"10px 20px", fontWeight:700, cursor:"pointer", width:"100%", marginTop:8 }}>Close</button>
+        </div>
+      </div>
+    );
+  }
+
+  const TAB = (t, label) => (
+    <button onClick={() => setTab(t)} style={{
+      padding:"8px 16px", borderRadius:8, cursor:"pointer", fontWeight:700, fontSize:12, border:"none",
+      background: tab===t ? C.purple : "transparent", color: tab===t ? "#fff" : C.muted, transition:"all .15s", whiteSpace:"nowrap"
+    }}>{label}</button>
+  );
+
+  const INPUT = (key, label, type="text", opts=null) => (
+    <div style={{ marginBottom:12 }}>
+      <label style={{ display:"block", color:C.muted, fontSize:10, fontWeight:700, letterSpacing:1, textTransform:"uppercase", marginBottom:4 }}>{label}</label>
+      {opts
+        ? <select value={manual[key]} onChange={e => setManual(m=>({...m,[key]:e.target.value}))}
+            style={{ width:"100%", background:C.bg, border:`1px solid ${C.border}`, borderRadius:8, padding:"9px 12px", color:C.text, fontSize:14, boxSizing:"border-box" }}>
+            <option value="">— select —</option>
+            {opts.map(o => <option key={o} value={o}>{o}</option>)}
+          </select>
+        : <input type={type} value={manual[key]} onChange={e => setManual(m=>({...m,[key]:e.target.value}))}
+            style={{ width:"100%", background:C.bg, border:`1px solid ${C.border}`, borderRadius:8, padding:"9px 12px", color:C.text, fontSize:14, boxSizing:"border-box" }} />
+      }
+    </div>
+  );
+
+  return (
+    <div style={{ minHeight:"100vh", background:C.bg, color:C.text, fontFamily:"'DM Sans','Segoe UI',sans-serif", paddingBottom:60 }}>
+      {toast && (
+        <div style={{ position:"fixed", top:18, right:18, zIndex:999,
+          background:toast.type==="err"?"#450a0a":"#052e16",
+          color:toast.type==="err"?"#fca5a5":"#86efac",
+          border:`1px solid ${toast.type==="err"?C.red:C.green}`,
+          borderRadius:10, padding:"12px 22px", fontWeight:600, fontSize:14, boxShadow:"0 8px 32px #0009" }}>{toast.msg}</div>
+      )}
+      {selectedCompany && <CompanyModal name={selectedCompany} onClose={() => setSelectedCompany(null)} />}
+
+      {/* Header */}
+      <div style={{ background:C.card, borderBottom:`1px solid ${C.border}`, padding:"16px 28px", display:"flex", alignItems:"center", justifyContent:"space-between", flexWrap:"wrap", gap:12 }}>
+        <div style={{ display:"flex", alignItems:"center", gap:13 }}>
+          <button onClick={onBack} style={{ background:"transparent", border:`1px solid ${C.border}`, color:C.muted, borderRadius:8, padding:"6px 13px", fontWeight:700, fontSize:12, cursor:"pointer" }}>← Back</button>
+          <div style={{ width:40, height:40, borderRadius:11, background:C.purple, display:"flex", alignItems:"center", justifyContent:"center", fontSize:20 }}>🦺</div>
+          <div>
+            <div style={{ fontWeight:800, fontSize:17 }}>Trade Safety Documents</div>
+            <div style={{ color:C.muted, fontSize:12 }}>{tradeDocs.length} documents · {companies.length} companies{expired.length>0?` · ⚠ ${expired.length} expired`:""}{ complianceIssues.length>0?` · 🚨 ${complianceIssues.length} compliance issue${complianceIssues.length>1?"s":""}`:""}</div>
+          </div>
+        </div>
+        <div style={{ display:"flex", gap:8, alignItems:"center" }}>
+          <span style={{ fontSize:11, color:storageReady?C.green:C.muted, fontWeight:700 }}>{storageReady ? "💾 Auto-saved" : "⏳ Loading..."}</span>
+          <button onClick={()=>{ if(!window.confirm("Clear ALL trade documents? Worker certificates are not affected. This cannot be undone.")) return; setCerts(prev=>prev.filter(c=>c.category!=="trade")); showToast("Trade documents cleared."); }} style={{ background:"transparent", color:C.red, border:`1px solid ${C.red}44`, borderRadius:7, padding:"5px 11px", fontSize:11, fontWeight:700, cursor:"pointer" }}>🗑 Clear Data</button>
+          <button onClick={exportXLSX} style={{ background:C.green, color:"#052e16", border:"none", borderRadius:9, padding:"10px 22px", fontWeight:800, fontSize:14, cursor:"pointer" }}>⬇ Export .xlsx</button>
+        </div>
+      </div>
+
+      {/* Alert bar */}
+      {(complianceIssues.length > 0 || expired.length > 0) && (
+        <div style={{ background:"#450a0a", borderBottom:`1px solid ${C.red}`, padding:"10px 28px", display:"flex", alignItems:"center", gap:12, flexWrap:"wrap" }}>
+          {complianceIssues.length>0 && <span style={{ color:C.red, fontWeight:800, fontSize:13 }}>🚨 {complianceIssues.length} CGL compliance issue{complianceIssues.length>1?"s":""}</span>}
+          {expired.length>0  && <span style={{ color:C.yellow, fontWeight:800, fontSize:13 }}>⚠ {expired.length} expired document{expired.length>1?"s":""}</span>}
+          <button onClick={() => setTab("compliance")} style={{ background:C.red+"22", color:C.red, border:`1px solid ${C.red}44`, borderRadius:6, padding:"4px 12px", fontSize:12, fontWeight:700, cursor:"pointer" }}>View →</button>
+        </div>
+      )}
+
+      {/* Tabs */}
+      <div style={{ padding:"14px 28px 0", display:"flex", gap:4, borderBottom:`1px solid ${C.border}`, overflowX:"auto" }}>
+        {TAB("dashboard",   "📊 Dashboard")}
+        {TAB("docs",        `🦺 Documents (${tradeDocs.length})`)}
+        {TAB("companies",   `🏢 Companies (${companies.length})`)}
+        {TAB("compliance",  `🚨 Compliance (${complianceIssues.length})`)}
+        {TAB("expiring",    `⚠ Expiring (${expired.length+critical.length+warning.length})`)}
+      </div>
+
+      <div style={{ padding:"26px 28px" }}>
+
+        {/* DASHBOARD */}
+        {tab==="dashboard" && (
+          <div>
+            <div style={{ display:"flex", gap:14, flexWrap:"wrap", marginBottom:26 }}>
+              <Stat label="Total Documents" value={tradeDocs.length}      sub="on file"                   color={C.purple} />
+              <Stat label="Companies"       value={companies.length}      sub="tracked"                   color={C.blue}   />
+              <Stat label="Compliance Issues" value={complianceIssues.length} sub={complianceIssues.length>0?"CGL review needed":"✓ none"} color={complianceIssues.length>0?C.red:C.green} />
+              <Stat label="Expired"         value={expired.length}        sub={expired.length>0?"action required":"✓ none"} color={expired.length>0?C.red:C.green} />
+            </div>
+
+            {/* Upload zone */}
+            <div
+              onDragOver={e=>{e.preventDefault();setDrag(true);}}
+              onDragLeave={()=>setDrag(false)}
+              onDrop={e=>{e.preventDefault();setDrag(false);handleFiles(e.dataTransfer.files);}}
+              onClick={()=>fileRef.current.click()}
+              style={{ border:`2px dashed ${drag?C.purple:C.border}`, borderRadius:16, padding:"36px 24px", textAlign:"center", cursor:"pointer", background:drag?C.purple+"11":C.card, transition:"all .2s", marginBottom:16 }}>
+              <div style={{ fontSize:36, marginBottom:10 }}>📎</div>
+              <div style={{ fontWeight:700, fontSize:16, marginBottom:6 }}>Scan a Trade Document</div>
+              <div style={{ color:C.muted, fontSize:13, marginBottom:6 }}>WCB letter, SDS, COR cert, or CGL insurance certificate · Photo or PDF</div>
+              <div style={{ color:C.muted, fontSize:12 }}>Drag & drop or click to browse</div>
+              <input ref={fileRef} type="file" multiple accept="image/*,application/pdf" style={{ display:"none" }} onChange={e=>handleFiles(e.target.files)} />
+            </div>
+
+            {loading && (
+              <div style={{ background:"#1e3a5f", border:`1px solid ${C.blue}`, borderRadius:11, padding:"13px 20px", color:"#93c5fd", fontWeight:600, marginBottom:16 }}>
+                ⏳ {loadMsg || "Processing…"}
+              </div>
+            )}
+
+            <div style={{ display:"flex", gap:12, flexWrap:"wrap", marginBottom:28 }}>
+              <button onClick={()=>setManualOpen(true)} style={{ background:C.card, border:`1px solid ${C.border}`, color:C.text, borderRadius:9, padding:"10px 20px", fontWeight:700, cursor:"pointer", fontSize:13 }}>✏️ Add Manually</button>
+            </div>
+
+            <div style={{ background:"#1a1040", border:`1px solid ${C.purple}44`, borderRadius:14, padding:"20px 24px" }}>
+              <div style={{ fontWeight:700, fontSize:15, marginBottom:8 }}>🚨 CGL Compliance Check</div>
+              <div style={{ color:C.sub, fontSize:13, lineHeight:1.7 }}>
+                Every CGL Insurance Certificate is automatically checked for a per-occurrence limit of at least $5,000,000, with certificate holder "{CGL_CERT_HOLDER_LABEL}" and additional insured listing both "{CGL_ADDITIONAL_INSURED_LABELS[0]}" and "{CGL_ADDITIONAL_INSURED_LABELS[1]}". Anything that doesn't match shows up in the Compliance tab.
+              </div>
+            </div>
+          </div>
+        )}
+
+        {/* DOCUMENTS LIST */}
+        {tab==="docs" && (
+          <div>
+            <div style={{ fontWeight:700, fontSize:18, marginBottom:16 }}>Document Log</div>
+            {tradeDocs.length===0
+              ? <div style={{ color:C.muted, textAlign:"center", padding:"60px 0" }}>No trade documents yet. Scan one to get started.</div>
+              : [...tradeDocs].sort((a,b)=>(daysUntilExpiry(a.expiry_date)??9999)-(daysUntilExpiry(b.expiry_date)??9999)).map(c => {
+                const s = expiryStatus(c.expiry_date);
+                const flags = cglComplianceFlags(c);
+                return (
+                  <div key={c.id} onClick={()=>setSelectedCompany(c.company_name)} style={{ background:C.card, border:`1px solid ${flags.length>0?C.red+"66":s.level==="expired"||s.level==="critical"?C.red+"55":s.level==="warning"?C.yellow+"44":C.border}`, borderRadius:12, padding:"15px 20px", marginBottom:10, cursor:"pointer" }}>
+                    <div style={{ display:"flex", justifyContent:"space-between", alignItems:"flex-start", flexWrap:"wrap", gap:8, marginBottom:7 }}>
+                      <div>
+                        <span style={{ fontWeight:800, fontSize:15 }}>🏢 {c.company_name||"Unknown Company"}</span>
+                      </div>
+                      <div style={{ display:"flex", gap:7, alignItems:"center" }}>
+                        {flags.length>0 && <Badge color={C.red}>⚠ compliance</Badge>}
+                        <Badge color={s.color}>{s.label}</Badge>
+                        <button onClick={e=>{ e.stopPropagation(); if(window.confirm(`Delete document for ${c.company_name}?`)) setCerts(prev=>prev.filter(x=>x.id!==c.id)); }} style={{ background:"transparent", border:`1px solid ${C.red}44`, color:C.red, borderRadius:6, padding:"3px 9px", fontSize:12, fontWeight:700, cursor:"pointer" }}>✕</button>
+                      </div>
+                    </div>
+                    <div style={{ fontWeight:600, color:C.purple, fontSize:14, marginBottom:6 }}>{c.doc_type||"Unknown Document"}</div>
+                    <div style={{ display:"flex", gap:16, fontSize:12, color:C.sub, flexWrap:"wrap" }}>
+                      {c.issued_date  && <span>Issued: {c.issued_date}</span>}
+                      {c.expiry_date  && <span>Expires: {c.expiry_date}</span>}
+                      {c.doc_number   && <span>Doc #: {c.doc_number}</span>}
+                      {c.issuing_body && <span>By: {c.issuing_body}</span>}
+                    </div>
+                  </div>
+                );
+              })
+            }
+          </div>
+        )}
+
+        {/* COMPANIES */}
+        {tab==="companies" && (
+          <div>
+            <div style={{ fontWeight:700, fontSize:18, marginBottom:20 }}>Company Roster</div>
+            {companies.length===0
+              ? <div style={{ color:C.muted, textAlign:"center", padding:"60px 0" }}>No companies yet. Scan a document to add one.</div>
+              : companies.map(name => {
+                const cDocs = tradeDocs.filter(c=>c.company_name===name);
+                const cExpired = cDocs.filter(c=>{ const d=daysUntilExpiry(c.expiry_date); return d!==null&&d<0; });
+                const cIssues = cDocs.filter(c=>cglComplianceFlags(c).length>0);
+                const hasIssues = cExpired.length>0||cIssues.length>0;
+                const presentTypes = new Set(cDocs.map(c=>c.doc_type));
+                const missingTypes = TRADE_DOC_TYPES.filter(t=>!presentTypes.has(t));
+                return (
+                  <div key={name} onClick={()=>setSelectedCompany(name)} style={{ background:C.card, border:`1px solid ${hasIssues?C.red+"55":C.border}`, borderRadius:12, padding:"16px 20px", marginBottom:10, cursor:"pointer" }}>
+                    <div style={{ display:"flex", justifyContent:"space-between", alignItems:"center", flexWrap:"wrap", gap:8, marginBottom:8 }}>
+                      <span style={{ fontWeight:800, fontSize:15 }}>🏢 {name}</span>
+                      <div style={{ display:"flex", gap:6, flexWrap:"wrap" }}>
+                        <Badge color={C.purple}>{cDocs.length} doc{cDocs.length!==1?"s":""}</Badge>
+                        {cExpired.length>0 && <Badge color={C.red}>{cExpired.length} expired</Badge>}
+                        {cIssues.length>0 && <Badge color={C.red}>{cIssues.length} compliance issue{cIssues.length>1?"s":""}</Badge>}
+                      </div>
+                    </div>
+                    {missingTypes.length>0 && (
+                      <div style={{ fontSize:11, color:C.yellow, marginBottom:6 }}>Missing: {missingTypes.join(", ")}</div>
+                    )}
+                    <div style={{ display:"flex", gap:6, flexWrap:"wrap" }}>
+                      {cDocs.map(c => {
+                        const s = expiryStatus(c.expiry_date);
+                        return <Badge key={c.id} color={s.color}>{c.doc_type?.split(" ")[0]||"Doc"}</Badge>;
+                      })}
+                    </div>
+                    <div style={{ marginTop:7, color:C.muted, fontSize:11 }}>Tap to view full document list →</div>
+                  </div>
+                );
+              })
+            }
+          </div>
+        )}
+
+        {/* COMPLIANCE */}
+        {tab==="compliance" && (
+          <div>
+            <div style={{ fontWeight:700, fontSize:18, marginBottom:6 }}>CGL Compliance Issues</div>
+            <div style={{ color:C.muted, fontSize:13, marginBottom:22 }}>Certificates that don't meet the $5,000,000 limit, certificate holder, or additional insured requirements</div>
+            {complianceIssues.length===0
+              ? <div style={{ background:"#052e16", border:`1px solid ${C.green}44`, borderRadius:14, padding:"32px 24px", textAlign:"center" }}>
+                  <div style={{ fontSize:32, marginBottom:10 }}>✅</div>
+                  <div style={{ fontWeight:700, fontSize:16, color:C.green }}>All CGL certificates on file are compliant</div>
+                </div>
+              : complianceIssues.map(c => {
+                const flags = cglComplianceFlags(c);
+                return (
+                  <div key={c.id} onClick={()=>setSelectedCompany(c.company_name)} style={{ background:C.card, border:`1px solid ${C.red}55`, borderRadius:11, padding:"14px 18px", marginBottom:9, cursor:"pointer" }}>
+                    <div style={{ display:"flex", justifyContent:"space-between", flexWrap:"wrap", gap:8, marginBottom:8 }}>
+                      <span style={{ fontWeight:800 }}>🏢 {c.company_name||"Unknown"}</span>
+                      <Badge color={C.red}>{flags.length} issue{flags.length>1?"s":""}</Badge>
+                    </div>
+                    {flags.map((f,i) => <div key={i} style={{ color:"#fca5a5", fontSize:12, fontWeight:600, marginBottom:3 }}>⚠ {f}</div>)}
+                  </div>
+                );
+              })
+            }
+          </div>
+        )}
+
+        {/* EXPIRING */}
+        {tab==="expiring" && (
+          <div>
+            <div style={{ fontWeight:700, fontSize:18, marginBottom:6 }}>Expiry Alerts</div>
+            <div style={{ color:C.muted, fontSize:13, marginBottom:22 }}>Documents expired or expiring within 60 days</div>
+            {expired.length===0 && critical.length===0 && warning.length===0
+              ? <div style={{ background:"#052e16", border:`1px solid ${C.green}44`, borderRadius:14, padding:"32px 24px", textAlign:"center" }}>
+                  <div style={{ fontSize:32, marginBottom:10 }}>✅</div>
+                  <div style={{ fontWeight:700, fontSize:16, color:C.green }}>All documents are current</div>
+                  <div style={{ color:C.muted, fontSize:13, marginTop:6 }}>No expirations within 60 days</div>
+                </div>
+              : <>
+                {[
+                  { group: expired,  label:"🚨 Expired", color: C.red    },
+                  { group: critical, label:"⚠ Expiring Within 30 Days", color: C.red    },
+                  { group: warning,  label:"⏰ Expiring in 31–60 Days",  color: C.yellow },
+                ].map(({ group, label, color }) => group.length > 0 && (
+                  <div key={label} style={{ marginBottom:28 }}>
+                    <div style={{ fontWeight:700, fontSize:14, color, marginBottom:12, display:"flex", alignItems:"center", gap:8 }}>
+                      {label} <Badge color={color}>{group.length}</Badge>
+                    </div>
+                    {group.map(c => {
+                      const s = expiryStatus(c.expiry_date);
+                      return (
+                        <div key={c.id} onClick={()=>setSelectedCompany(c.company_name)} style={{ background:C.card, border:`1px solid ${color}44`, borderRadius:11, padding:"14px 18px", marginBottom:9, cursor:"pointer" }}>
+                          <div style={{ display:"flex", justifyContent:"space-between", flexWrap:"wrap", gap:8, marginBottom:6 }}>
+                            <span style={{ fontWeight:800 }}>🏢 {c.company_name||"Unknown"}</span>
+                            <Badge color={color}>{s.label}</Badge>
+                          </div>
+                          <div style={{ color:C.purple, fontWeight:600, fontSize:13, marginBottom:4 }}>{c.doc_type}</div>
+                          <div style={{ fontSize:12, color:C.sub }}>
+                            {c.expiry_date && <span>Expires: {c.expiry_date}</span>}
+                          </div>
+                        </div>
+                      );
+                    })}
+                  </div>
+                ))}
+              </>
+            }
+          </div>
+        )}
+      </div>
+
+      {/* Manual entry modal */}
+      {manualOpen && (
+        <div style={{ position:"fixed", inset:0, background:"#000b", zIndex:100, display:"flex", alignItems:"center", justifyContent:"center" }}
+          onClick={e=>e.target===e.currentTarget&&setManualOpen(false)}>
+          <div style={{ background:C.card, border:`1px solid ${C.border}`, borderRadius:16, padding:30, width:"92%", maxWidth:500, maxHeight:"90vh", overflowY:"auto" }}>
+            <div style={{ fontWeight:800, fontSize:18, marginBottom:20 }}>✏️ Add Trade Document Manually</div>
+            {INPUT("company_name","Company / Trade Name *")}
+            {INPUT("doc_type","Document Type *","text",TRADE_DOC_TYPES)}
+            {INPUT("doc_number","Document / Policy Number")}
+            {INPUT("issuing_body","Issuing Body / Insurer")}
+            {INPUT("issued_date","Issue Date","date")}
+            {INPUT("expiry_date","Expiry Date","date")}
+            {manual.doc_type === "CGL Insurance Certificate" && <>
+              {INPUT("per_occurrence_limit","Per-Occurrence Limit ($)","number")}
+              {INPUT("certificate_holder","Certificate Holder")}
+              {INPUT("additional_insured","Additional Insured (comma-separated)")}
+            </>}
+            {INPUT("notes","Notes")}
+            {manual.expiry_date && (() => {
+              const s = expiryStatus(manual.expiry_date);
+              if (s.level==="none") return null;
+              return <div style={{ background:s.color+"15", border:`1px solid ${s.color}44`, borderRadius:8, padding:"9px 14px", marginBottom:12, fontSize:13, color:s.color, fontWeight:600 }}>{s.label}</div>;
+            })()}
+            <div style={{ display:"flex", gap:10, marginTop:18 }}>
+              <button onClick={addManual} style={{ background:C.purple, color:"#fff", border:"none", borderRadius:9, padding:"11px 0", fontWeight:800, cursor:"pointer", flex:1 }}>Add Document</button>
+              <button onClick={()=>setManualOpen(false)} style={{ background:C.bg, color:C.muted, border:`1px solid ${C.border}`, borderRadius:9, padding:"11px 18px", fontWeight:700, cursor:"pointer" }}>Cancel</button>
+            </div>
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════
 // CONCRETE MODULE (full v2 app, wrapped)
 // ═══════════════════════════════════════════════════════════════════════════════
 function ConcreteModule({ onBack }) {
@@ -876,30 +1474,6 @@ Return ONLY valid JSON (no markdown):
     const text = data.content?.map(b=>b.text||"").join("")||"";
     if(!text) throw new Error("Empty API response (HTTP "+res.status+")");
     return extractJSON(text);
-  }
-
-function extractJSON(text) {
-    // Strip ALL markdown fences and preamble first
-    let cleaned = text.replace(/```json|```/gi,"").trim();
-    // Remove any preamble before the first [ or {
-    const arrStart = cleaned.indexOf("[");
-    const objStart = cleaned.indexOf("{");
-    let jsonStart = -1;
-    if (arrStart !== -1 && objStart !== -1) jsonStart = Math.min(arrStart, objStart);
-    else if (arrStart !== -1) jsonStart = arrStart;
-    else if (objStart !== -1) jsonStart = objStart;
-    if (jsonStart > 0) cleaned = cleaned.slice(jsonStart);
-    // Find matching end bracket
-    const isArr = cleaned.startsWith("[");
-    const endChar = isArr ? "]" : "}";
-    const endIdx = cleaned.lastIndexOf(endChar);
-    if (endIdx !== -1) cleaned = cleaned.slice(0, endIdx + 1);
-    // Try to parse
-    try { return JSON.parse(cleaned); } catch(e) {}
-    // Last resort — try original stripped
-    const stripped = text.replace(/```json|```/gi,"").trim();
-    try { return JSON.parse(stripped); } catch(e) {}
-    throw new Error("Could not parse response: " + text.slice(0, 120));
   }
 
   function suggestLocation(ticketMpa, currentTickets) {
@@ -1784,7 +2358,8 @@ Return ONLY valid JSON, no markdown:
 // ═══════════════════════════════════════════════════════════════════════════════
 export default function App() {
   const [module, setModule] = useState(null);
-  if (module === "concrete") return <ConcreteModule onBack={() => setModule(null)} />;
-  if (module === "certs")    return <CertsModule    onBack={() => setModule(null)} />;
+  if (module === "concrete")  return <ConcreteModule  onBack={() => setModule(null)} />;
+  if (module === "certs")     return <CertsModule     onBack={() => setModule(null)} />;
+  if (module === "tradedocs") return <TradeDocsModule onBack={() => setModule(null)} />;
   return <LandingScreen onSelect={setModule} />;
 }
