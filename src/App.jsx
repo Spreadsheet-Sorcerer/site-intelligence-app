@@ -288,8 +288,8 @@ function LandingScreen({ onSelect }) {
       stats: ["25 cert types","Expiry tracking","Worker roster","Email intake ready"],
     },
     {
-      id:"tradedocs", emoji:"🦺", title:"Trade Safety Documents",
-      desc:"Track each trade's Safety Program Documents — WCB letters, SDS sheets, COR status, and CGL insurance — with automatic compliance checks.",
+      id:"tradedocs", emoji:"🦺", title:"Trade Documents",
+      desc:"Track each trade's compliance documents — WCB letters, SDS sheets, COR status, and CGL insurance — with automatic compliance checks.",
       color: C.purple,
       stats: ["WCB · SDS · COR · CGL","$5M CGL auto-check","Company roster","Expiry tracking"],
     },
@@ -399,7 +399,7 @@ function CertsModule({ onBack }) {
   }, [certs, storageReady]);
 
   // This module only manages worker certs. Trade documents (added via the
-  // Trade Safety Documents module) share the same storage row but are tagged
+  // Trade Documents module) share the same storage row but are tagged
   // category:"trade" and filtered out here so the two never mix.
   const workerCerts = certs.filter(c => c.category !== "trade");
 
@@ -1053,7 +1053,10 @@ Return ONLY valid JSON (no markdown):
               <div key={c.id} style={{ background:C.bg, borderRadius:10, padding:"13px 16px", marginBottom:10, border:`1px solid ${flags.length>0 ? C.red+"66" : s.level==="expired"||s.level==="critical" ? C.red+"44" : s.level==="warning" ? C.yellow+"44" : C.border}` }}>
                 <div style={{ display:"flex", justifyContent:"space-between", alignItems:"flex-start", flexWrap:"wrap", gap:8 }}>
                   <div style={{ fontWeight:700, fontSize:14 }}>{c.doc_type}</div>
-                  <Badge color={s.color}>{s.label}</Badge>
+                  <div style={{ display:"flex", gap:7, alignItems:"center" }}>
+                    {(c.file_url||c.originalFile)&&<button onClick={e=>{ e.stopPropagation(); const src=c.file_url||c.originalFile; const isImg=/^data:image|\.(jpg|jpeg|png|gif|webp|heic)/i.test(src); const w=window.open(); w.document.write(isImg?`<html><body style="margin:0;background:#000;display:flex;align-items:center;justify-content:center;min-height:100vh"><img src="${src}" style="max-width:100%;max-height:100vh;object-fit:contain"></body></html>`:`<iframe src="${src}" width="100%" height="100%" style="border:none;position:fixed;top:0;left:0"></iframe>`); }} style={{background:"transparent",border:`1px solid ${C.blue}44`,color:C.blue,borderRadius:6,padding:"3px 9px",fontSize:12,fontWeight:700,cursor:"pointer"}}>📄 View</button>}
+                    <Badge color={s.color}>{s.label}</Badge>
+                  </div>
                 </div>
                 <div style={{ display:"flex", gap:16, marginTop:7, fontSize:12, color:C.sub, flexWrap:"wrap" }}>
                   {c.issued_date  && <span>Issued: {c.issued_date}</span>}
@@ -1122,7 +1125,7 @@ Return ONLY valid JSON (no markdown):
           <button onClick={onBack} style={{ background:"transparent", border:`1px solid ${C.border}`, color:C.muted, borderRadius:8, padding:"6px 13px", fontWeight:700, fontSize:12, cursor:"pointer" }}>← Back</button>
           <div style={{ width:40, height:40, borderRadius:11, background:C.purple, display:"flex", alignItems:"center", justifyContent:"center", fontSize:20 }}>🦺</div>
           <div>
-            <div style={{ fontWeight:800, fontSize:17 }}>Trade Safety Documents</div>
+            <div style={{ fontWeight:800, fontSize:17 }}>Trade Documents</div>
             <div style={{ color:C.muted, fontSize:12 }}>{tradeDocs.length} documents · {companies.length} companies{expired.length>0?` · ⚠ ${expired.length} expired`:""}{ complianceIssues.length>0?` · 🚨 ${complianceIssues.length} compliance issue${complianceIssues.length>1?"s":""}`:""}</div>
           </div>
         </div>
@@ -1214,6 +1217,7 @@ Return ONLY valid JSON (no markdown):
                       <div style={{ display:"flex", gap:7, alignItems:"center" }}>
                         {flags.length>0 && <Badge color={C.red}>⚠ compliance</Badge>}
                         <Badge color={s.color}>{s.label}</Badge>
+                        {(c.file_url||c.originalFile)&&<button onClick={e=>{ e.stopPropagation(); const src=c.file_url||c.originalFile; const isImg=/^data:image|\.(jpg|jpeg|png|gif|webp|heic)/i.test(src); const w=window.open(); w.document.write(isImg?`<html><body style="margin:0;background:#000;display:flex;align-items:center;justify-content:center;min-height:100vh"><img src="${src}" style="max-width:100%;max-height:100vh;object-fit:contain"></body></html>`:`<iframe src="${src}" width="100%" height="100%" style="border:none;position:fixed;top:0;left:0"></iframe>`); }} style={{background:"transparent",border:`1px solid ${C.blue}44`,color:C.blue,borderRadius:6,padding:"3px 9px",fontSize:12,fontWeight:700,cursor:"pointer"}}>📄 View</button>}
                         <button onClick={e=>{ e.stopPropagation(); if(window.confirm(`Delete document for ${c.company_name}?`)) setCerts(prev=>prev.filter(x=>x.id!==c.id)); }} style={{ background:"transparent", border:`1px solid ${C.red}44`, color:C.red, borderRadius:6, padding:"3px 9px", fontSize:12, fontWeight:700, cursor:"pointer" }}>✕</button>
                       </div>
                     </div>
