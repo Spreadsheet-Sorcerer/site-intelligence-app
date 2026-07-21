@@ -102,6 +102,7 @@ function cglComplianceFlags(doc) {
 
 // ─── CONCRETE SCOPE ───────────────────────────────────────────────────────────
 const SCOPE = [
+  { area:"Mud Slabs",   item:"Slabs",                m3:185.0,  mpa:"20 MPa"       },
   { area:"SOG",         item:"Slabs",                m3:305.0,  mpa:"25 MPa/N-CF" },
   { area:"Foundations", item:"Wall",                 m3:287.3,  mpa:"25 MPa/F-2"  },
   { area:"Foundations", item:"Raft",                 m3:327.6,  mpa:"25 MPa/F-2"  },
@@ -198,9 +199,7 @@ const PUMP_CATEGORIES = PUMP_BUDGET.map(r => r.category);
 const TOTAL_PUMP_BUDGET_M3 = PUMP_BUDGET.reduce((s,r) => s + r.volume_m3, 0);
 const TOTAL_PUMP_BUDGET_HOURS = PUMP_BUDGET.reduce((s,r) => s + r.hours, 0);
 const M3_TO_YD3 = 1.30795;
-// Mud slabs are a valid pour location but are not added to SCOPE here because
-// doing so would incorrectly increase the approved 9,133.5 m³ building total.
-const AREAS = ["Mud Slabs", ...new Set(SCOPE.map(r => r.area))];
+const AREAS = [...new Set(SCOPE.map(r => r.area))];
 const ITEMS = [...new Set(SCOPE.map(r => r.item).filter(Boolean))];
 const MPA_SPEC = {};
 SCOPE.forEach(r => { if (r.area && r.item) MPA_SPEC[`${r.area}|||${r.item}`] = r.mpa; });
@@ -1831,7 +1830,7 @@ Return ONLY valid JSON, no markdown:
           <div style={{width:40,height:40,borderRadius:11,background:C.accent,display:"flex",alignItems:"center",justifyContent:"center",fontSize:20}}>🏗️</div>
           <div>
             <div style={{fontWeight:800,fontSize:17}}>Concrete Tracker</div>
-            <div style={{color:C.muted,fontSize:12}}>9133.5 m³ scope · {tickets.length} tickets · {invoices.length} invoices{mpaMismatches.length>0?` · ⚠ ${mpaMismatches.length} MPa mismatch${mpaMismatches.length>1?"es":""}`:""}</div>
+            <div style={{color:C.muted,fontSize:12}}>{fmt(TOTAL_SCOPE_M3,1)} m³ scope · {tickets.length} tickets · {invoices.length} invoices{mpaMismatches.length>0?` · ⚠ ${mpaMismatches.length} MPa mismatch${mpaMismatches.length>1?"es":""}`:""}</div>
           </div>
         </div>
         <div style={{display:"flex",gap:8,alignItems:"center"}}>
@@ -2239,7 +2238,7 @@ Return ONLY valid JSON, no markdown:
           const invoicedAmount=invoices.reduce((s,inv)=>s+(parseFloat(inv.total_amount)||0),0);
           const derivedRate=invoicedVolume>0&&invoicedAmount>0?invoicedAmount/invoicedVolume:null;
           const totalEstCost=rate?remaining*rate:null;
-          const areaRows=AREAS.map(area=>{ const at=areaTotals[area]||{scope:0,poured:0}; const rem=Math.max(0,at.scope-at.poured); const p=at.scope>0?(at.poured/at.scope)*100:0; const status=p>=100?"complete":p>0?"inprogress":"notstarted"; const estCost=rate&&rem>0?rem*rate:null; const areaMpas=[...new Set(SCOPE.filter(r=>r.area===area&&r.mpa).map(r=>r.mpa))]; return{area,scope:at.scope,poured:at.poured,rem,p,status,estCost,areaMpas}; });
+          const areaRows=AREAS.map(area=>{ const at=areaTotals[area]||{scope:0,poured:0}; const hasScope=at.scope>0; const rem=hasScope?Math.max(0,at.scope-at.poured):null; const p=hasScope?(at.poured/at.scope)*100:0; const status=hasScope&&p>=100?"complete":at.poured>0?"inprogress":"notstarted"; const estCost=rate&&rem>0?rem*rate:null; const areaMpas=[...new Set(Object.entries(MPA_SPEC).filter(([key])=>key.startsWith(`${area}|||`)).map(([,mpa])=>mpa))]; return{area,scope:at.scope,poured:at.poured,rem,p,status,estCost,areaMpas,hasScope}; });
           const STATUS_CONFIG={complete:{label:"✅ Complete",color:C.green},inprogress:{label:"🟡 In Progress",color:C.yellow},notstarted:{label:"🔴 Not Started",color:C.red}};
           return(<div>
             <div style={{fontWeight:700,fontSize:18,marginBottom:6}}>Remaining Works</div>
@@ -2263,13 +2262,13 @@ Return ONLY valid JSON, no markdown:
             {areaRows.map(row=>{ const sc=STATUS_CONFIG[row.status]; return(<div key={row.area} style={{background:C.card,border:`1px solid ${row.status==="complete"?C.green+"44":row.status==="inprogress"?C.yellow+"44":C.border}`,borderRadius:13,padding:"15px 20px",marginBottom:10}}>
               <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:8,flexWrap:"wrap",gap:8}}>
                 <div style={{display:"flex",alignItems:"center",gap:10,flexWrap:"wrap"}}><span style={{fontWeight:800,fontSize:15}}>📍 {row.area}</span><Badge color={sc.color}>{sc.label}</Badge>{row.areaMpas.map(m=><MpaBadge key={m} mpa={m}/>)}</div>
-                <div style={{display:"flex",gap:8,flexWrap:"wrap"}}><Badge color={C.accent}>{fmt(row.p,1)}%</Badge>{row.estCost!==null&&<Badge color={C.green}>${row.estCost.toLocaleString(undefined,{maximumFractionDigits:0})} est.</Badge>}</div>
+                <div style={{display:"flex",gap:8,flexWrap:"wrap"}}>{row.hasScope?<Badge color={C.accent}>{fmt(row.p,1)}%</Badge>:<Badge color={C.yellow}>Scope Not Set</Badge>}{row.estCost!==null&&<Badge color={C.green}>${row.estCost.toLocaleString(undefined,{maximumFractionDigits:0})} est.</Badge>}</div>
               </div>
               <Bar pct={row.p} color={row.status==="complete"?C.green:row.status==="inprogress"?C.yellow:C.border}/>
               <div style={{display:"flex",gap:20,marginTop:9,fontSize:13,flexWrap:"wrap"}}>
                 <span style={{color:C.muted}}>Poured: <b style={{color:C.text}}>{fmt(row.poured)} m³</b></span>
-                <span style={{color:C.muted}}>Scope: <b style={{color:C.text}}>{fmt(row.scope)} m³</b></span>
-                {row.rem>0?<span style={{color:C.muted}}>Still to pour: <b style={{color:C.yellow}}>{fmt(row.rem)} m³</b></span>:<span style={{color:C.green,fontWeight:700}}>✓ All poured</span>}
+                <span style={{color:C.muted}}>Scope: <b style={{color:row.hasScope?C.text:C.yellow}}>{row.hasScope?`${fmt(row.scope)} m³`:"Not set"}</b></span>
+                {!row.hasScope?null:row.rem>0?<span style={{color:C.muted}}>Still to pour: <b style={{color:C.yellow}}>{fmt(row.rem)} m³</b></span>:<span style={{color:C.green,fontWeight:700}}>✓ All poured</span>}
               </div>
             </div>); })}
           </div>);
