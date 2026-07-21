@@ -1727,7 +1727,15 @@ Return ONLY valid JSON, no markdown:
     const wb=XLSX.utils.book_new();
     const ws1=XLSX.utils.json_to_sheet(tickets.map((t,i)=>{
       const mismatch=checkMpaMismatch(t);
-      return {"#":i+1,"Date":t.date||"","Ticket #":t.ticket_number||"","Supplier":t.supplier||"","Mix Design (Ticket)":t.mix_design||"","Spec MPa":t.area&&t.item?(MPA_SPEC[`${t.area}|||${t.item}`]||""):"","MPa Status":mismatch?`⚠ MISMATCH (spec: ${mismatch.specMpa})`:t.mix_design?"✓ OK":"—","Area":t.area||"","Element":t.item||"","Volume (m³)":parseFloat(t.volume_m3)||"","Volume (yd³)":parseFloat(t.volume_yd3)||"","Pumped (m³)":parseFloat(t.pump_volume_m3)||"","Pump Hours Charged":parseFloat(t.pump_hours_charged)||"","Invoice #":t.invoice_number||"","Driver / Operator":t.driver||"","Truck / Unit #":t.truck_number||"","Notes":t.notes||""};
+      const ticketKey=String(t.ticket_number||"").trim().toLowerCase();
+      const matchedInvoice=invoices.find(inv=>{
+        const invoiceTickets=(inv.ticket_numbers||[]).map(n=>String(n).trim().toLowerCase());
+        const directMatch=ticketKey!==""&&invoiceTickets.includes(ticketKey);
+        const savedInvoiceMatch=String(t.invoice_number||"").trim()!==""&&String(t.invoice_number).trim().toLowerCase()===String(inv.invoice_number||"").trim().toLowerCase();
+        return directMatch||savedInvoiceMatch;
+      });
+      const exportInvoiceNumber=matchedInvoice?.invoice_number||t.invoice_number||"";
+      return {"#":i+1,"Date":t.date||"","Ticket #":t.ticket_number||"","Supplier":t.supplier||"","Mix Design (Ticket)":t.mix_design||"","Spec MPa":t.area&&t.item?(MPA_SPEC[`${t.area}|||${t.item}`]||""):"","MPa Status":mismatch?`⚠ MISMATCH (spec: ${mismatch.specMpa})`:t.mix_design?"✓ OK":"—","Area":t.area||"","Element":t.item||"","Volume (m³)":parseFloat(t.volume_m3)||"","Volume (yd³)":parseFloat(t.volume_yd3)||"","Pumped (m³)":parseFloat(t.pump_volume_m3)||"","Pump Hours Charged":parseFloat(t.pump_hours_charged)||"","Invoice #":exportInvoiceNumber,"Driver / Operator":t.driver||"","Truck / Unit #":t.truck_number||"","Notes":t.notes||""};
     }));
     ws1["!cols"]=[4,12,16,22,18,16,20,14,14,14,14,14,14,12,22].map(w=>({wch:w}));
     XLSX.utils.book_append_sheet(wb,ws1,"Ticket Log");
