@@ -210,9 +210,11 @@ function parseMpaNum(str) {
   // Match "35 MPa", "35MPa", "35MPA" etc
   const m = s.match(/(\d+)\s*[Mm][Pp][Aa]/);
   if (m) return parseInt(m[1]);
-  // Match product codes like "Q35NA1A", "Q25NB1A" — extract the number after Q
-  const q = s.match(/[Qq](\d+)[A-Za-z]/);
-  if (q) return parseInt(q[1]);
+  // Match supplier product codes such as Q35NA1A, Q25NB1A, and Ocean's
+  // S20P20. The first number after Q/S is the concrete strength; the later
+  // number may be aggregate size and must not be used as the MPa value.
+  const productCode = s.match(/[QqSs](\d+)[A-Za-z]/);
+  if (productCode) return parseInt(productCode[1]);
   // Match plain number
   const n = parseFloat(s);
   return isNaN(n) ? null : n;
