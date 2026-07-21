@@ -1708,7 +1708,23 @@ Return ONLY valid JSON, no markdown:
   const totalYd3=tickets.reduce((s,t)=>s+(parseFloat(t.volume_yd3)||0),0);
   const totalPumpM3   = tickets.reduce((s,t) => s + (parseFloat(t.pump_volume_m3)||0), 0);
   const totalPumpHours = tickets.reduce((s,t) => s + (parseFloat(t.pump_hours_charged)||0), 0);
-  const totalPumpCost = tickets.reduce((s,t) => s + (parseFloat(t.pump_cost)||0), 0);
+  // Pump slips usually record volume/hours but not pricing. Pull pumping charges
+  // from uploaded invoice line items, while retaining ticket-entered costs only
+  // when that ticket is not already represented by a priced invoice.
+  const invoicePumpData = invoices.map(inv => {
+    const pumpCost = (inv.line_items||[])
+      .filter(line=>/pump/i.test(String(line.description||"")))
+      .reduce((s,line)=>s+(parseFloat(line.amount)||0),0);
+    const ticketKeys = new Set((inv.ticket_numbers||[]).map(ticketNumberKey).filter(Boolean));
+    return { pumpCost, ticketKeys };
+  });
+  const invoicePumpCost = invoicePumpData.reduce((s,inv)=>s+inv.pumpCost,0);
+  const invoicedPumpTicketKeys = new Set(invoicePumpData.filter(inv=>inv.pumpCost>0).flatMap(inv=>[...inv.ticketKeys]));
+  const ticketPumpCost = tickets.reduce((s,t)=>{
+    const key=ticketNumberKey(t.ticket_number);
+    return s+(key&&invoicedPumpTicketKeys.has(key)?0:(parseFloat(t.pump_cost)||0));
+  },0);
+  const totalPumpCost = invoicePumpCost + ticketPumpCost;
   const pumpRemaining = Math.max(0, TOTAL_PUMP_BUDGET_M3 - totalPumpM3);
   const pumpHoursRemaining = Math.max(0, TOTAL_PUMP_BUDGET_HOURS - totalPumpHours);
   const pumpPct       = TOTAL_PUMP_BUDGET_M3 > 0 ? Math.min(100,(totalPumpM3/TOTAL_PUMP_BUDGET_M3)*100) : 0;
@@ -2125,7 +2141,7 @@ Return ONLY valid JSON, no markdown:
               <Stat label="Pump Remaining"  value={`${fmt(pumpRemaining)} m³`}      sub="budget left"                                    color={pumpRemaining<50?C.red:C.yellow}/>
               <Stat label="Pump Hours Used" value={`${fmt(totalPumpHours)} hrs`}    sub={`of ${fmt(TOTAL_PUMP_BUDGET_HOURS)} hrs budgeted`} color={totalPumpHours>TOTAL_PUMP_BUDGET_HOURS?C.red:C.blue}/>
               <Stat label="Hours Remaining" value={`${fmt(pumpHoursRemaining)} hrs`} sub="budget left" color={pumpHoursRemaining<10?C.red:C.yellow}/>
-              <Stat label="Total Charged"   value={`$${totalPumpCost.toLocaleString(undefined,{minimumFractionDigits:2,maximumFractionDigits:2})}`} sub="from tickets"  color={C.green}/>
+              <Stat label="Pumping Charged" value={`$${totalPumpCost.toLocaleString(undefined,{minimumFractionDigits:2,maximumFractionDigits:2})}`} sub="before HST · from invoices/tickets" color={C.green}/>
               <Stat label="Tickets w/ Pump" value={tickets.filter(t=>parseFloat(t.pump_volume_m3)>0).length} sub="of total tickets" color={C.blue}/>
             </div>
             <div style={{background:C.card,border:`1px solid ${C.border}`,borderRadius:14,padding:"20px 24px",marginBottom:24}}>
