@@ -191,10 +191,12 @@ const PUMP_BUDGET = [
   { category: "Mud Slabs",          volume_m3: 185.00,   hours: 6.16   },
   { category: "Foundations",        volume_m3: 785.00,   hours: 39.25  },
   { category: "Slab on Grade",      volume_m3: 305.00,   hours: 19.04  },
-  { category: "Sus Slabs up to L6", volume_m3: 166.55,   hours: 3331.0 },
+  { category: "Sus Slabs up to L6", volume_m3: 166.55,   hours: 33.31  },
   { category: "Verticals up to L6", volume_m3: 1102.00,  hours: 92.0   },
 ];
+const PUMP_CATEGORIES = PUMP_BUDGET.map(r => r.category);
 const TOTAL_PUMP_BUDGET_M3 = PUMP_BUDGET.reduce((s,r) => s + r.volume_m3, 0);
+const TOTAL_PUMP_BUDGET_HOURS = PUMP_BUDGET.reduce((s,r) => s + r.hours, 0);
 const M3_TO_YD3 = 1.30795;
 const AREAS = [...new Set(SCOPE.map(r => r.area))];
 const ITEMS = [...new Set(SCOPE.map(r => r.item).filter(Boolean))];
@@ -1451,12 +1453,12 @@ function ConcreteModule({ onBack }) {
     const isPDF = file.type==="application/pdf";
     const block = isPDF ? {type:"document",source:{type:"base64",media_type:"application/pdf",data:b64}} : {type:"image",source:{type:"base64",media_type:file.type,data:b64}};
     const mpaRef = SCOPE.filter(r=>r.item).map(r=>`${r.area} ${r.item}: ${r.mpa}`).join(", ");
-    const prompt = `You are a construction data extraction assistant. This file may contain ONE or MULTIPLE concrete delivery dockets/tickets. Extract ALL tickets found.
+    const prompt = `You are a construction data extraction assistant. This file may contain ONE or MULTIPLE concrete delivery dockets AND separate pumping/equipment slips. Extract EVERY concrete ticket and EVERY pumping slip as its own record. Do not ignore the last page just because it is a different form.
 Project areas: ${AREAS.join(", ")}. Element types: ${ITEMS.join(", ")}.
 
 CRITICAL FIELD EXTRACTION RULES — read carefully:
 
-1. ticket_number: Read ONLY from the box explicitly labelled "TICKET NO", "NO. BILLET", or "TICKET NO / NO. BILLET". On Quality Concrete tickets this is near the bottom of the form above "AT PLANT TIME". It is typically a 7-8 digit number like 11477789. Do NOT use ORDER NO, PO number, or customer number.
+1. ticket_number: For a concrete delivery ticket, read ONLY from the box explicitly labelled "TICKET NO", "NO. BILLET", or "TICKET NO / NO. BILLET". For a separate "EXTRA WORK ORDERS / HOURLY EQUIPMENT RENTALS" pumping form, use the number labelled "Slip No." as ticket_number. Do NOT use ORDER NO, PO number, customer number, or unit number.
 
 2. mix_design (MOST IMPORTANT): You must find the concrete STRENGTH in MPa. Look for ANY of these:
    - A field labelled "PRODUCT CODE" or "CODE DU PRODUIT" — will contain codes like "Q35NA1A", "Q25NB1A", "HRWR10"
@@ -1475,13 +1477,20 @@ CRITICAL FIELD EXTRACTION RULES — read carefully:
 
 4. date: The delivery/load date on the ticket in YYYY-MM-DD format. Read the printed dispatch date exactly. This project is active in 2026. For example, printed 2026/07/20 or handwritten 20/07/26 means 2026-07-20 — never 2020-07-26. Do not swap the day with digits from the year.
 
-5. pumping: Look for a line item labelled "Pumping", "Pump", or "Pompage" on the ticket. If found, extract:
+5. pumping: Look for a line item labelled "Pumping", "Pump", or "Pompage" on a delivery ticket AND look for a separate yellow or white "EXTRA WORK ORDERS / HOURLY EQUIPMENT RENTALS" form where TYPE OF EQUIPMENT says Pump. A pumping form is a valid record even though it has no concrete mix design. Extract:
    - pump_volume_m3: the volume pumped in m³ (e.g. 8.00)
    - pump_cost: the dollar amount charged for pumping (e.g. 450.00, as a number without $ sign)
-   If no pumping line item exists on this ticket, return null for both.
+   - pump_hours_worked: the number under TIME WORKED
+   - pump_travel_hours: the number under TRAVEL TIME
+   - pump_hours_charged: the number under TOTAL HOURS CHARGED
+   - For a pumping form, put the pump unit number in truck_number and the operator/laborer in driver.
+   - For a pumping form, set volume_m3 and volume_yd3 to null. The number under MATERIALS / QUANTITY USED is pump_volume_m3 and must not be counted again as delivered concrete.
+   - pump_category: choose exactly one of: ${PUMP_CATEGORIES.join(", ")}. Use the form's description of work. "Mud slab" means "Mud Slabs"; do not also classify it as "Slab on Grade".
+   - Use the description of work to select area/item. "Mud slab" should be area "SOG" and item "Slabs".
+   If no pumping information exists on this record, return null for all pumping fields.
 
 Return ONLY a valid JSON array (even if only one ticket). No markdown, no explanation:
-[{"date":"YYYY-MM-DD","ticket_number":"7-8 digit from TICKET NO field","supplier":"supplier name","mix_design":"MPa strength and mix code e.g. 35 MPa N 20mm or Q35NA1A","volume_m3":number or null,"volume_yd3":number or null,"pump_volume_m3":number or null,"pump_cost":number or null,"area":"best match from area list or null","item":"best match from element list or null","invoice_number":"string or null","driver":"string or null","truck_number":"string or null","notes":"string or null"}]`;
+[{"date":"YYYY-MM-DD","ticket_number":"ticket number or pumping Slip No.","supplier":"supplier name","mix_design":"MPa strength and mix code, or null for pumping slip","volume_m3":number or null,"volume_yd3":number or null,"pump_volume_m3":number or null,"pump_cost":number or null,"pump_hours_worked":number or null,"pump_travel_hours":number or null,"pump_hours_charged":number or null,"pump_category":"one exact pumping budget category or null","area":"best match from area list or null","item":"best match from element list or null","invoice_number":"string or null","driver":"driver or pump operator","truck_number":"truck or pump unit number","notes":"string or null"}]`;
     const res = await fetch("/api/claude",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({model:"claude-sonnet-4-6",max_tokens:4000,messages:[{role:"user",content:[block,{type:"text",text:prompt}]}]})});
     const data = await res.json();
     if(data.error) throw new Error("API error: "+(data.error.message||JSON.stringify(data.error)));
@@ -1697,8 +1706,10 @@ Return ONLY valid JSON, no markdown:
   const totalPoured=tickets.reduce((s,t)=>s+(parseFloat(t.volume_m3)||0),0);
   const totalYd3=tickets.reduce((s,t)=>s+(parseFloat(t.volume_yd3)||0),0);
   const totalPumpM3   = tickets.reduce((s,t) => s + (parseFloat(t.pump_volume_m3)||0), 0);
+  const totalPumpHours = tickets.reduce((s,t) => s + (parseFloat(t.pump_hours_charged)||0), 0);
   const totalPumpCost = tickets.reduce((s,t) => s + (parseFloat(t.pump_cost)||0), 0);
   const pumpRemaining = Math.max(0, TOTAL_PUMP_BUDGET_M3 - totalPumpM3);
+  const pumpHoursRemaining = Math.max(0, TOTAL_PUMP_BUDGET_HOURS - totalPumpHours);
   const pumpPct       = TOTAL_PUMP_BUDGET_M3 > 0 ? Math.min(100,(totalPumpM3/TOTAL_PUMP_BUDGET_M3)*100) : 0;
   const remaining=Math.max(0,TOTAL_SCOPE_M3-totalPoured);
   const pct=(totalPoured/TOTAL_SCOPE_M3)*100;
@@ -1715,7 +1726,7 @@ Return ONLY valid JSON, no markdown:
     const wb=XLSX.utils.book_new();
     const ws1=XLSX.utils.json_to_sheet(tickets.map((t,i)=>{
       const mismatch=checkMpaMismatch(t);
-      return {"#":i+1,"Date":t.date||"","Ticket #":t.ticket_number||"","Supplier":t.supplier||"","Mix Design (Ticket)":t.mix_design||"","Spec MPa":t.area&&t.item?(MPA_SPEC[`${t.area}|||${t.item}`]||""):"","MPa Status":mismatch?`⚠ MISMATCH (spec: ${mismatch.specMpa})`:t.mix_design?"✓ OK":"—","Area":t.area||"","Element":t.item||"","Volume (m³)":parseFloat(t.volume_m3)||"","Volume (yd³)":parseFloat(t.volume_yd3)||"","Invoice #":t.invoice_number||"","Driver":t.driver||"","Truck #":t.truck_number||"","Notes":t.notes||""};
+      return {"#":i+1,"Date":t.date||"","Ticket #":t.ticket_number||"","Supplier":t.supplier||"","Mix Design (Ticket)":t.mix_design||"","Spec MPa":t.area&&t.item?(MPA_SPEC[`${t.area}|||${t.item}`]||""):"","MPa Status":mismatch?`⚠ MISMATCH (spec: ${mismatch.specMpa})`:t.mix_design?"✓ OK":"—","Area":t.area||"","Element":t.item||"","Volume (m³)":parseFloat(t.volume_m3)||"","Volume (yd³)":parseFloat(t.volume_yd3)||"","Pumped (m³)":parseFloat(t.pump_volume_m3)||"","Pump Hours Charged":parseFloat(t.pump_hours_charged)||"","Invoice #":t.invoice_number||"","Driver / Operator":t.driver||"","Truck / Unit #":t.truck_number||"","Notes":t.notes||""};
     }));
     ws1["!cols"]=[4,12,16,22,18,16,20,14,14,14,14,14,14,12,22].map(w=>({wch:w}));
     XLSX.utils.book_append_sheet(wb,ws1,"Ticket Log");
@@ -1763,6 +1774,8 @@ Return ONLY valid JSON, no markdown:
         {mismatch&&<div style={{background:"#450a0a",border:`1px solid ${C.red}`,borderRadius:10,padding:"14px 16px",marginBottom:16}}><div style={{color:C.red,fontWeight:800,fontSize:14,marginBottom:6}}>⚠ Mix Design Mismatch — Do Not Pour</div><div style={{color:"#fca5a5",fontSize:13}}>Ticket shows <b>{mismatch.ticketMpa}</b> but this element requires <b>{mismatch.specMpa}</b>.<br/>Verify with supplier before proceeding.</div></div>}
         <div style={{display:"flex",gap:10,flexWrap:"wrap",marginBottom:16}}>
           {ticket.volume_m3&&<div style={{background:C.bg,borderRadius:10,padding:"12px 16px",flex:1}}><div style={{color:C.muted,fontSize:11,fontWeight:700,textTransform:"uppercase"}}>Volume</div><div style={{color:C.accent,fontWeight:800,fontSize:20,fontFamily:"monospace"}}>{parseFloat(ticket.volume_m3).toFixed(2)} m³</div></div>}
+          {ticket.pump_volume_m3&&<div style={{background:C.bg,borderRadius:10,padding:"12px 16px",flex:1}}><div style={{color:C.muted,fontSize:11,fontWeight:700,textTransform:"uppercase"}}>Pumped</div><div style={{color:C.teal,fontWeight:800,fontSize:20,fontFamily:"monospace"}}>{parseFloat(ticket.pump_volume_m3).toFixed(2)} m³</div></div>}
+          {ticket.pump_hours_charged&&<div style={{background:C.bg,borderRadius:10,padding:"12px 16px",flex:1}}><div style={{color:C.muted,fontSize:11,fontWeight:700,textTransform:"uppercase"}}>Pump Hours</div><div style={{color:C.blue,fontWeight:800,fontSize:20,fontFamily:"monospace"}}>{parseFloat(ticket.pump_hours_charged)} hrs</div></div>}
           <div style={{background:C.bg,borderRadius:10,padding:"12px 16px",flex:1}}><div style={{color:C.muted,fontSize:11,fontWeight:700,textTransform:"uppercase"}}>Ticket Mix</div><div style={{color:mismatch?C.red:C.text,fontWeight:800,fontSize:16}}>{ticket.mix_design||"—"}</div></div>
           {specMpa&&<div style={{background:C.bg,borderRadius:10,padding:"12px 16px",flex:1}}><div style={{color:C.muted,fontSize:11,fontWeight:700,textTransform:"uppercase"}}>Spec MPa</div><div style={{color:C.green,fontWeight:800,fontSize:16}}>{specMpa}</div></div>}
         </div>
@@ -1886,6 +1899,11 @@ Return ONLY valid JSON, no markdown:
                     </div>
                     <button
                       onClick={async()=>{
+                        const uncategorizedPump = reviewQueue.find(t=>parseFloat(t.pump_volume_m3)>0 && !PUMP_CATEGORIES.includes(t.pump_category));
+                        if(uncategorizedPump){
+                          showToast(`Select a pumping budget category for slip ${uncategorizedPump.ticket_number||"—"} before saving.`,"err");
+                          return;
+                        }
                         // Re-check the shared store at the final commit point in
                         // case somebody saved one of these tickets during review.
                         const latestSaved = await storageGet("concrete-data");
@@ -1925,6 +1943,8 @@ Return ONLY valid JSON, no markdown:
                           </div>
                           <div style={{display:"flex",gap:7,flexWrap:"wrap",alignItems:"center"}}>
                             {t.volume_m3&&<Badge color={C.accent}>{parseFloat(t.volume_m3).toFixed(2)} m³</Badge>}
+                            {t.pump_volume_m3&&<Badge color={C.teal}>{parseFloat(t.pump_volume_m3).toFixed(2)} m³ pumped</Badge>}
+                            {t.pump_hours_charged&&<Badge color={C.blue}>{parseFloat(t.pump_hours_charged)} pump hrs</Badge>}
                             {t.mix_design&&<Badge color={mismatch?C.red:specMpa?C.green:C.muted}>{t.mix_design}</Badge>}
                           </div>
                         </div>
@@ -1942,6 +1962,13 @@ Return ONLY valid JSON, no markdown:
                               {AREAS.map(a=><option key={a} value={a}>{a}</option>)}
                             </select>
                           </div>
+                          {parseFloat(t.pump_volume_m3)>0&&<div style={{flex:1,minWidth:190}}>
+                            <label style={{display:"block",color:C.muted,fontSize:10,fontWeight:700,letterSpacing:1,textTransform:"uppercase",marginBottom:4}}>Pumping Budget Category *</label>
+                            <select value={t.pump_category||""} onChange={e=>setReviewQueue(q=>q.map((x,j)=>j===i?{...x,pump_category:e.target.value}:x))} style={{width:"100%",background:C.bg,border:`1px solid ${PUMP_CATEGORIES.includes(t.pump_category)?C.teal:C.yellow}`,borderRadius:8,padding:"9px 12px",color:C.text,fontSize:14,boxSizing:"border-box"}}>
+                              <option value="">— select pumping category —</option>
+                              {PUMP_CATEGORIES.map(category=><option key={category} value={category}>{category}</option>)}
+                            </select>
+                          </div>}
                           <div style={{flex:1,minWidth:160}}>
                             <label style={{display:"block",color:C.muted,fontSize:10,fontWeight:700,letterSpacing:1,textTransform:"uppercase",marginBottom:4}}>
                               Element * {t._suggested&&t.item?<span style={{color:C.blue,fontWeight:600,fontSize:9,letterSpacing:.5}}> 🤖 suggested</span>:null}
@@ -2088,6 +2115,8 @@ Return ONLY valid JSON, no markdown:
             <div style={{display:"flex",gap:14,flexWrap:"wrap",marginBottom:24}}>
               <Stat label="Total Pumped"    value={`${fmt(totalPumpM3)} m³`}        sub={`of ${fmt(TOTAL_PUMP_BUDGET_M3)} m³ budgeted`} color={pumpPct>100?C.red:C.teal}/>
               <Stat label="Pump Remaining"  value={`${fmt(pumpRemaining)} m³`}      sub="budget left"                                    color={pumpRemaining<50?C.red:C.yellow}/>
+              <Stat label="Pump Hours Used" value={`${fmt(totalPumpHours)} hrs`}    sub={`of ${fmt(TOTAL_PUMP_BUDGET_HOURS)} hrs budgeted`} color={totalPumpHours>TOTAL_PUMP_BUDGET_HOURS?C.red:C.blue}/>
+              <Stat label="Hours Remaining" value={`${fmt(pumpHoursRemaining)} hrs`} sub="budget left" color={pumpHoursRemaining<10?C.red:C.yellow}/>
               <Stat label="Total Charged"   value={`$${totalPumpCost.toLocaleString(undefined,{minimumFractionDigits:2,maximumFractionDigits:2})}`} sub="from tickets"  color={C.green}/>
               <Stat label="Tickets w/ Pump" value={tickets.filter(t=>parseFloat(t.pump_volume_m3)>0).length} sub="of total tickets" color={C.blue}/>
             </div>
@@ -2098,33 +2127,30 @@ Return ONLY valid JSON, no markdown:
             </div>
             <div style={{fontWeight:800,fontSize:15,marginBottom:12}}>Budget Breakdown by Category</div>
             {PUMP_BUDGET.map(row => {
-              const used = tickets.filter(t => {
-                if (!t.area || !parseFloat(t.pump_volume_m3)) return false;
-                const a = t.area.toLowerCase();
-                const c = row.category.toLowerCase();
-                if (c.includes("mud")) return a.includes("sog") || a.includes("mud");
-                if (c.includes("foundation")) return a.includes("foundation");
-                if (c.includes("slab on grade")) return a.includes("sog") || a.includes("grade");
-                if (c.includes("sus slab")) return ["level 1","2nd","3rd","4th","5th","6th","7th","8th","9th","10th","11th","12th","13th","14th","15th","16th","17th","penthouse"].some(l => a.includes(l));
-                if (c.includes("vertical")) return a.includes("p1") || a.includes("p2") || a.includes("wall") || a.includes("column");
-                return false;
-              }).reduce((s,t) => s + (parseFloat(t.pump_volume_m3)||0), 0);
+              const categoryTickets = tickets.filter(t => t.pump_category === row.category);
+              const used = categoryTickets.reduce((s,t) => s + (parseFloat(t.pump_volume_m3)||0), 0);
+              const hoursUsed = categoryTickets.reduce((s,t) => s + (parseFloat(t.pump_hours_charged)||0), 0);
               const pct2 = row.volume_m3 > 0 ? Math.min(100,(used/row.volume_m3)*100) : 0;
               const over = used > row.volume_m3;
+              const hoursOver = hoursUsed > row.hours;
               return (
                 <div key={row.category} style={{background:C.card,border:`1px solid ${over?C.red+"66":C.border}`,borderRadius:13,padding:"16px 20px",marginBottom:10}}>
                   <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:8,flexWrap:"wrap",gap:8}}>
                     <span style={{fontWeight:700}}>{row.category}</span>
                     <div style={{display:"flex",gap:8,alignItems:"center"}}>
-                      {over && <Badge color={C.red}>⚠ Over Budget</Badge>}
+                      {(over||hoursOver) && <Badge color={C.red}>⚠ Over Budget</Badge>}
                       <Badge color={C.teal}>{fmt(used)} / {fmt(row.volume_m3)} m³</Badge>
-                      <Badge color={C.muted}>{row.hours} hrs budgeted</Badge>
+                      <Badge color={hoursOver?C.red:C.blue}>{fmt(hoursUsed)} / {fmt(row.hours)} hrs</Badge>
                     </div>
                   </div>
                   <Bar pct={pct2} color={over?C.red:pct2>80?C.yellow:C.teal}/>
                   <div style={{display:"flex",justifyContent:"space-between",marginTop:6,color:C.muted,fontSize:12}}>
                     <span>{fmt(used)} m³ used</span>
                     <span style={{color:over?C.red:C.muted}}>{over ? `⚠ ${fmt(used-row.volume_m3)} m³ over` : `${fmt(row.volume_m3-used)} m³ remaining`}</span>
+                  </div>
+                  <div style={{display:"flex",justifyContent:"space-between",marginTop:4,color:C.muted,fontSize:12}}>
+                    <span>{fmt(hoursUsed)} hrs charged</span>
+                    <span style={{color:hoursOver?C.red:C.muted}}>{hoursOver ? `⚠ ${fmt(hoursUsed-row.hours)} hrs over` : `${fmt(row.hours-hoursUsed)} hrs remaining`}</span>
                   </div>
                 </div>
               );
@@ -2137,6 +2163,7 @@ Return ONLY valid JSON, no markdown:
                   <div><span style={{fontWeight:700}}>#{t.ticket_number||"—"}</span><span style={{color:C.muted,fontSize:12,marginLeft:10}}>{t.date}</span>{t.area&&<span style={{color:C.sub,fontSize:12,marginLeft:10}}>📍 {t.area}{t.item?` — ${t.item}`:""}</span>}</div>
                   <div style={{display:"flex",gap:8,flexWrap:"wrap"}}>
                     <Badge color={C.teal}>{fmt(parseFloat(t.pump_volume_m3))} m³ pumped</Badge>
+                    {t.pump_hours_charged&&<Badge color={C.blue}>{fmt(parseFloat(t.pump_hours_charged))} hrs charged</Badge>}
                     {t.pump_cost&&<Badge color={C.green}>${parseFloat(t.pump_cost).toLocaleString(undefined,{minimumFractionDigits:2,maximumFractionDigits:2})}</Badge>}
                   </div>
                 </div>
