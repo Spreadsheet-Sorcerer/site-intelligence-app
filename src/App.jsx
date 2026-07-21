@@ -226,6 +226,30 @@ function checkMpaMismatch(ticket) {
   return null;
 }
 
+// Keep OCR date mistakes (for example 2026/07/20 becoming 2020-07-26)
+// out of the permanent ticket log. The filename is a useful second source
+// because site scans are commonly named for the pour date.
+function dateFromFilename(name) {
+  const s = String(name || "").replace(/\.[^.]+$/, "");
+  const months = {jan:1,january:1,feb:2,february:2,mar:3,march:3,apr:4,april:4,may:5,jun:6,june:6,jul:7,july:7,aug:8,august:8,sep:9,september:9,oct:10,october:10,nov:11,november:11,dec:12,december:12};
+  const named = s.match(/\b(january|february|march|april|may|june|july|august|september|october|november|december|jan|feb|mar|apr|jun|jul|aug|sep|oct|nov|dec)\s+(\d{1,2})[ ,_-]+(20\d{2})\b/i);
+  if (named) return `${named[3]}-${String(months[named[1].toLowerCase()]).padStart(2,"0")}-${String(+named[2]).padStart(2,"0")}`;
+  const numeric = s.match(/\b(20\d{2})[-_. ](\d{1,2})[-_. ](\d{1,2})\b/);
+  if (numeric) return `${numeric[1]}-${numeric[2].padStart(2,"0")}-${numeric[3].padStart(2,"0")}`;
+  return null;
+}
+function normalizeTicketDate(value, fileName) {
+  const fallback = dateFromFilename(fileName);
+  const m = String(value || "").match(/^(\d{4})[-/]([01]?\d)[-/]([0-3]?\d)$/);
+  if (!m) return fallback || value || "";
+  const normalized = `${m[1]}-${m[2].padStart(2,"0")}-${m[3].padStart(2,"0")}`;
+  const year = +m[1], currentYear = new Date().getFullYear();
+  return (fallback && Math.abs(year-currentYear) > 1) ? fallback : normalized;
+}
+function ticketNumberKey(value) {
+  return String(value || "").trim().replace(/\s+/g, "").toLowerCase();
+}
+
 // ─── EXPIRY HELPERS ────────────────────────────────────────────────────────────
 function daysUntilExpiry(dateStr) {
   if (!dateStr) return null;
@@ -1413,7 +1437,9 @@ function ConcreteModule({ onBack }) {
 
   useEffect(() => {
     if (!storageReady) return;
-    storageSet("concrete-data", { tickets, invoices, tests });
+    storageSet("concrete-data", { tickets, invoices, tests }).then(ok => {
+      if (!ok) showToast("Could not save data. Please leave this page open and try again.", "err");
+    });
   }, [tickets, invoices, tests, storageReady]);
 
   function showToast(msg, type="ok") { setToast({msg,type}); setTimeout(()=>setToast(null),3500); }
@@ -1447,7 +1473,7 @@ CRITICAL FIELD EXTRACTION RULES — read carefully:
 
 3. volume_m3: Read from "QUANTITY" or "QUANTITE" field — a number like 8.00, 7.50 in m³. Do NOT use yd³ values here.
 
-4. date: The delivery/load date on the ticket in YYYY-MM-DD format.
+4. date: The delivery/load date on the ticket in YYYY-MM-DD format. Read the printed dispatch date exactly. This project is active in 2026. For example, printed 2026/07/20 or handwritten 20/07/26 means 2026-07-20 — never 2020-07-26. Do not swap the day with digits from the year.
 
 5. pumping: Look for a line item labelled "Pumping", "Pump", or "Pompage" on the ticket. If found, extract:
    - pump_volume_m3: the volume pumped in m³ (e.g. 8.00)
@@ -1620,11 +1646,19 @@ Return ONLY valid JSON, no markdown:
   async function handleTicketFiles(files) {
     if(!files?.length) return; setLoading(true);
     const pending = [];
+    // Refresh first so duplicates uploaded by another user/device are caught.
+    const latestSaved = await storageGet("concrete-data");
+    const existingTickets = latestSaved?.tickets || tickets;
+    const duplicateNumbers = [];
     for(const file of Array.from(files)){
       setLoadMsg(`Reading "${file.name}"…`);
       try{
-        const [extractedArr,dataURL]=await Promise.all([extractTicket(file),toDataURL(file)]);
+        const [extractedArr,fileUrl]=await Promise.all([extractTicket(file),uploadFile(file,"tickets")]);
         for(const extracted of extractedArr){
+          extracted.date=normalizeTicketDate(extracted.date,file.name);
+          const numberKey = ticketNumberKey(extracted.ticket_number);
+          const isDuplicate = numberKey && [...existingTickets, ...pending].some(t=>ticketNumberKey(t.ticket_number)===numberKey);
+          if(isDuplicate){ duplicateNumbers.push(extracted.ticket_number); continue; }
           if(extracted.volume_m3&&!extracted.volume_yd3) extracted.volume_yd3=+(extracted.volume_m3*M3_TO_YD3).toFixed(3);
           if(extracted.volume_yd3&&!extracted.volume_m3) extracted.volume_m3=+(extracted.volume_yd3/M3_TO_YD3).toFixed(3);
           // Pass growing pending array so each ticket in batch accounts for previous ones
@@ -1632,11 +1666,14 @@ Return ONLY valid JSON, no markdown:
           const suggestion = suggestLocation(extracted.mix_design, allSoFar);
           extracted.area = suggestion.area || extracted.area || "";
           extracted.item = suggestion.item || extracted.item || "";
-          pending.push({id:Date.now()+Math.random(),filename:file.name,fileType:file.type,originalFile:dataURL,added_at:new Date().toISOString(),...extracted,_suggested:!!(suggestion.area)});
+          pending.push({id:Date.now()+Math.random(),filename:file.name,fileType:file.type,file_url:fileUrl,added_at:new Date().toISOString(),...extracted,_suggested:!!(suggestion.area)});
         }
       }catch(e){ showToast(`Could not read "${file.name}": ${e.message}`,"err"); }
     }
     setLoading(false); setLoadMsg("");
+    if(duplicateNumbers.length > 0){
+      showToast(`Duplicate ticket${duplicateNumbers.length>1?"s":""} blocked: ${duplicateNumbers.join(", ")}`,"err");
+    }
     if(pending.length > 0){
       setReviewQueue(pending);
       setTab("dashboard");
@@ -1649,8 +1686,8 @@ Return ONLY valid JSON, no markdown:
     for(const file of Array.from(files)){
       setLoadMsg(`Reading invoice: "${file.name}"…`);
       try{
-        const [extracted,dataURL]=await Promise.all([extractInvoice(file),toDataURL(file)]);
-        setInvoices(prev=>[...prev,{id:Date.now()+Math.random(),filename:file.name,fileType:file.type,originalFile:dataURL,added_at:new Date().toISOString(),...extracted}]);
+        const [extracted,fileUrl]=await Promise.all([extractInvoice(file),uploadFile(file,"invoices")]);
+        setInvoices(prev=>[...prev,{id:Date.now()+Math.random(),filename:file.name,fileType:file.type,file_url:fileUrl,added_at:new Date().toISOString(),...extracted}]);
         added++;
       }catch(e){ showToast(`Could not read invoice "${file.name}": ${e.message}`,"err"); }
     }
@@ -1690,8 +1727,15 @@ Return ONLY valid JSON, no markdown:
     showToast("Spreadsheet downloaded ✓");
   }
 
-  function addManual() {
+  async function addManual() {
     if(!manual.ticket_number&&!manual.date){showToast("Enter at least a date or ticket number.","err");return;}
+    const latestSaved = await storageGet("concrete-data");
+    const existingTickets = latestSaved?.tickets || tickets;
+    const numberKey = ticketNumberKey(manual.ticket_number);
+    if(numberKey && existingTickets.some(t=>ticketNumberKey(t.ticket_number)===numberKey)){
+      showToast(`Duplicate ticket blocked: ${manual.ticket_number} is already saved.`,"err");
+      return;
+    }
     let m={...manual};
     if(m.volume_m3&&!m.volume_yd3) m.volume_yd3=+(parseFloat(m.volume_m3)*M3_TO_YD3).toFixed(3);
     if(m.volume_yd3&&!m.volume_m3) m.volume_m3=+(parseFloat(m.volume_yd3)/M3_TO_YD3).toFixed(3);
@@ -1841,10 +1885,23 @@ Return ONLY valid JSON, no markdown:
                       <div style={{color:C.muted,fontSize:13,marginTop:3}}>{reviewQueue.length} ticket{reviewQueue.length>1?"s":""} scanned — assign each to the correct area and element before saving</div>
                     </div>
                     <button
-                      onClick={()=>{
+                      onClick={async()=>{
+                        // Re-check the shared store at the final commit point in
+                        // case somebody saved one of these tickets during review.
+                        const latestSaved = await storageGet("concrete-data");
+                        const latestTickets = latestSaved?.tickets || tickets;
+                        const duplicateNumbers = reviewQueue
+                          .filter(t=>ticketNumberKey(t.ticket_number) && latestTickets.some(saved=>ticketNumberKey(saved.ticket_number)===ticketNumberKey(t.ticket_number)))
+                          .map(t=>t.ticket_number);
+                        if(duplicateNumbers.length){
+                          showToast(`Save blocked — ticket${duplicateNumbers.length>1?"s":""} already exist${duplicateNumbers.length===1?"s":""}: ${duplicateNumbers.join(", ")}`,"err");
+                          return;
+                        }
                         const mpaWarnings=[];
                         reviewQueue.forEach(t=>{const mm=checkMpaMismatch(t);if(mm)mpaWarnings.push(t);});
-                        setTickets(prev=>[...prev,...reviewQueue]);
+                        // Merge with the freshest shared copy so another user's
+                        // recently saved tickets are not overwritten.
+                        setTickets([...latestTickets,...reviewQueue]);
                         setReviewQueue([]);
                         if(mpaWarnings.length>0) showToast(`⚠ ${mpaWarnings.length} MPa mismatch${mpaWarnings.length>1?"es":""} detected!`,"err");
                         else showToast(`${reviewQueue.length} ticket${reviewQueue.length>1?"s":""} saved ✓`);
