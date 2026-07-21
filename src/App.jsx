@@ -198,7 +198,9 @@ const PUMP_CATEGORIES = PUMP_BUDGET.map(r => r.category);
 const TOTAL_PUMP_BUDGET_M3 = PUMP_BUDGET.reduce((s,r) => s + r.volume_m3, 0);
 const TOTAL_PUMP_BUDGET_HOURS = PUMP_BUDGET.reduce((s,r) => s + r.hours, 0);
 const M3_TO_YD3 = 1.30795;
-const AREAS = [...new Set(SCOPE.map(r => r.area))];
+// Mud slabs are a valid pour location but are not added to SCOPE here because
+// doing so would incorrectly increase the approved 9,133.5 m³ building total.
+const AREAS = ["Mud Slabs", ...new Set(SCOPE.map(r => r.area))];
 const ITEMS = [...new Set(SCOPE.map(r => r.item).filter(Boolean))];
 const MPA_SPEC = {};
 SCOPE.forEach(r => { if (r.area && r.item) MPA_SPEC[`${r.area}|||${r.item}`] = r.mpa; });
@@ -1486,7 +1488,7 @@ CRITICAL FIELD EXTRACTION RULES — read carefully:
    - For a pumping form, put the pump unit number in truck_number and the operator/laborer in driver.
    - For a pumping form, set volume_m3 and volume_yd3 to null. The number under MATERIALS / QUANTITY USED is pump_volume_m3 and must not be counted again as delivered concrete.
    - pump_category: choose exactly one of: ${PUMP_CATEGORIES.join(", ")}. Use the form's description of work. "Mud slab" means "Mud Slabs"; do not also classify it as "Slab on Grade".
-   - Use the description of work to select area/item. "Mud slab" should be area "SOG" and item "Slabs".
+   - Use the description of work to select area/item. "Mud slab" should be area "Mud Slabs" and item "Slabs".
    If no pumping information exists on this record, return null for all pumping fields.
 
 Return ONLY a valid JSON array (even if only one ticket). No markdown, no explanation:
@@ -1834,7 +1836,6 @@ Return ONLY valid JSON, no markdown:
         </div>
         <div style={{display:"flex",gap:8,alignItems:"center"}}>
           <span style={{fontSize:11,color:storageReady?C.green:C.muted,fontWeight:700}}>{storageReady ? "💾 Auto-saved" : "⏳ Loading..."}</span>
-          <button onClick={async()=>{ if(!window.confirm("Clear ALL tickets and invoices? This cannot be undone.")) return; await storageDel("concrete-data"); setTickets([]); setInvoices([]); showToast("All data cleared."); }} style={{background:"transparent",color:C.red,border:`1px solid ${C.red}44`,borderRadius:7,padding:"5px 11px",fontSize:11,fontWeight:700,cursor:"pointer"}}>🗑 Clear Data</button>
           <button onClick={exportXLSX} style={{background:C.green,color:"#052e16",border:"none",borderRadius:9,padding:"10px 22px",fontWeight:800,fontSize:14,cursor:"pointer"}}>⬇ Export .xlsx</button>
         </div>
       </div>
@@ -2064,7 +2065,7 @@ Return ONLY valid JSON, no markdown:
                             {specMpa&&!mismatch&&<Badge color={C.muted}>spec: {specMpa}</Badge>}
                             {parseFloat(t.pump_volume_m3)>0&&<Badge color={C.teal}>💧 {parseFloat(t.pump_volume_m3).toFixed(2)} m³</Badge>}
                             {(t.file_url||t.originalFile)&&<button onClick={e=>{ e.stopPropagation(); const src=t.file_url||t.originalFile; const isImg=/^data:image|\.(jpg|jpeg|png|gif|webp|heic)/i.test(src); const w=window.open(); w.document.write(isImg?`<html><body style="margin:0;background:#000;display:flex;align-items:center;justify-content:center;min-height:100vh"><img src="${src}" style="max-width:100%;max-height:100vh;object-fit:contain"></body></html>`:`<iframe src="${src}" width="100%" height="100%" style="border:none;position:fixed;top:0;left:0"></iframe>`); }} style={{background:"transparent",border:`1px solid ${C.blue}44`,color:C.blue,borderRadius:6,padding:"3px 9px",fontSize:12,fontWeight:700,cursor:"pointer"}}>📄 View</button>}
-                            <button onClick={e=>{ e.stopPropagation(); if(window.confirm(`Delete ticket #${t.ticket_number||"this ticket"}?`)) setTickets(prev=>prev.filter(x=>x.id!==t.id)); }} style={{background:"transparent",border:`1px solid ${C.red}44`,color:C.red,borderRadius:6,padding:"3px 9px",fontSize:12,fontWeight:700,cursor:"pointer"}}>✕</button>
+                            <button onClick={e=>{ e.stopPropagation(); if(window.confirm(`Delete ticket #${t.ticket_number||"this ticket"}? This will restore its volume to the remaining-work totals.`)) setTickets(prev=>prev.filter(x=>x.id!==t.id)); }} style={{background:"transparent",border:`1px solid ${C.red}44`,color:C.red,borderRadius:6,padding:"3px 9px",fontSize:12,fontWeight:700,cursor:"pointer"}}>🗑 Delete</button>
                           </div>
                         </div>
                         <div style={{display:"flex",gap:16,flexWrap:"wrap",fontSize:13,color:C.sub}}>
@@ -2096,7 +2097,7 @@ Return ONLY valid JSON, no markdown:
                   <div><span style={{fontWeight:800,fontSize:15}}>Invoice {inv.invoice_number||"—"}</span><span style={{color:C.muted,fontSize:12,marginLeft:10}}>{inv.invoice_date}</span></div>
                   <div style={{display:"flex",gap:7,flexWrap:"wrap",alignItems:"center"}}>{inv.total_amount>0&&<Badge color={C.green}>{inv.currency||""} {inv.total_amount?.toLocaleString()}</Badge>}<Badge color={hasIssues?C.red:C.green}>{hasIssues?"⚠ Review":"✓ Matched"}</Badge>
                     {(inv.file_url||inv.originalFile)&&<button onClick={e=>{ e.stopPropagation(); const src=inv.file_url||inv.originalFile; const isImg=/^data:image|\.(jpg|jpeg|png|gif|webp|heic)/i.test(src); const w=window.open(); w.document.write(isImg?`<html><body style="margin:0;background:#000;display:flex;align-items:center;justify-content:center;min-height:100vh"><img src="${src}" style="max-width:100%;max-height:100vh;object-fit:contain"></body></html>`:`<iframe src="${src}" width="100%" height="100%" style="border:none;position:fixed;top:0;left:0"></iframe>`); }} style={{background:"transparent",border:`1px solid ${C.blue}44`,color:C.blue,borderRadius:6,padding:"3px 9px",fontSize:12,fontWeight:700,cursor:"pointer"}}>📄 View</button>}
-                    <button onClick={e=>{ e.stopPropagation(); if(window.confirm(`Delete invoice ${inv.invoice_number||"this invoice"}?`)) setInvoices(prev=>prev.filter(x=>x.id!==inv.id)); }} style={{background:"transparent",border:`1px solid ${C.red}44`,color:C.red,borderRadius:6,padding:"3px 9px",fontSize:12,fontWeight:700,cursor:"pointer"}}>✕</button>
+                    <button onClick={e=>{ e.stopPropagation(); if(window.confirm(`Delete invoice ${inv.invoice_number||"this invoice"}?`)) setInvoices(prev=>prev.filter(x=>x.id!==inv.id)); }} style={{background:"transparent",border:`1px solid ${C.red}44`,color:C.red,borderRadius:6,padding:"3px 9px",fontSize:12,fontWeight:700,cursor:"pointer"}}>🗑 Delete</button>
                   </div>
                 </div>
                 <div style={{display:"flex",gap:20,fontSize:13,color:C.sub,flexWrap:"wrap"}}>
