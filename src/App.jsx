@@ -23,14 +23,23 @@ async function storageGet(key) {
   } catch { return null; }
 }
 async function storageSet(key, value) {
-  try {
-    const res = await fetch("/api/data-set", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ table: tableFor(key), data: value }),
-    });
-    return res.ok;
-  } catch { return false; }
+  // A brief API/database hiccup should not lose a user's change. Retry the
+  // same payload before reporting a failure.
+  for (let attempt = 0; attempt < 3; attempt++) {
+    try {
+      const res = await fetch("/api/data-set", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ table: tableFor(key), data: value }),
+      });
+      if (res.ok) return true;
+      console.error(`storageSet failed (${res.status})`, await res.text());
+    } catch (error) {
+      console.error("storageSet network error", error);
+    }
+    if (attempt < 2) await new Promise(resolve=>setTimeout(resolve, 500*(attempt+1)));
+  }
+  return false;
 }
 async function storageDel(key) {
   const empty = key === "concrete-data" ? { tickets: [], invoices: [] } : { certs: [] };
@@ -1428,23 +1437,50 @@ function ConcreteModule({ onBack }) {
   const [reviewQueue, setReviewQueue] = useState([]); // tickets pending area/element confirmation
   const [tests, setTests] = useState([]);
   const [storageReady, setStorageReady] = useState(false);
+  const [saveStatus, setSaveStatus] = useState("loading");
+  const skipInitialSaveRef = useRef(true);
   const fileRef    = useRef();
   const invFileRef = useRef();
 
   useEffect(() => {
-    storageGet("concrete-data").then(saved => {
-      if (saved?.tickets)  setTickets(saved.tickets);
-      if (saved?.invoices) setInvoices(saved.invoices);
-      if (saved?.tests)    setTests(saved.tests);
-      setStorageReady(true);
-    });
+    let cancelled=false;
+    async function loadConcreteData(){
+      for(let attempt=0;attempt<3;attempt++){
+        const saved=await storageGet("concrete-data");
+        if(saved!==null){
+          if(cancelled)return;
+          if(saved?.tickets)  setTickets(saved.tickets);
+          if(saved?.invoices) setInvoices(saved.invoices);
+          if(saved?.tests)    setTests(saved.tests);
+          skipInitialSaveRef.current=true;
+          setStorageReady(true);
+          setSaveStatus("saved");
+          return;
+        }
+        await new Promise(resolve=>setTimeout(resolve,500*(attempt+1)));
+      }
+      if(!cancelled){
+        setSaveStatus("error");
+        showToast("Could not load saved data. Nothing was overwritten—please refresh and try again.","err");
+      }
+    }
+    loadConcreteData();
+    return()=>{cancelled=true;};
   }, []);
 
   useEffect(() => {
     if (!storageReady) return;
-    storageSet("concrete-data", { tickets, invoices, tests }).then(ok => {
-      if (!ok) showToast("Could not save data. Please leave this page open and try again.", "err");
-    });
+    if(skipInitialSaveRef.current){
+      skipInitialSaveRef.current=false;
+      return;
+    }
+    setSaveStatus("saving");
+    const timer=setTimeout(async()=>{
+      const ok=await storageSet("concrete-data", { tickets, invoices, tests });
+      setSaveStatus(ok?"saved":"error");
+      if (!ok) showToast("Could not save after 3 attempts. Keep this page open and try the action again.", "err");
+    },500);
+    return()=>clearTimeout(timer);
   }, [tickets, invoices, tests, storageReady]);
 
   function showToast(msg, type="ok") { setToast({msg,type}); setTimeout(()=>setToast(null),3500); }
@@ -1860,7 +1896,9 @@ Return ONLY valid JSON, no markdown:
           </div>
         </div>
         <div style={{display:"flex",gap:8,alignItems:"center"}}>
-          <span style={{fontSize:11,color:storageReady?C.green:C.muted,fontWeight:700}}>{storageReady ? "💾 Auto-saved" : "⏳ Loading..."}</span>
+          <span style={{fontSize:11,color:saveStatus==="error"?C.red:saveStatus==="saved"?C.green:C.muted,fontWeight:700}}>
+            {saveStatus==="saved"?"💾 Saved":saveStatus==="saving"?"⏳ Saving...":saveStatus==="error"?"⚠ Save error":"⏳ Loading..."}
+          </span>
           <button onClick={exportXLSX} style={{background:C.green,color:"#052e16",border:"none",borderRadius:9,padding:"10px 22px",fontWeight:800,fontSize:14,cursor:"pointer"}}>⬇ Export .xlsx</button>
         </div>
       </div>
