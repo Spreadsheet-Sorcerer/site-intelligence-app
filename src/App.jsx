@@ -1443,6 +1443,8 @@ function ConcreteModule({ onBack }) {
   const [tests, setTests] = useState([]);
   const [storageReady, setStorageReady] = useState(false);
   const [saveStatus, setSaveStatus] = useState("loading");
+  const [ticketSearch, setTicketSearch] = useState("");
+  const [invoiceSearch, setInvoiceSearch] = useState("");
   const skipInitialSaveRef = useRef(true);
   const fileRef    = useRef();
   const invFileRef = useRef();
@@ -1794,10 +1796,39 @@ Return ONLY valid JSON, no markdown:
   Object.entries(pouredMap).forEach(([key,val])=>{ const area=key.split("|||")[0]; if(!areaTotals[area]) areaTotals[area]={scope:0,poured:0}; areaTotals[area].poured+=val; });
   const invoicesWithIssues=invoices.filter(inv=>{ const m=matchInvoiceToTickets(inv,tickets); return m.unmatched.length>0||m.volumeMatch===false; }).length;
   const totalInvoiced=invoices.reduce((s,inv)=>s+(parseFloat(inv.total_amount)||0),0);
+  const searchableDate=value=>{
+    const raw=String(value||"").trim();
+    if(!raw) return "";
+    const variants=[raw,raw.replace(/-/g,"/")];
+    const match=raw.match(/^(\d{4})-(\d{2})-(\d{2})$/);
+    if(match){
+      const d=new Date(+match[1],+match[2]-1,+match[3],12,0,0);
+      variants.push(
+        `${match[2]}/${match[3]}/${match[1]}`,
+        `${match[3]}/${match[2]}/${match[1]}`,
+        d.toLocaleDateString("en-CA",{year:"numeric",month:"long",day:"numeric"}),
+        d.toLocaleDateString("en-CA",{month:"short",day:"numeric",year:"numeric"})
+      );
+    }
+    return variants.join(" ").toLowerCase();
+  };
+  const ticketNeedle=ticketSearch.trim().toLowerCase();
+  const invoiceNeedle=invoiceSearch.trim().toLowerCase();
+  const filteredTickets=ticketNeedle?tickets.filter(t=>[
+    searchableDate(t.date),t.ticket_number,t.supplier,t.mix_design,t.area,t.item,t.invoice_number,t.driver,t.truck_number
+  ].some(value=>String(value||"").toLowerCase().includes(ticketNeedle))):tickets;
+  const filteredInvoices=invoiceNeedle?invoices.filter(inv=>[
+    searchableDate(inv.invoice_date),inv.invoice_number,inv.supplier,inv.total_amount,
+    ...(inv.ticket_numbers||[])
+  ].some(value=>String(value||"").toLowerCase().includes(invoiceNeedle))):invoices;
 
   function exportXLSX() {
     const wb=XLSX.utils.book_new();
-    const ws1=XLSX.utils.json_to_sheet(tickets.map((t,i)=>{
+    const toExcelDate=value=>{
+      const match=String(value||"").match(/^(\d{4})-(\d{2})-(\d{2})$/);
+      return match?new Date(+match[1],+match[2]-1,+match[3],12,0,0):value||"";
+    };
+    const ticketRows=tickets.map((t,i)=>{
       const mismatch=checkMpaMismatch(t);
       const ticketKey=String(t.ticket_number||"").trim().toLowerCase();
       const matchedInvoice=invoices.find(inv=>{
@@ -1807,9 +1838,11 @@ Return ONLY valid JSON, no markdown:
         return directMatch||savedInvoiceMatch;
       });
       const exportInvoiceNumber=matchedInvoice?.invoice_number||t.invoice_number||"";
-      return {"#":i+1,"Date":t.date||"","Ticket #":t.ticket_number||"","Supplier":t.supplier||"","Mix Design (Ticket)":t.mix_design||"","Spec MPa":t.area&&t.item?(MPA_SPEC[`${t.area}|||${t.item}`]||""):"","MPa Status":mismatch?`⚠ MISMATCH (spec: ${mismatch.specMpa})`:t.mix_design?"✓ OK":"—","Area":t.area||"","Element":t.item||"","Volume (m³)":parseFloat(t.volume_m3)||"","Volume (yd³)":parseFloat(t.volume_yd3)||"","Pumped (m³)":parseFloat(t.pump_volume_m3)||"","Pump Hours Charged":parseFloat(t.pump_hours_charged)||"","Invoice #":exportInvoiceNumber,"Driver / Operator":t.driver||"","Truck / Unit #":t.truck_number||"","Notes":t.notes||""};
-    }));
+      return {"#":i+1,"Date":toExcelDate(t.date),"Ticket #":t.ticket_number||"","Supplier":t.supplier||"","Mix Design (Ticket)":t.mix_design||"","Spec MPa":t.area&&t.item?(MPA_SPEC[`${t.area}|||${t.item}`]||""):"","MPa Status":mismatch?`⚠ MISMATCH (spec: ${mismatch.specMpa})`:t.mix_design?"✓ OK":"—","Area":t.area||"","Element":t.item||"","Volume (m³)":parseFloat(t.volume_m3)||"","Volume (yd³)":parseFloat(t.volume_yd3)||"","Pumped (m³)":parseFloat(t.pump_volume_m3)||"","Pump Hours Charged":parseFloat(t.pump_hours_charged)||"","Invoice #":exportInvoiceNumber,"Driver / Operator":t.driver||"","Truck / Unit #":t.truck_number||"","Notes":t.notes||""};
+    });
+    const ws1=XLSX.utils.json_to_sheet(ticketRows,{cellDates:true,dateNF:"yyyy-mm-dd"});
     ws1["!cols"]=[4,12,16,22,18,16,20,14,14,14,14,14,14,12,22].map(w=>({wch:w}));
+    if(ws1["!ref"]) ws1["!autofilter"]={ref:ws1["!ref"]};
     XLSX.utils.book_append_sheet(wb,ws1,"Ticket Log");
     const ws2=XLSX.utils.json_to_sheet(SCOPE.map(r=>{ const poured=pouredMap[`${r.area}|||${r.item}`]||0; const rem=Math.max(0,r.m3-poured); return {"Area":r.area,"Element":r.item,"Spec MPa":r.mpa||"","Scope (m³)":r.m3,"Poured (m³)":poured||"","Remaining (m³)":rem||"","% Complete":r.m3>0?((poured/r.m3)*100).toFixed(1)+"%":"0%"}; }));
     ws2["!cols"]=[14,22,14,14,14,16,12].map(w=>({wch:w}));
@@ -2094,14 +2127,22 @@ Return ONLY valid JSON, no markdown:
           <div>
             <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:20,flexWrap:"wrap",gap:12}}>
               <div><div style={{fontWeight:700,fontSize:18}}>Ticket Log</div>{mpaMismatches.length>0&&<div style={{color:C.red,fontSize:13,marginTop:2}}>⚠ {mpaMismatches.length} ticket{mpaMismatches.length>1?"s":""} with MPa mismatch</div>}</div>
-              <button onClick={()=>fileRef.current.click()} style={{background:C.accent,color:"#fff",border:"none",borderRadius:9,padding:"9px 18px",fontWeight:700,cursor:"pointer",fontSize:13}}>+ Scan Ticket</button>
+              <div style={{display:"flex",gap:8,flexWrap:"wrap",alignItems:"center"}}>
+                <div style={{position:"relative"}}>
+                  <span style={{position:"absolute",left:12,top:"50%",transform:"translateY(-50%)",color:C.muted,pointerEvents:"none"}}>⌕</span>
+                  <input value={ticketSearch} onChange={e=>setTicketSearch(e.target.value)} placeholder="Search date, ticket #, supplier…" style={{width:280,maxWidth:"70vw",background:C.card,border:`1px solid ${C.border}`,borderRadius:9,padding:"9px 34px 9px 34px",color:C.text,fontSize:13,boxSizing:"border-box"}}/>
+                  {ticketSearch&&<button onClick={()=>setTicketSearch("")} title="Clear search" style={{position:"absolute",right:9,top:"50%",transform:"translateY(-50%)",background:"transparent",border:"none",color:C.muted,cursor:"pointer",fontSize:16,padding:2}}>×</button>}
+                </div>
+                <button onClick={()=>fileRef.current.click()} style={{background:C.accent,color:"#fff",border:"none",borderRadius:9,padding:"9px 18px",fontWeight:700,cursor:"pointer",fontSize:13}}>+ Scan Ticket</button>
+              </div>
               <input ref={fileRef} type="file" multiple accept="image/*,application/pdf" style={{display:"none"}} onChange={e=>handleTicketFiles(e.target.files)}/>
             </div>
             {tickets.length===0?<div style={{color:C.muted,textAlign:"center",padding:"60px 0"}}>No tickets yet.</div>
+            :filteredTickets.length===0?<div style={{color:C.muted,textAlign:"center",padding:"60px 0"}}>No tickets match “{ticketSearch}”.</div>
             :(()=>{
               // Group tickets by date, sorted newest first
               const grouped = {};
-              [...tickets].sort((a,b)=>(b.date||"").localeCompare(a.date||"")).forEach(t=>{
+              [...filteredTickets].sort((a,b)=>(b.date||"").localeCompare(a.date||"")).forEach(t=>{
                 const key = t.date || "No date";
                 if(!grouped[key]) grouped[key] = [];
                 grouped[key].push(t);
@@ -2168,11 +2209,19 @@ Return ONLY valid JSON, no markdown:
           <div>
             <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:20,flexWrap:"wrap",gap:12}}>
               <div><div style={{fontWeight:700,fontSize:18}}>Invoice Matching</div><div style={{color:C.muted,fontSize:13,marginTop:2}}>Auto-matched against logged tickets</div></div>
-              <button onClick={()=>invFileRef.current.click()} style={{background:C.purple,color:"#fff",border:"none",borderRadius:9,padding:"9px 18px",fontWeight:700,cursor:"pointer",fontSize:13}}>+ Scan Invoice</button>
+              <div style={{display:"flex",gap:8,flexWrap:"wrap",alignItems:"center"}}>
+                <div style={{position:"relative"}}>
+                  <span style={{position:"absolute",left:12,top:"50%",transform:"translateY(-50%)",color:C.muted,pointerEvents:"none"}}>⌕</span>
+                  <input value={invoiceSearch} onChange={e=>setInvoiceSearch(e.target.value)} placeholder="Search date, invoice #, supplier…" style={{width:280,maxWidth:"70vw",background:C.card,border:`1px solid ${C.border}`,borderRadius:9,padding:"9px 34px 9px 34px",color:C.text,fontSize:13,boxSizing:"border-box"}}/>
+                  {invoiceSearch&&<button onClick={()=>setInvoiceSearch("")} title="Clear search" style={{position:"absolute",right:9,top:"50%",transform:"translateY(-50%)",background:"transparent",border:"none",color:C.muted,cursor:"pointer",fontSize:16,padding:2}}>×</button>}
+                </div>
+                <button onClick={()=>invFileRef.current.click()} style={{background:C.purple,color:"#fff",border:"none",borderRadius:9,padding:"9px 18px",fontWeight:700,cursor:"pointer",fontSize:13}}>+ Scan Invoice</button>
+              </div>
               <input ref={invFileRef} type="file" multiple accept="image/*,application/pdf" style={{display:"none"}} onChange={e=>handleInvoiceFiles(e.target.files)}/>
             </div>
             {invoices.length===0?<div style={{color:C.muted,textAlign:"center",padding:"60px 0"}}>No invoices yet.</div>
-            :invoices.map(inv=>{ const m=matchInvoiceToTickets(inv,tickets); const hasIssues=m.unmatched.length>0||m.volumeMatch===false;
+            :filteredInvoices.length===0?<div style={{color:C.muted,textAlign:"center",padding:"60px 0"}}>No invoices match “{invoiceSearch}”.</div>
+            :filteredInvoices.map(inv=>{ const m=matchInvoiceToTickets(inv,tickets); const hasIssues=m.unmatched.length>0||m.volumeMatch===false;
               return(<div key={inv.id} onClick={()=>setSelectedInvoice(inv)} style={{background:C.card,border:`1px solid ${hasIssues?C.red+"66":C.border}`,borderRadius:12,padding:"16px 20px",marginBottom:12,cursor:"pointer"}}>
                 <div style={{display:"flex",justifyContent:"space-between",alignItems:"flex-start",marginBottom:10,flexWrap:"wrap",gap:8}}>
                   <div><span style={{fontWeight:800,fontSize:15}}>Invoice {inv.invoice_number||"—"}</span><span style={{color:C.muted,fontSize:12,marginLeft:10}}>{inv.invoice_date}</span></div>
