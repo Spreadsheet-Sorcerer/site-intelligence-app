@@ -8,6 +8,7 @@ const C = {
   yellow: "#EAB308", red: "#EF4444", purple: "#A855F7",
   muted: "#6B7280", text: "#F9FAFB", sub: "#9CA3AF", teal: "#14B8A6",
 };
+const APP_VERSION = "16";
 
 // ─── SUPABASE STORAGE HELPERS ────────────────────────────────────────────────
 // Calls server-side API routes which talk to Supabase.
@@ -1445,6 +1446,9 @@ function ConcreteModule({ onBack }) {
   const [saveStatus, setSaveStatus] = useState("loading");
   const [ticketSearch, setTicketSearch] = useState("");
   const [invoiceSearch, setInvoiceSearch] = useState("");
+  const [deletedRecords, setDeletedRecords] = useState([]);
+  const [deletedOpen, setDeletedOpen] = useState(false);
+  const [feedbackOpen, setFeedbackOpen] = useState(false);
   const skipInitialSaveRef = useRef(true);
   const fileRef    = useRef();
   const invFileRef = useRef();
@@ -1459,6 +1463,7 @@ function ConcreteModule({ onBack }) {
           if(saved?.tickets)  setTickets(saved.tickets);
           if(saved?.invoices) setInvoices(saved.invoices);
           if(saved?.tests)    setTests(saved.tests);
+          if(saved?.deletedRecords) setDeletedRecords(saved.deletedRecords);
           skipInitialSaveRef.current=true;
           setStorageReady(true);
           setSaveStatus("saved");
@@ -1483,14 +1488,57 @@ function ConcreteModule({ onBack }) {
     }
     setSaveStatus("saving");
     const timer=setTimeout(async()=>{
-      const ok=await storageSet("concrete-data", { tickets, invoices, tests });
+      const ok=await storageSet("concrete-data", { tickets, invoices, tests, deletedRecords });
       setSaveStatus(ok?"saved":"error");
       if (!ok) showToast("Could not save after 3 attempts. Keep this page open and try the action again.", "err");
     },500);
     return()=>clearTimeout(timer);
-  }, [tickets, invoices, tests, storageReady]);
+  }, [tickets, invoices, tests, deletedRecords, storageReady]);
 
   function showToast(msg, type="ok") { setToast({msg,type}); setTimeout(()=>setToast(null),3500); }
+  function deleteTicket(ticket){
+    setDeletedRecords(prev=>[{kind:"ticket",record:ticket,deleted_at:new Date().toISOString()},...prev].slice(0,25));
+    setTickets(prev=>prev.filter(x=>x.id!==ticket.id));
+    showToast(`Ticket #${ticket.ticket_number||"—"} deleted — it can be restored from Recently Deleted.`);
+  }
+  function deleteInvoice(invoice){
+    setDeletedRecords(prev=>[{kind:"invoice",record:invoice,deleted_at:new Date().toISOString()},...prev].slice(0,25));
+    setInvoices(prev=>prev.filter(x=>x.id!==invoice.id));
+    showToast(`Invoice ${invoice.invoice_number||"—"} deleted — it can be restored from Recently Deleted.`);
+  }
+  function undoDelete(entry){
+    if(entry.kind==="ticket"){
+      const key=ticketNumberKey(entry.record.ticket_number);
+      if(key&&tickets.some(t=>ticketNumberKey(t.ticket_number)===key)){
+        showToast(`Ticket #${entry.record.ticket_number} is already in the log and cannot be restored twice.`,"err");
+        return;
+      }
+      setTickets(prev=>[...prev,entry.record]);
+    }else{
+      setInvoices(prev=>[...prev,entry.record]);
+    }
+    setDeletedRecords(prev=>prev.filter(x=>x!==entry));
+    showToast(`${entry.kind==="ticket"?"Ticket":"Invoice"} restored ✓`);
+  }
+  async function copyFeedbackTemplate(){
+    const template=`Fortuna Tracker Feedback — v${APP_VERSION}
+
+Date/time:
+Your name:
+Page/tab:
+What were you trying to do?
+What did you expect to happen?
+What actually happened?
+Ticket or invoice number (if applicable):
+Browser/device:
+Screenshot attached: Yes / No`;
+    try{
+      await navigator.clipboard.writeText(template);
+      showToast("Feedback template copied ✓");
+    }catch{
+      showToast("Could not copy automatically—please select the template manually.","err");
+    }
+  }
   async function toB64(file) { return new Promise((res,rej)=>{ const r=new FileReader(); r.onload=()=>res(r.result.split(",")[1]); r.onerror=rej; r.readAsDataURL(file); }); }
   async function toDataURL(file) { return new Promise((res,rej)=>{ const r=new FileReader(); r.onload=()=>res(r.result); r.onerror=rej; r.readAsDataURL(file); }); }
 
@@ -1936,20 +1984,59 @@ Return ONLY valid JSON, no markdown:
       {toast&&<div style={{position:"fixed",top:18,right:18,zIndex:999,background:toast.type==="err"?"#450a0a":"#052e16",color:toast.type==="err"?"#fca5a5":"#86efac",border:`1px solid ${toast.type==="err"?C.red:C.green}`,borderRadius:10,padding:"12px 22px",fontWeight:600,fontSize:14,boxShadow:"0 8px 32px #0009"}}>{toast.msg}</div>}
       {selectedTicket&&<TicketModal ticket={selectedTicket} onClose={()=>setSelectedTicket(null)}/>}
       {selectedInvoice&&<InvoiceModal invoice={selectedInvoice} onClose={()=>setSelectedInvoice(null)}/>}
+      {feedbackOpen&&<div style={{position:"fixed",inset:0,background:"#000c",zIndex:250,display:"flex",alignItems:"center",justifyContent:"center",padding:16}} onClick={e=>e.target===e.currentTarget&&setFeedbackOpen(false)}>
+        <div style={{background:C.card,border:`1px solid ${C.blue}66`,borderRadius:16,padding:26,width:"94%",maxWidth:560,maxHeight:"90vh",overflowY:"auto"}}>
+          <div style={{fontWeight:800,fontSize:19,marginBottom:6}}>💬 Help Improve the Tracker</div>
+          <div style={{color:C.sub,fontSize:13,lineHeight:1.6,marginBottom:16}}>If something looks wrong or could work better, please include the details below and attach a screenshot where possible. Do not delete or re-upload a record just to reproduce an issue.</div>
+          <pre style={{background:C.bg,border:`1px solid ${C.border}`,borderRadius:10,padding:"14px 16px",whiteSpace:"pre-wrap",fontFamily:"inherit",fontSize:12,color:C.text,lineHeight:1.7,marginBottom:16}}>{`Fortuna Tracker Feedback — v${APP_VERSION}
+
+Date/time:
+Your name:
+Page/tab:
+What were you trying to do?
+What did you expect to happen?
+What actually happened?
+Ticket or invoice number (if applicable):
+Browser/device:
+Screenshot attached: Yes / No`}</pre>
+          <div style={{display:"flex",gap:9}}>
+            <button onClick={copyFeedbackTemplate} style={{background:C.blue,color:"#fff",border:"none",borderRadius:9,padding:"10px 18px",fontWeight:800,cursor:"pointer",flex:1}}>📋 Copy Template</button>
+            <button onClick={()=>setFeedbackOpen(false)} style={{background:C.bg,color:C.muted,border:`1px solid ${C.border}`,borderRadius:9,padding:"10px 18px",fontWeight:700,cursor:"pointer"}}>Close</button>
+          </div>
+        </div>
+      </div>}
+      {deletedOpen&&<div style={{position:"fixed",inset:0,background:"#000c",zIndex:250,display:"flex",alignItems:"center",justifyContent:"center",padding:16}} onClick={e=>e.target===e.currentTarget&&setDeletedOpen(false)}>
+        <div style={{background:C.card,border:`1px solid ${C.border}`,borderRadius:16,padding:26,width:"94%",maxWidth:650,maxHeight:"90vh",overflowY:"auto"}}>
+          <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",gap:12,marginBottom:18}}>
+            <div><div style={{fontWeight:800,fontSize:19}}>🗑 Recently Deleted</div><div style={{color:C.muted,fontSize:12,marginTop:3}}>The 25 most recent deleted tickets and invoices can be restored here.</div></div>
+            <button onClick={()=>setDeletedOpen(false)} style={{background:"transparent",color:C.muted,border:"none",fontSize:22,cursor:"pointer"}}>×</button>
+          </div>
+          {deletedRecords.length===0?<div style={{color:C.muted,textAlign:"center",padding:"36px 0"}}>Nothing has been deleted.</div>:deletedRecords.map((entry,i)=>{
+            const r=entry.record||{};
+            const label=entry.kind==="ticket"?`Ticket #${r.ticket_number||"—"}`:`Invoice ${r.invoice_number||"—"}`;
+            return <div key={`${entry.deleted_at}-${i}`} style={{background:C.bg,border:`1px solid ${C.border}`,borderRadius:10,padding:"12px 14px",marginBottom:9,display:"flex",justifyContent:"space-between",alignItems:"center",gap:12,flexWrap:"wrap"}}>
+              <div><div style={{fontWeight:750}}>{entry.kind==="ticket"?"🧾":"💰"} {label}</div><div style={{color:C.muted,fontSize:11,marginTop:3}}>{r.date||r.invoice_date||"No record date"} · deleted {new Date(entry.deleted_at).toLocaleString("en-CA")}</div></div>
+              <button onClick={()=>undoDelete(entry)} style={{background:C.green+"18",color:C.green,border:`1px solid ${C.green}55`,borderRadius:8,padding:"7px 13px",fontWeight:800,cursor:"pointer"}}>↶ Restore</button>
+            </div>;
+          })}
+        </div>
+      </div>}
 
       <div style={{background:C.card,borderBottom:`1px solid ${C.border}`,padding:"16px 28px",display:"flex",alignItems:"center",justifyContent:"space-between",flexWrap:"wrap",gap:12}}>
         <div style={{display:"flex",alignItems:"center",gap:13}}>
           <button onClick={onBack} style={{background:"transparent",border:`1px solid ${C.border}`,color:C.muted,borderRadius:8,padding:"6px 13px",fontWeight:700,fontSize:12,cursor:"pointer"}}>← Back</button>
           <div style={{width:40,height:40,borderRadius:11,background:C.accent,display:"flex",alignItems:"center",justifyContent:"center",fontSize:20}}>🏗️</div>
           <div>
-            <div style={{fontWeight:800,fontSize:17}}>Concrete Tracker</div>
+            <div style={{fontWeight:800,fontSize:17}}>Concrete Tracker <span style={{color:C.muted,fontSize:10,fontWeight:700,verticalAlign:"middle",border:`1px solid ${C.border}`,borderRadius:5,padding:"2px 6px",marginLeft:5}}>v{APP_VERSION}</span></div>
             <div style={{color:C.muted,fontSize:12}}>{fmt(TOTAL_SCOPE_M3,1)} m³ scope · {tickets.length} tickets · {invoices.length} invoices{mpaMismatches.length>0?` · ⚠ ${mpaMismatches.length} MPa mismatch${mpaMismatches.length>1?"es":""}`:""}</div>
           </div>
         </div>
-        <div style={{display:"flex",gap:8,alignItems:"center"}}>
+        <div style={{display:"flex",gap:8,alignItems:"center",flexWrap:"wrap"}}>
           <span style={{fontSize:11,color:saveStatus==="error"?C.red:saveStatus==="saved"?C.green:C.muted,fontWeight:700}}>
             {saveStatus==="saved"?"💾 Saved":saveStatus==="saving"?"⏳ Saving...":saveStatus==="error"?"⚠ Save error":"⏳ Loading..."}
           </span>
+          <button onClick={()=>setFeedbackOpen(true)} style={{background:"transparent",color:C.blue,border:`1px solid ${C.blue}55`,borderRadius:9,padding:"9px 13px",fontWeight:750,fontSize:12,cursor:"pointer"}}>💬 Feedback</button>
+          <button onClick={()=>setDeletedOpen(true)} style={{background:"transparent",color:C.muted,border:`1px solid ${C.border}`,borderRadius:9,padding:"9px 13px",fontWeight:750,fontSize:12,cursor:"pointer"}}>🗑 Deleted{deletedRecords.length?` (${deletedRecords.length})`:""}</button>
           <button onClick={exportXLSX} style={{background:C.green,color:"#052e16",border:"none",borderRadius:9,padding:"10px 22px",fontWeight:800,fontSize:14,cursor:"pointer"}}>⬇ Export .xlsx</button>
         </div>
       </div>
@@ -2187,7 +2274,7 @@ Return ONLY valid JSON, no markdown:
                             {specMpa&&!mismatch&&<Badge color={C.muted}>spec: {specMpa}</Badge>}
                             {parseFloat(t.pump_volume_m3)>0&&<Badge color={C.teal}>💧 {parseFloat(t.pump_volume_m3).toFixed(2)} m³</Badge>}
                             {(t.file_url||t.originalFile)&&<button onClick={e=>{ e.stopPropagation(); const src=t.file_url||t.originalFile; const isImg=/^data:image|\.(jpg|jpeg|png|gif|webp|heic)/i.test(src); const w=window.open(); w.document.write(isImg?`<html><body style="margin:0;background:#000;display:flex;align-items:center;justify-content:center;min-height:100vh"><img src="${src}" style="max-width:100%;max-height:100vh;object-fit:contain"></body></html>`:`<iframe src="${src}" width="100%" height="100%" style="border:none;position:fixed;top:0;left:0"></iframe>`); }} style={{background:"transparent",border:`1px solid ${C.blue}44`,color:C.blue,borderRadius:6,padding:"3px 9px",fontSize:12,fontWeight:700,cursor:"pointer"}}>📄 View</button>}
-                            <button onClick={e=>{ e.stopPropagation(); if(window.confirm(`Delete ticket #${t.ticket_number||"this ticket"}? This will restore its volume to the remaining-work totals.`)) setTickets(prev=>prev.filter(x=>x.id!==t.id)); }} style={{background:"transparent",border:`1px solid ${C.red}44`,color:C.red,borderRadius:6,padding:"3px 9px",fontSize:12,fontWeight:700,cursor:"pointer"}}>🗑 Delete</button>
+                            <button onClick={e=>{ e.stopPropagation(); if(window.confirm(`Delete ticket #${t.ticket_number||"this ticket"}? This will restore its volume to the remaining-work totals. You can undo this from Recently Deleted.`)) deleteTicket(t); }} style={{background:"transparent",border:`1px solid ${C.red}44`,color:C.red,borderRadius:6,padding:"3px 9px",fontSize:12,fontWeight:700,cursor:"pointer"}}>🗑 Delete</button>
                           </div>
                         </div>
                         <div style={{display:"flex",gap:16,flexWrap:"wrap",fontSize:13,color:C.sub}}>
@@ -2227,7 +2314,7 @@ Return ONLY valid JSON, no markdown:
                   <div><span style={{fontWeight:800,fontSize:15}}>Invoice {inv.invoice_number||"—"}</span><span style={{color:C.muted,fontSize:12,marginLeft:10}}>{inv.invoice_date}</span></div>
                   <div style={{display:"flex",gap:7,flexWrap:"wrap",alignItems:"center"}}>{inv.total_amount>0&&<Badge color={C.green}>{inv.currency||""} {inv.total_amount?.toLocaleString()}</Badge>}<Badge color={hasIssues?C.red:C.green}>{hasIssues?"⚠ Review":"✓ Matched"}</Badge>
                     {(inv.file_url||inv.originalFile)&&<button onClick={e=>{ e.stopPropagation(); const src=inv.file_url||inv.originalFile; const isImg=/^data:image|\.(jpg|jpeg|png|gif|webp|heic)/i.test(src); const w=window.open(); w.document.write(isImg?`<html><body style="margin:0;background:#000;display:flex;align-items:center;justify-content:center;min-height:100vh"><img src="${src}" style="max-width:100%;max-height:100vh;object-fit:contain"></body></html>`:`<iframe src="${src}" width="100%" height="100%" style="border:none;position:fixed;top:0;left:0"></iframe>`); }} style={{background:"transparent",border:`1px solid ${C.blue}44`,color:C.blue,borderRadius:6,padding:"3px 9px",fontSize:12,fontWeight:700,cursor:"pointer"}}>📄 View</button>}
-                    <button onClick={e=>{ e.stopPropagation(); if(window.confirm(`Delete invoice ${inv.invoice_number||"this invoice"}?`)) setInvoices(prev=>prev.filter(x=>x.id!==inv.id)); }} style={{background:"transparent",border:`1px solid ${C.red}44`,color:C.red,borderRadius:6,padding:"3px 9px",fontSize:12,fontWeight:700,cursor:"pointer"}}>🗑 Delete</button>
+                    <button onClick={e=>{ e.stopPropagation(); if(window.confirm(`Delete invoice ${inv.invoice_number||"this invoice"}? You can undo this from Recently Deleted.`)) deleteInvoice(inv); }} style={{background:"transparent",border:`1px solid ${C.red}44`,color:C.red,borderRadius:6,padding:"3px 9px",fontSize:12,fontWeight:700,cursor:"pointer"}}>🗑 Delete</button>
                   </div>
                 </div>
                 <div style={{display:"flex",gap:20,fontSize:13,color:C.sub,flexWrap:"wrap"}}>
