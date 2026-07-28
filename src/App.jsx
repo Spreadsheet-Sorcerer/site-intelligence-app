@@ -112,6 +112,7 @@ function cglComplianceFlags(doc) {
 // ─── CONCRETE SCOPE ───────────────────────────────────────────────────────────
 const SCOPE = [
   { area:"Mud Slabs",   item:"Slabs",                m3:185.0,  mpa:"20 MPa"       },
+  { area:"Crane Base",  item:"Slabs",                m3:137.7,  mpa:"35 MPa"       },
   { area:"SOG",         item:"Slabs",                m3:305.0,  mpa:"25 MPa/N-CF" },
   { area:"Foundations", item:"Wall",                 m3:287.3,  mpa:"25 MPa/F-2"  },
   { area:"Foundations", item:"Raft",                 m3:327.6,  mpa:"25 MPa/F-2"  },
@@ -208,6 +209,10 @@ const PUMP_CATEGORIES = PUMP_BUDGET.map(r => r.category);
 const TOTAL_PUMP_BUDGET_M3 = PUMP_BUDGET.reduce((s,r) => s + r.volume_m3, 0);
 const TOTAL_PUMP_BUDGET_HOURS = PUMP_BUDGET.reduce((s,r) => s + r.hours, 0);
 const M3_TO_YD3 = 1.30795;
+// Files are base64 encoded before being sent through the serverless API, which
+// adds roughly 33% to their size. Keep raw files below 3 MB to stay safely
+// under the request-body limit.
+const MAX_API_FILE_BYTES = 3 * 1024 * 1024;
 const AREAS = [...new Set(SCOPE.map(r => r.area))];
 const ITEMS = [...new Set(SCOPE.map(r => r.item).filter(Boolean))];
 const MPA_SPEC = {};
@@ -1516,6 +1521,10 @@ CRITICAL FIELD EXTRACTION RULES — read carefully:
 
 4. date: The delivery/load date on the ticket in YYYY-MM-DD format. Read the printed dispatch date exactly. This project is active in 2026. For example, printed 2026/07/20 or handwritten 20/07/26 means 2026-07-20 — never 2020-07-26. Do not swap the day with digits from the year.
 
+4A. location: Treat the printed WORK TYPE as authoritative when it clearly
+names a project location. In particular, "CRANE BASE" means area "Crane Base"
+and item "Slabs"; "MUD SLAB" means area "Mud Slabs" and item "Slabs".
+
 5. pumping: Look for a line item labelled "Pumping", "Pump", or "Pompage" on a delivery ticket AND look for a separate yellow or white "EXTRA WORK ORDERS / HOURLY EQUIPMENT RENTALS" form where TYPE OF EQUIPMENT says Pump. A pumping form is a valid record even though it has no concrete mix design. Extract:
    - pump_volume_m3: the volume pumped in m³ (e.g. 8.00)
    - pump_cost: the dollar amount charged for pumping (e.g. 450.00, as a number without $ sign)
@@ -1694,11 +1703,18 @@ Return ONLY valid JSON, no markdown:
   async function handleTicketFiles(files) {
     if(!files?.length) return; setLoading(true);
     const pending = [];
+    const selectedFiles=Array.from(files);
+    const oversized=selectedFiles.filter(file=>file.size>MAX_API_FILE_BYTES);
+    const uploadable=selectedFiles.filter(file=>file.size<=MAX_API_FILE_BYTES);
+    if(oversized.length){
+      showToast(`${oversized.map(file=>file.name).join(", ")} is too large. Use a PDF under 3 MB or split it into smaller files.`,"err");
+    }
+    if(!uploadable.length){setLoading(false);return;}
     // Refresh first so duplicates uploaded by another user/device are caught.
     const latestSaved = await storageGet("concrete-data");
     const existingTickets = latestSaved?.tickets || tickets;
     const duplicateNumbers = [];
-    for(const file of Array.from(files)){
+    for(const file of uploadable){
       setLoadMsg(`Reading "${file.name}"…`);
       try{
         const [extractedArr,fileUrl]=await Promise.all([extractTicket(file),uploadFile(file,"tickets")]);
@@ -1712,9 +1728,11 @@ Return ONLY valid JSON, no markdown:
           // Pass growing pending array so each ticket in batch accounts for previous ones
           const allSoFar = [...tickets, ...pending];
           const suggestion = suggestLocation(extracted.mix_design, allSoFar);
-          extracted.area = suggestion.area || extracted.area || "";
-          extracted.item = suggestion.item || extracted.item || "";
-          pending.push({id:Date.now()+Math.random(),filename:file.name,fileType:file.type,file_url:fileUrl,added_at:new Date().toISOString(),...extracted,_suggested:!!(suggestion.area)});
+          const printedArea = AREAS.find(area=>area.toLowerCase()===String(extracted.area||"").trim().toLowerCase()) || "";
+          const printedItem = ITEMS.find(item=>item.toLowerCase()===String(extracted.item||"").trim().toLowerCase()) || "";
+          extracted.area = printedArea || suggestion.area || "";
+          extracted.item = printedItem || suggestion.item || "";
+          pending.push({id:Date.now()+Math.random(),filename:file.name,fileType:file.type,file_url:fileUrl,added_at:new Date().toISOString(),...extracted,_suggested:!printedArea&&!!(suggestion.area)});
         }
       }catch(e){ showToast(`Could not read "${file.name}": ${e.message}`,"err"); }
     }
