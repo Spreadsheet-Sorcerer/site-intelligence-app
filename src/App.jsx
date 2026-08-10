@@ -8,7 +8,7 @@ const C = {
   yellow: "#EAB308", red: "#EF4444", purple: "#A855F7",
   muted: "#6B7280", text: "#F9FAFB", sub: "#9CA3AF", teal: "#14B8A6",
 };
-const APP_VERSION = "16";
+const APP_VERSION = "17.0";
 
 // ─── SUPABASE STORAGE HELPERS ────────────────────────────────────────────────
 // Calls server-side API routes which talk to Supabase.
@@ -244,6 +244,23 @@ function checkMpaMismatch(ticket) {
   if (!specNum || !ticketNum) return null;
   if (ticketNum !== specNum) return { specMpa: specStr, ticketMpa: ticket.mix_design };
   return null;
+}
+
+// v17 data correction: Ocean's July 27 invoice combined the crane-base pour
+// with four 20 MPa mud-slab loads. Earlier versions assigned the whole batch
+// to Crane Base. Keep this migration deliberately narrow so user-confirmed
+// locations on unrelated tickets are never overwritten.
+const V17_MUD_SLAB_TICKETS = new Set(["251787", "251790", "251793", "251795"]);
+function migrateConcreteTicketsV17(allTickets) {
+  let changed = false;
+  const tickets = (allTickets || []).map(ticket => {
+    const ticketNo = String(ticket.ticket_number || "").replace(/\D/g, "");
+    const isJuly27MudSlab = ticket.date === "2026-07-27" && V17_MUD_SLAB_TICKETS.has(ticketNo);
+    if (!isJuly27MudSlab || (ticket.area === "Mud Slabs" && ticket.item === "Slabs")) return ticket;
+    changed = true;
+    return { ...ticket, area:"Mud Slabs", item:"Slabs", _v17_location_corrected:true };
+  });
+  return { tickets, changed };
 }
 
 // Keep OCR date mistakes (for example 2026/07/20 becoming 2020-07-26)
@@ -1460,10 +1477,15 @@ function ConcreteModule({ onBack }) {
         const saved=await storageGet("concrete-data");
         if(saved!==null){
           if(cancelled)return;
-          if(saved?.tickets)  setTickets(saved.tickets);
+          const migrated = migrateConcreteTicketsV17(saved?.tickets || []);
+          setTickets(migrated.tickets);
           if(saved?.invoices) setInvoices(saved.invoices);
           if(saved?.tests)    setTests(saved.tests);
           if(saved?.deletedRecords) setDeletedRecords(saved.deletedRecords);
+          if(migrated.changed){
+            const migrationSaved = await storageSet("concrete-data", { ...saved, tickets:migrated.tickets });
+            if(!migrationSaved) console.error("v17 ticket-location migration could not be saved");
+          }
           skipInitialSaveRef.current=true;
           setStorageReady(true);
           setSaveStatus("saved");
@@ -1646,23 +1668,34 @@ Return ONLY valid JSON (no markdown):
     return { area: "", item: "", specMpa: null };
   }
 
-    function matchInvoiceToTickets(invoice, allTickets) {
+  function matchInvoiceToTickets(invoice, allTickets) {
     const invoiceTicketNums = (invoice.ticket_numbers||[]).map(n=>String(n).trim().toLowerCase());
-    const matched=[]; const unmatched=[];
-    const ticketsOnInvoice = allTickets.filter(t=>{
+    const explicitlyMatched = allTickets.filter(t=>{
       const tNum=String(t.ticket_number||"").trim().toLowerCase();
       const tInv=String(t.invoice_number||"").trim().toLowerCase();
       const invNum=String(invoice.invoice_number||"").trim().toLowerCase();
       return (invoiceTicketNums.includes(tNum)&&tNum!=="")||(tInv!==""&&invNum!==""&&tInv===invNum);
     });
-    invoiceTicketNums.forEach(n=>{
-      const found=allTickets.find(t=>String(t.ticket_number||"").trim().toLowerCase()===n);
-      if(found) matched.push({invoiceRef:n,ticket:found}); else unmatched.push(n);
-    });
+
+    const supplierText=String(invoice.supplier||"").toLowerCase();
+    const isOcean=supplierText.includes("ocean");
+    const invoiceDate=String(invoice.invoice_date||"");
+    const invoiceVolume=parseFloat(invoice.total_volume_m3)||0;
+    // Ocean invoices show the first/reference ticket for each pour rather than
+    // every delivery docket. When the complete same-day Ocean batch reconciles
+    // to the invoice total, use that batch. Exact ticket matching remains the
+    // default for Quality Concrete and all other suppliers.
+    const oceanDateBatch=isOcean&&invoiceDate
+      ? allTickets.filter(t=>String(t.date||"")===invoiceDate&&String(t.supplier||"").toLowerCase().includes("ocean")&&(parseFloat(t.volume_m3)||0)>0)
+      : [];
+    const oceanBatchVolume=oceanDateBatch.reduce((s,t)=>s+(parseFloat(t.volume_m3)||0),0);
+    const usesConsolidatedBatch=isOcean&&invoiceVolume>0&&oceanDateBatch.length>0&&Math.abs(oceanBatchVolume-invoiceVolume)<0.5;
+    const ticketsOnInvoice=usesConsolidatedBatch?oceanDateBatch:explicitlyMatched;
+    const matched=ticketsOnInvoice.map(t=>({invoiceRef:usesConsolidatedBatch?"Ocean date batch":t.ticket_number,ticket:t}));
+    const unmatched=usesConsolidatedBatch?[]:invoiceTicketNums.filter(n=>!allTickets.some(t=>String(t.ticket_number||"").trim().toLowerCase()===n));
     const ticketVolume=ticketsOnInvoice.reduce((s,t)=>s+(parseFloat(t.volume_m3)||0),0);
-    const invoiceVolume=invoice.total_volume_m3||0;
     const volumeMatch=invoiceVolume>0?Math.abs(ticketVolume-invoiceVolume)<0.5:null;
-    return {matched,unmatched,ticketsOnInvoice,ticketVolume,invoiceVolume,volumeMatch};
+    return {matched,unmatched,ticketsOnInvoice,ticketVolume,invoiceVolume,volumeMatch,usesConsolidatedBatch};
   }
 
   // ── Upload file to Supabase Storage and return public URL ──
@@ -1969,6 +2002,7 @@ Return ONLY valid JSON, no markdown:
           {m.ticketVolume>0&&<div style={{background:C.bg,borderRadius:10,padding:"12px 18px",flex:1}}><div style={{color:C.muted,fontSize:11,fontWeight:700,textTransform:"uppercase",letterSpacing:1}}>Ticket Volume</div><div style={{color:m.volumeMatch===false?C.red:C.green,fontWeight:800,fontSize:20,fontFamily:"monospace"}}>{fmt(m.ticketVolume)} m³</div></div>}
         </div>
         {m.volumeMatch===false&&<div style={{background:"#450a0a",border:`1px solid ${C.red}`,borderRadius:10,padding:"12px 16px",marginBottom:14,color:"#fca5a5",fontSize:13}}>⚠ Volume mismatch — invoice shows {fmt(m.invoiceVolume)} m³ but matched tickets total {fmt(m.ticketVolume)} m³</div>}
+        {m.usesConsolidatedBatch&&<div style={{background:"#082f49",border:`1px solid ${C.blue}`,borderRadius:10,padding:"12px 16px",marginBottom:14,color:"#bae6fd",fontSize:13}}>✓ Ocean consolidated invoice — reconciled against all {m.matched.length} concrete delivery tickets dated {invoice.invoice_date}. Ocean does not print every delivery ticket number on its invoice.</div>}
         {m.unmatched.length>0&&<div style={{background:"#451a03",border:`1px solid ${C.yellow}`,borderRadius:10,padding:"12px 16px",marginBottom:14,color:"#fde68a",fontSize:13}}>⚠ {m.unmatched.length} ticket{m.unmatched.length>1?"s":""} on invoice not in system: <b>{m.unmatched.join(", ")}</b></div>}
         {m.matched.length>0&&<div style={{marginBottom:16}}>
           <div style={{color:C.muted,fontSize:11,fontWeight:700,textTransform:"uppercase",letterSpacing:1,marginBottom:10}}>Matched Tickets ({m.matched.length})</div>
