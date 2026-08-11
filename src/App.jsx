@@ -8,7 +8,7 @@ const C = {
   yellow: "#EAB308", red: "#EF4444", purple: "#A855F7",
   muted: "#6B7280", text: "#F9FAFB", sub: "#9CA3AF", teal: "#14B8A6",
 };
-const APP_VERSION = "17.2";
+const APP_VERSION = "17.3";
 
 // ─── SUPABASE STORAGE HELPERS ────────────────────────────────────────────────
 // Calls server-side API routes which talk to Supabase.
@@ -113,7 +113,7 @@ function cglComplianceFlags(doc) {
 // ─── CONCRETE SCOPE ───────────────────────────────────────────────────────────
 const SCOPE = [
   { area:"Mud Slabs",   item:"Slabs",                m3:185.0,  mpa:"20 MPa"       },
-  { area:"Crane Base",  item:"Slabs",                m3:137.7,  mpa:"35 MPa"       },
+  { area:"Crane Base",  item:"Interior foundations", m3:137.7,  mpa:"35 MPa"       },
   { area:"SOG",         item:"Slabs",                m3:305.0,  mpa:"25 MPa/N-CF" },
   { area:"Foundations", item:"Wall",                 m3:287.3,  mpa:"25 MPa/F-2"  },
   { area:"Foundations", item:"Raft",                 m3:327.6,  mpa:"25 MPa/F-2"  },
@@ -272,12 +272,12 @@ function migrateConcreteTicketsV17(allTickets) {
       changed = true;
       return { ...ticket, area:"Mud Slabs", item:"Slabs", _v17_location_corrected:true };
     }
-    // The saved crane-base tickets in the older dataset carried the impossible
-    // combination "Crane Base — Interior foundations". Crane Base has only one
-    // valid scope element, so correct that legacy element without changing volume.
-    if (ticket.area === "Crane Base" && ticket.item !== "Slabs") {
+    // The crane-base pour is tracked as interior foundations. Versions 17.1
+    // and 17.2 incorrectly changed these saved tickets to Slabs; reverse that
+    // correction without changing ticket quantities or mix data.
+    if (ticket.area === "Crane Base" && ticket.item !== "Interior foundations") {
       changed = true;
-      return { ...ticket, item:"Slabs", _v17_location_corrected:true };
+      return { ...ticket, item:"Interior foundations", _v17_location_corrected:true };
     }
     if (ticket.area === "Mud Slabs" && ticket.item !== "Slabs") {
       changed = true;
@@ -1620,7 +1620,7 @@ CRITICAL FIELD EXTRACTION RULES — read carefully:
 
 4A. location: Treat the printed WORK TYPE as authoritative when it clearly
 names a project location. In particular, "CRANE BASE" means area "Crane Base"
-and item "Slabs"; "MUD SLAB" means area "Mud Slabs" and item "Slabs".
+and item "Interior foundations"; "MUD SLAB" means area "Mud Slabs" and item "Slabs".
 
 5. pumping: Look for a line item labelled "Pumping", "Pump", or "Pompage" on a delivery ticket AND look for a separate yellow or white "EXTRA WORK ORDERS / HOURLY EQUIPMENT RENTALS" form where TYPE OF EQUIPMENT says Pump. A pumping form is a valid record even though it has no concrete mix design. Extract:
    - pump_volume_m3: the volume pumped in m³ (e.g. 8.00)
@@ -2032,8 +2032,8 @@ Return ONLY valid JSON, no markdown:
           {editField("Supplier","supplier")}
           <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:10}}>{editField("Volume (m³)","volume_m3","number")}{editField("Ticket Mix / MPa","mix_design")}</div>
           <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:10}}>
-            <div style={{marginBottom:11}}><label style={{display:"block",color:C.muted,fontSize:10,fontWeight:700,textTransform:"uppercase",letterSpacing:1,marginBottom:4}}>Area</label><select value={draft.area||""} onChange={e=>{const area=e.target.value;const items=validItemsForArea(area);setDraft(d=>({...d,area,item:items.length===1?items[0]:""}));}} style={editFieldStyle}><option value="">— select area —</option>{AREAS.map(a=><option key={a} value={a}>{a}</option>)}</select></div>
-            <div style={{marginBottom:11}}><label style={{display:"block",color:C.muted,fontSize:10,fontWeight:700,textTransform:"uppercase",letterSpacing:1,marginBottom:4}}>Element</label><select value={draft.item||""} onChange={e=>setDraft(d=>({...d,item:e.target.value}))} style={editFieldStyle}><option value="">— select element —</option>{validItemsForArea(draft.area).map(it=><option key={it} value={it}>{it}</option>)}</select></div>
+            <div style={{marginBottom:11}}><label style={{display:"block",color:C.muted,fontSize:10,fontWeight:700,textTransform:"uppercase",letterSpacing:1,marginBottom:4}}>Area</label><select value={draft.area||""} onChange={e=>setDraft(d=>({...d,area:e.target.value,item:""}))} style={editFieldStyle}><option value="">— select area —</option>{AREAS.map(a=><option key={a} value={a}>{a}</option>)}</select></div>
+            <div style={{marginBottom:11}}><label style={{display:"block",color:C.muted,fontSize:10,fontWeight:700,textTransform:"uppercase",letterSpacing:1,marginBottom:4}}>Element</label><select value={draft.item||""} onChange={e=>setDraft(d=>({...d,item:e.target.value}))} style={editFieldStyle}><option value="">— select element —</option>{ITEMS.map(it=><option key={it} value={it}>{it}</option>)}</select></div>
           </div>
           {editField("Invoice #","invoice_number")}
           <div style={{marginBottom:11}}><label style={{display:"block",color:C.muted,fontSize:10,fontWeight:700,textTransform:"uppercase",letterSpacing:1,marginBottom:4}}>Notes</label><textarea value={draft.notes||""} onChange={e=>setDraft(d=>({...d,notes:e.target.value}))} rows={3} style={{...editFieldStyle,resize:"vertical"}}/></div>
@@ -2278,8 +2278,7 @@ Screenshot attached: Yes / No`}</pre>
                             </label>
                             <select value={t.area||""} onChange={e=>{
                               const val=e.target.value;
-                              const validItems=validItemsForArea(val);
-                              setReviewQueue(q=>q.map((x,j)=>j===i?{...x,area:val,item:validItems.length===1?validItems[0]:"",_suggested:false,_codingConfirmed:false}:x));
+                              setReviewQueue(q=>q.map((x,j)=>j===i?{...x,area:val,item:"",_suggested:false,_codingConfirmed:false}:x));
                             }} style={{width:"100%",background:C.bg,border:`1px solid ${t.area?C.blue:C.yellow}`,borderRadius:8,padding:"9px 12px",color:C.text,fontSize:14,boxSizing:"border-box"}}>
                               <option value="">— select area —</option>
                               {AREAS.map(a=><option key={a} value={a}>{a}</option>)}
@@ -2301,7 +2300,7 @@ Screenshot attached: Yes / No`}</pre>
                               setReviewQueue(q=>q.map((x,j)=>j===i?{...x,item:val,_suggested:false,_codingConfirmed:false}:x));
                             }} style={{width:"100%",background:C.bg,border:`1px solid ${t.item?C.blue:C.yellow}`,borderRadius:8,padding:"9px 12px",color:C.text,fontSize:14,boxSizing:"border-box"}}>
                               <option value="">— select element —</option>
-                              {validItemsForArea(t.area).map(it=><option key={it} value={it}>{it}</option>)}
+                              {ITEMS.map(it=><option key={it} value={it}>{it}</option>)}
                             </select>
                           </div>
                           <div style={{minWidth:160}}>
