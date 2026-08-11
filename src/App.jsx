@@ -8,7 +8,7 @@ const C = {
   yellow: "#EAB308", red: "#EF4444", purple: "#A855F7",
   muted: "#6B7280", text: "#F9FAFB", sub: "#9CA3AF", teal: "#14B8A6",
 };
-const APP_VERSION = "17.0";
+const APP_VERSION = "17.2";
 
 // ─── SUPABASE STORAGE HELPERS ────────────────────────────────────────────────
 // Calls server-side API routes which talk to Supabase.
@@ -246,6 +246,18 @@ function checkMpaMismatch(ticket) {
   return null;
 }
 
+function validItemsForArea(area) {
+  return [...new Set(SCOPE.filter(r=>r.area===area&&r.item).map(r=>r.item))];
+}
+function ticketCodingIssue(ticket) {
+  if (!(parseFloat(ticket.volume_m3)>0)) return null;
+  if (!ticket.area) return "area";
+  if (!ticket.item) return "element";
+  if (!MPA_SPEC[`${ticket.area}|||${ticket.item}`]) return "valid area/element combination";
+  if (!parseMpaNum(ticket.mix_design)) return "mix design / MPa";
+  return null;
+}
+
 // v17 data correction: Ocean's July 27 invoice combined the crane-base pour
 // with four 20 MPa mud-slab loads. Earlier versions assigned the whole batch
 // to Crane Base. Keep this migration deliberately narrow so user-confirmed
@@ -256,9 +268,22 @@ function migrateConcreteTicketsV17(allTickets) {
   const tickets = (allTickets || []).map(ticket => {
     const ticketNo = String(ticket.ticket_number || "").replace(/\D/g, "");
     const isJuly27MudSlab = ticket.date === "2026-07-27" && V17_MUD_SLAB_TICKETS.has(ticketNo);
-    if (!isJuly27MudSlab || (ticket.area === "Mud Slabs" && ticket.item === "Slabs")) return ticket;
-    changed = true;
-    return { ...ticket, area:"Mud Slabs", item:"Slabs", _v17_location_corrected:true };
+    if (isJuly27MudSlab && (ticket.area !== "Mud Slabs" || ticket.item !== "Slabs")) {
+      changed = true;
+      return { ...ticket, area:"Mud Slabs", item:"Slabs", _v17_location_corrected:true };
+    }
+    // The saved crane-base tickets in the older dataset carried the impossible
+    // combination "Crane Base — Interior foundations". Crane Base has only one
+    // valid scope element, so correct that legacy element without changing volume.
+    if (ticket.area === "Crane Base" && ticket.item !== "Slabs") {
+      changed = true;
+      return { ...ticket, item:"Slabs", _v17_location_corrected:true };
+    }
+    if (ticket.area === "Mud Slabs" && ticket.item !== "Slabs") {
+      changed = true;
+      return { ...ticket, item:"Slabs", _v17_location_corrected:true };
+    }
+    return ticket;
   });
   return { tickets, changed };
 }
@@ -1586,7 +1611,7 @@ CRITICAL FIELD EXTRACTION RULES — read carefully:
    - If you find a product code like "Q35NA1A" extract it AND note the 35 MPa strength
    - Return the full mix description you find, e.g. "35 MPa N 20mm" or "Q35NA1A — 35 MPa"
    - If the product code is partially visible but you can see a number (e.g. "Q35" or "35N"), return what you can see like "Q35NA1A" or "35 MPa"
-   - If truly unreadable, return "35 MPa" as a best guess for this project (all pours are 35 MPa or 25 MPa)
+   - If truly unreadable, return null. NEVER guess the strength; the user must review it.
    - NEVER return "ULTRA SLUMP" or slump/admixture descriptions as the mix_design
 
 3. volume_m3: Read from "QUANTITY" or "QUANTITE" field — a number like 8.00, 7.50 in m³. Do NOT use yd³ values here.
@@ -1815,7 +1840,7 @@ Return ONLY valid JSON, no markdown:
           const printedItem = ITEMS.find(item=>item.toLowerCase()===String(extracted.item||"").trim().toLowerCase()) || "";
           extracted.area = printedArea || suggestion.area || "";
           extracted.item = printedItem || suggestion.item || "";
-          pending.push({id:Date.now()+Math.random(),filename:file.name,fileType:file.type,file_url:fileUrl,added_at:new Date().toISOString(),...extracted,_suggested:!printedArea&&!!(suggestion.area)});
+          pending.push({id:Date.now()+Math.random(),filename:file.name,fileType:file.type,file_url:fileUrl,added_at:new Date().toISOString(),...extracted,_suggested:!printedArea&&!!(suggestion.area),_codingConfirmed:false});
         }
       }catch(e){ showToast(`Could not read "${file.name}": ${e.message}`,"err"); }
     }
@@ -1867,11 +1892,17 @@ Return ONLY valid JSON, no markdown:
   const pumpRemaining = Math.max(0, TOTAL_PUMP_BUDGET_M3 - totalPumpM3);
   const pumpHoursRemaining = Math.max(0, TOTAL_PUMP_BUDGET_HOURS - totalPumpHours);
   const pumpPct       = TOTAL_PUMP_BUDGET_M3 > 0 ? Math.min(100,(totalPumpM3/TOTAL_PUMP_BUDGET_M3)*100) : 0;
-  const remaining=Math.max(0,TOTAL_SCOPE_M3-totalPoured);
-  const pct=(totalPoured/TOTAL_SCOPE_M3)*100;
   const mpaMismatches=tickets.filter(t=>checkMpaMismatch(t));
   const pouredMap={};
   tickets.forEach(t=>{ const key=`${t.area||"Unknown"}|||${t.item||""}`; pouredMap[key]=(pouredMap[key]||0)+(parseFloat(t.volume_m3)||0); });
+  const scopeProgress=SCOPE.map(r=>{ const poured=pouredMap[`${r.area}|||${r.item}`]||0; return{...r,poured,remaining:Math.max(0,r.m3-poured),overage:Math.max(0,poured-r.m3)}; });
+  // Remaining work and overages are kept separate. An overage in one element
+  // must never cancel unfinished work in another element.
+  const remaining=scopeProgress.reduce((s,r)=>s+r.remaining,0);
+  const totalOverage=scopeProgress.reduce((s,r)=>s+r.overage,0);
+  const overageElements=scopeProgress.filter(r=>r.overage>0.01);
+  const codedPoured=scopeProgress.reduce((s,r)=>s+r.poured,0);
+  const pct=(codedPoured/TOTAL_SCOPE_M3)*100;
   const areaTotals={};
   SCOPE.forEach(r=>{ if(!areaTotals[r.area]) areaTotals[r.area]={scope:0,poured:0}; areaTotals[r.area].scope+=r.m3; });
   Object.entries(pouredMap).forEach(([key,val])=>{ const area=key.split("|||")[0]; if(!areaTotals[area]) areaTotals[area]={scope:0,poured:0}; areaTotals[area].poured+=val; });
@@ -1925,8 +1956,8 @@ Return ONLY valid JSON, no markdown:
     ws1["!cols"]=[4,12,16,22,18,16,20,14,14,14,14,14,14,12,22].map(w=>({wch:w}));
     if(ws1["!ref"]) ws1["!autofilter"]={ref:ws1["!ref"]};
     XLSX.utils.book_append_sheet(wb,ws1,"Ticket Log");
-    const ws2=XLSX.utils.json_to_sheet(SCOPE.map(r=>{ const poured=pouredMap[`${r.area}|||${r.item}`]||0; const rem=Math.max(0,r.m3-poured); return {"Area":r.area,"Element":r.item,"Spec MPa":r.mpa||"","Scope (m³)":r.m3,"Poured (m³)":poured||"","Remaining (m³)":rem||"","% Complete":r.m3>0?((poured/r.m3)*100).toFixed(1)+"%":"0%"}; }));
-    ws2["!cols"]=[14,22,14,14,14,16,12].map(w=>({wch:w}));
+    const ws2=XLSX.utils.json_to_sheet(scopeProgress.map(r=>({"Area":r.area,"Element":r.item,"Spec MPa":r.mpa||"","Scope (m³)":r.m3,"Poured (m³)":r.poured||"","Remaining (m³)":r.remaining||"","Overage (m³)":r.overage||"","Variance (m³)":+(r.poured-r.m3).toFixed(2),"% Complete":r.m3>0?((r.poured/r.m3)*100).toFixed(1)+"%":"0%"})));
+    ws2["!cols"]=[14,22,14,14,14,16,14,14,12].map(w=>({wch:w}));
     XLSX.utils.book_append_sheet(wb,ws2,"Progress by Element");
     if(mpaMismatches.length>0){ const wsm=XLSX.utils.json_to_sheet(mpaMismatches.map(t=>({ "Ticket #":t.ticket_number||"","Date":t.date||"","Area":t.area||"","Element":t.item||"","Ticket Mix":t.mix_design||"","Spec MPa":MPA_SPEC[`${t.area}|||${t.item}`]||"","Supplier":t.supplier||"","Volume (m³)":parseFloat(t.volume_m3)||"" }))); wsm["!cols"]=[14,12,14,16,20,16,20,14].map(w=>({wch:w})); XLSX.utils.book_append_sheet(wb,wsm,"⚠ MPa Mismatches"); }
     XLSX.writeFile(wb,`concrete-tracker-${new Date().toISOString().slice(0,10)}.xlsx`);
@@ -1935,6 +1966,10 @@ Return ONLY valid JSON, no markdown:
 
   async function addManual() {
     if(!manual.ticket_number&&!manual.date){showToast("Enter at least a date or ticket number.","err");return;}
+    const codingIssue=ticketCodingIssue(manual);
+    if(codingIssue){showToast(`Select a ${codingIssue} before saving this concrete ticket.`,"err");return;}
+    const manualMismatch=checkMpaMismatch(manual);
+    if(manualMismatch&&!window.confirm(`MPa mismatch: ticket shows ${manualMismatch.ticketMpa}, but ${manual.area} — ${manual.item} requires ${manualMismatch.specMpa}. Save the actual ticket anyway?`)) return;
     const latestSaved = await storageGet("concrete-data");
     const existingTickets = latestSaved?.tickets || tickets;
     const numberKey = ticketNumberKey(manual.ticket_number);
@@ -1954,19 +1989,56 @@ Return ONLY valid JSON, no markdown:
     else showToast("Ticket added ✓");
   }
 
+  async function saveTicketEdits(original, draft) {
+    const codingIssue=ticketCodingIssue(draft);
+    if(codingIssue){showToast(`Select a ${codingIssue} before saving this concrete ticket.`,"err");return false;}
+    const mismatch=checkMpaMismatch(draft);
+    if(mismatch&&!window.confirm(`MPa mismatch: ticket shows ${mismatch.ticketMpa}, but ${draft.area} — ${draft.item} requires ${mismatch.specMpa}. Save the actual ticket anyway?`)) return false;
+    const latestSaved=await storageGet("concrete-data");
+    const latestTickets=latestSaved?.tickets||tickets;
+    const newNumberKey=ticketNumberKey(draft.ticket_number);
+    const duplicate=newNumberKey&&latestTickets.some(t=>t.id!==original.id&&ticketNumberKey(t.ticket_number)===newNumberKey);
+    if(duplicate){showToast(`Ticket number ${draft.ticket_number} is already in the log.`,"err");return false;}
+    const volumeM3=parseFloat(draft.volume_m3)||0;
+    const updated={...original,...draft,volume_m3:volumeM3||null,volume_yd3:volumeM3?+(volumeM3*M3_TO_YD3).toFixed(3):null,modified_at:new Date().toISOString()};
+    const exists=latestTickets.some(t=>t.id===original.id);
+    if(!exists){showToast("This ticket changed on another device. Refresh and try again.","err");return false;}
+    setTickets(latestTickets.map(t=>t.id===original.id?updated:t));
+    setSelectedTicket(updated);
+    showToast(`Ticket #${updated.ticket_number||"—"} updated ✓`);
+    return true;
+  }
+
   const TAB=(t,label)=>(<button onClick={()=>setTab(t)} style={{padding:"8px 16px",borderRadius:8,cursor:"pointer",fontWeight:700,fontSize:12,border:"none",background:tab===t?C.accent:"transparent",color:tab===t?"#fff":C.muted,transition:"all .15s",whiteSpace:"nowrap"}}>{label}</button>);
   const INPUT=(key,label,type="text",opts=null)=>(<div style={{marginBottom:12}}><label style={{display:"block",color:C.muted,fontSize:10,fontWeight:700,letterSpacing:1,textTransform:"uppercase",marginBottom:4}}>{label}</label>{opts?<select value={manual[key]} onChange={e=>setManual(m=>({...m,[key]:e.target.value}))} style={{width:"100%",background:C.bg,border:`1px solid ${C.border}`,borderRadius:8,padding:"9px 12px",color:C.text,fontSize:14,boxSizing:"border-box"}}><option value="">— select —</option>{opts.map(o=><option key={o} value={o}>{o}</option>)}</select>:<input type={type} value={manual[key]} onChange={e=>setManual(m=>({...m,[key]:e.target.value}))} style={{width:"100%",background:C.bg,border:`1px solid ${C.border}`,borderRadius:8,padding:"9px 12px",color:C.text,fontSize:14,boxSizing:"border-box"}}/>}</div>);
 
-  function TicketModal({ticket,onClose}){
-    const mismatch=checkMpaMismatch(ticket);
-    const specMpa=ticket.area&&ticket.item?MPA_SPEC[`${ticket.area}|||${ticket.item}`]:null;
+  function TicketModal({ticket,onClose,onSave}){
+    const [editing,setEditing]=useState(false);
+    const [draft,setDraft]=useState({...ticket});
+    const shown=editing?draft:ticket;
+    const mismatch=checkMpaMismatch(shown);
+    const specMpa=shown.area&&shown.item?MPA_SPEC[`${shown.area}|||${shown.item}`]:null;
+    const editFieldStyle={width:"100%",background:C.bg,border:`1px solid ${C.border}`,borderRadius:8,padding:"9px 12px",color:C.text,fontSize:14,boxSizing:"border-box"};
+    const editField=(label,field,type="text")=><div style={{marginBottom:11}}><label style={{display:"block",color:C.muted,fontSize:10,fontWeight:700,textTransform:"uppercase",letterSpacing:1,marginBottom:4}}>{label}</label><input type={type} value={draft[field]??""} onChange={e=>setDraft(d=>({...d,[field]:e.target.value}))} style={editFieldStyle}/></div>;
     return(<div style={{position:"fixed",inset:0,background:"#000c",zIndex:200,display:"flex",alignItems:"center",justifyContent:"center"}} onClick={e=>e.target===e.currentTarget&&onClose()}>
       <div style={{background:C.card,border:`1px solid ${mismatch?C.red:C.border}`,borderRadius:16,padding:28,width:"94%",maxWidth:520,maxHeight:"90vh",overflowY:"auto"}}>
         <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:20}}>
-          <div><div style={{fontWeight:800,fontSize:18}}>🧾 Ticket #{ticket.ticket_number||"—"}</div><div style={{color:C.muted,fontSize:13}}>{ticket.supplier} · {ticket.date}</div></div>
+          <div><div style={{fontWeight:800,fontSize:18}}>🧾 Ticket #{shown.ticket_number||"—"}</div><div style={{color:C.muted,fontSize:13}}>{shown.supplier} · {shown.date}</div></div>
           <Badge color={mismatch?C.red:C.green}>{mismatch?"⚠ MPa Mismatch":"✓ OK"}</Badge>
         </div>
         {mismatch&&<div style={{background:"#450a0a",border:`1px solid ${C.red}`,borderRadius:10,padding:"14px 16px",marginBottom:16}}><div style={{color:C.red,fontWeight:800,fontSize:14,marginBottom:6}}>⚠ Mix Design Mismatch — Do Not Pour</div><div style={{color:"#fca5a5",fontSize:13}}>Ticket shows <b>{mismatch.ticketMpa}</b> but this element requires <b>{mismatch.specMpa}</b>.<br/>Verify with supplier before proceeding.</div></div>}
+        {editing?<div style={{marginBottom:16}}>
+          <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:10}}>{editField("Ticket #","ticket_number")}{editField("Date","date","date")}</div>
+          {editField("Supplier","supplier")}
+          <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:10}}>{editField("Volume (m³)","volume_m3","number")}{editField("Ticket Mix / MPa","mix_design")}</div>
+          <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:10}}>
+            <div style={{marginBottom:11}}><label style={{display:"block",color:C.muted,fontSize:10,fontWeight:700,textTransform:"uppercase",letterSpacing:1,marginBottom:4}}>Area</label><select value={draft.area||""} onChange={e=>{const area=e.target.value;const items=validItemsForArea(area);setDraft(d=>({...d,area,item:items.length===1?items[0]:""}));}} style={editFieldStyle}><option value="">— select area —</option>{AREAS.map(a=><option key={a} value={a}>{a}</option>)}</select></div>
+            <div style={{marginBottom:11}}><label style={{display:"block",color:C.muted,fontSize:10,fontWeight:700,textTransform:"uppercase",letterSpacing:1,marginBottom:4}}>Element</label><select value={draft.item||""} onChange={e=>setDraft(d=>({...d,item:e.target.value}))} style={editFieldStyle}><option value="">— select element —</option>{validItemsForArea(draft.area).map(it=><option key={it} value={it}>{it}</option>)}</select></div>
+          </div>
+          {editField("Invoice #","invoice_number")}
+          <div style={{marginBottom:11}}><label style={{display:"block",color:C.muted,fontSize:10,fontWeight:700,textTransform:"uppercase",letterSpacing:1,marginBottom:4}}>Notes</label><textarea value={draft.notes||""} onChange={e=>setDraft(d=>({...d,notes:e.target.value}))} rows={3} style={{...editFieldStyle,resize:"vertical"}}/></div>
+          {specMpa&&<div style={{background:mismatch?"#450a0a":"#052e16",border:`1px solid ${mismatch?C.red:C.green}55`,borderRadius:8,padding:"9px 12px",fontSize:13,color:mismatch?"#fca5a5":"#86efac"}}>Specified mix for {draft.area} — {draft.item}: <b>{specMpa}</b></div>}
+        </div>:<>
         <div style={{display:"flex",gap:10,flexWrap:"wrap",marginBottom:16}}>
           {ticket.volume_m3&&<div style={{background:C.bg,borderRadius:10,padding:"12px 16px",flex:1}}><div style={{color:C.muted,fontSize:11,fontWeight:700,textTransform:"uppercase"}}>Volume</div><div style={{color:C.accent,fontWeight:800,fontSize:20,fontFamily:"monospace"}}>{parseFloat(ticket.volume_m3).toFixed(2)} m³</div></div>}
           {ticket.pump_volume_m3&&<div style={{background:C.bg,borderRadius:10,padding:"12px 16px",flex:1}}><div style={{color:C.muted,fontSize:11,fontWeight:700,textTransform:"uppercase"}}>Pumped</div><div style={{color:C.teal,fontWeight:800,fontSize:20,fontFamily:"monospace"}}>{parseFloat(ticket.pump_volume_m3).toFixed(2)} m³</div></div>}
@@ -1982,7 +2054,8 @@ Return ONLY valid JSON, no markdown:
           {ticket.driver&&<div style={{marginBottom:6}}><span style={{color:C.muted}}>Driver: </span><b>{ticket.driver}</b></div>}
           {ticket.notes&&<div style={{marginTop:8,color:C.muted,fontStyle:"italic"}}>{ticket.notes}</div>}
         </div>
-        <button onClick={onClose} style={{background:C.bg,color:C.muted,border:`1px solid ${C.border}`,borderRadius:9,padding:"10px 20px",fontWeight:700,cursor:"pointer",width:"100%"}}>Close</button>
+        </>}
+        <div style={{display:"flex",gap:10}}>{editing?<><button onClick={async()=>{if(await onSave(ticket,draft)){setEditing(false);onClose();}}} style={{background:C.accent,color:"#fff",border:"none",borderRadius:9,padding:"10px 20px",fontWeight:800,cursor:"pointer",flex:1}}>Save Changes</button><button onClick={()=>{setDraft({...ticket});setEditing(false);}} style={{background:C.bg,color:C.muted,border:`1px solid ${C.border}`,borderRadius:9,padding:"10px 20px",fontWeight:700,cursor:"pointer"}}>Cancel</button></>:<><button onClick={()=>setEditing(true)} style={{background:C.blue,color:"#fff",border:"none",borderRadius:9,padding:"10px 20px",fontWeight:800,cursor:"pointer",flex:1}}>✏️ Edit Ticket</button><button onClick={onClose} style={{background:C.bg,color:C.muted,border:`1px solid ${C.border}`,borderRadius:9,padding:"10px 20px",fontWeight:700,cursor:"pointer"}}>Close</button></>}</div>
       </div>
     </div>);
   }
@@ -2016,7 +2089,7 @@ Return ONLY valid JSON, no markdown:
   return(
     <div style={{minHeight:"100vh",background:C.bg,color:C.text,fontFamily:"'DM Sans','Segoe UI',sans-serif",paddingBottom:60}}>
       {toast&&<div style={{position:"fixed",top:18,right:18,zIndex:999,background:toast.type==="err"?"#450a0a":"#052e16",color:toast.type==="err"?"#fca5a5":"#86efac",border:`1px solid ${toast.type==="err"?C.red:C.green}`,borderRadius:10,padding:"12px 22px",fontWeight:600,fontSize:14,boxShadow:"0 8px 32px #0009"}}>{toast.msg}</div>}
-      {selectedTicket&&<TicketModal ticket={selectedTicket} onClose={()=>setSelectedTicket(null)}/>}
+      {selectedTicket&&<TicketModal ticket={selectedTicket} onClose={()=>setSelectedTicket(null)} onSave={saveTicketEdits}/>} 
       {selectedInvoice&&<InvoiceModal invoice={selectedInvoice} onClose={()=>setSelectedInvoice(null)}/>}
       {feedbackOpen&&<div style={{position:"fixed",inset:0,background:"#000c",zIndex:250,display:"flex",alignItems:"center",justifyContent:"center",padding:16}} onClick={e=>e.target===e.currentTarget&&setFeedbackOpen(false)}>
         <div style={{background:C.card,border:`1px solid ${C.blue}66`,borderRadius:16,padding:26,width:"94%",maxWidth:560,maxHeight:"90vh",overflowY:"auto"}}>
@@ -2097,6 +2170,7 @@ Screenshot attached: Yes / No`}</pre>
             <div style={{display:"flex",gap:14,flexWrap:"wrap",marginBottom:26}}>
               <Stat label="Total Poured"   value={`${fmt(totalPoured)} m³`}  sub={`${fmt(totalYd3)} yd³`}             color={C.accent}/>
               <Stat label="Remaining"      value={`${fmt(remaining)} m³`}    sub={`${fmt(remaining*M3_TO_YD3)} yd³`}  color={remaining>0?C.yellow:C.green}/>
+              <Stat label="Overage"        value={`${fmt(totalOverage)} m³`} sub={overageElements.length?`${overageElements.length} element${overageElements.length>1?"s":""} over scope`:"none recorded"} color={totalOverage>0?C.red:C.green}/>
               <Stat label="Tickets"        value={tickets.length}             sub="dockets scanned"                    color={C.blue}/>
               <Stat label="Pump Used"      value={`${fmt(totalPumpM3)} m³`}  sub={`$${totalPumpCost.toLocaleString(undefined,{minimumFractionDigits:2,maximumFractionDigits:2})} charged`} color={pumpPct>90?C.red:C.teal}/>
               <Stat label="MPa Mismatches" value={mpaMismatches.length}       sub={mpaMismatches.length>0?"⚠ review required":"✓ all clear"} color={mpaMismatches.length>0?C.red:C.green}/>
@@ -2105,7 +2179,7 @@ Screenshot attached: Yes / No`}</pre>
             <div style={{background:C.card,border:`1px solid ${C.border}`,borderRadius:14,padding:"20px 24px",marginBottom:24}}>
               <div style={{display:"flex",justifyContent:"space-between",marginBottom:10}}><span style={{fontWeight:700}}>Overall Progress</span><span style={{color:C.accent,fontWeight:800,fontFamily:"monospace"}}>{fmt(pct,1)}%</span></div>
               <Bar pct={pct} color={pct>=100?C.green:C.accent}/>
-              <div style={{display:"flex",justifyContent:"space-between",marginTop:8,color:C.muted,fontSize:12}}><span>{fmt(totalPoured)} m³ poured</span><span>{fmt(TOTAL_SCOPE_M3,1)} m³ total scope</span></div>
+              <div style={{display:"flex",justifyContent:"space-between",marginTop:8,color:C.muted,fontSize:12}}><span>{fmt(codedPoured)} m³ coded to scope</span><span>{fmt(TOTAL_SCOPE_M3,1)} m³ total scope</span></div>
             </div>
             <div style={{display:"flex",gap:14,marginBottom:16,flexWrap:"wrap"}}>
               <div onDragOver={e=>{e.preventDefault();setDrag(true);}} onDragLeave={()=>setDrag(false)} onDrop={e=>{e.preventDefault();setDrag(false);handleTicketFiles(e.dataTransfer.files);}} onClick={()=>fileRef.current.click()} style={{border:`2px dashed ${drag?C.accent:C.border}`,borderRadius:14,padding:"28px 20px",textAlign:"center",cursor:"pointer",flex:1,minWidth:200,background:drag?C.accent+"11":C.card,transition:"all .2s"}}>
@@ -2140,6 +2214,16 @@ Screenshot attached: Yes / No`}</pre>
                           showToast(`Select a pumping budget category for slip ${uncategorizedPump.ticket_number||"—"} before saving.`,"err");
                           return;
                         }
+                        const codingProblem=reviewQueue.find(t=>ticketCodingIssue(t));
+                        if(codingProblem){
+                          showToast(`Ticket ${codingProblem.ticket_number||"—"} needs a ${ticketCodingIssue(codingProblem)} before it can be saved.`,"err");
+                          return;
+                        }
+                        const unconfirmed=reviewQueue.find(t=>parseFloat(t.volume_m3)>0&&!t._codingConfirmed);
+                        if(unconfirmed){
+                          showToast(`Confirm the area, element and mix coding for ticket ${unconfirmed.ticket_number||"—"} before saving.`,"err");
+                          return;
+                        }
                         // Re-check the shared store at the final commit point in
                         // case somebody saved one of these tickets during review.
                         const latestSaved = await storageGet("concrete-data");
@@ -2153,9 +2237,11 @@ Screenshot attached: Yes / No`}</pre>
                         }
                         const mpaWarnings=[];
                         reviewQueue.forEach(t=>{const mm=checkMpaMismatch(t);if(mm)mpaWarnings.push(t);});
+                        if(mpaWarnings.length&&!window.confirm(`${mpaWarnings.length} ticket${mpaWarnings.length>1?"s have":" has"} an MPa mismatch. Save the actual ticket data anyway?`)) return;
                         // Merge with the freshest shared copy so another user's
                         // recently saved tickets are not overwritten.
-                        setTickets([...latestTickets,...reviewQueue]);
+                        const ticketsToSave=reviewQueue.map(({_codingConfirmed,...t})=>t);
+                        setTickets([...latestTickets,...ticketsToSave]);
                         setReviewQueue([]);
                         if(mpaWarnings.length>0) showToast(`⚠ ${mpaWarnings.length} MPa mismatch${mpaWarnings.length>1?"es":""} detected!`,"err");
                         else showToast(`${reviewQueue.length} ticket${reviewQueue.length>1?"s":""} saved ✓`);
@@ -2192,7 +2278,8 @@ Screenshot attached: Yes / No`}</pre>
                             </label>
                             <select value={t.area||""} onChange={e=>{
                               const val=e.target.value;
-                              setReviewQueue(q=>q.map((x,j)=>j===i?{...x,area:val,item:"",_suggested:false}:x));
+                              const validItems=validItemsForArea(val);
+                              setReviewQueue(q=>q.map((x,j)=>j===i?{...x,area:val,item:validItems.length===1?validItems[0]:"",_suggested:false,_codingConfirmed:false}:x));
                             }} style={{width:"100%",background:C.bg,border:`1px solid ${t.area?C.blue:C.yellow}`,borderRadius:8,padding:"9px 12px",color:C.text,fontSize:14,boxSizing:"border-box"}}>
                               <option value="">— select area —</option>
                               {AREAS.map(a=><option key={a} value={a}>{a}</option>)}
@@ -2211,10 +2298,10 @@ Screenshot attached: Yes / No`}</pre>
                             </label>
                             <select value={t.item||""} onChange={e=>{
                               const val=e.target.value;
-                              setReviewQueue(q=>q.map((x,j)=>j===i?{...x,item:val,_suggested:false}:x));
+                              setReviewQueue(q=>q.map((x,j)=>j===i?{...x,item:val,_suggested:false,_codingConfirmed:false}:x));
                             }} style={{width:"100%",background:C.bg,border:`1px solid ${t.item?C.blue:C.yellow}`,borderRadius:8,padding:"9px 12px",color:C.text,fontSize:14,boxSizing:"border-box"}}>
                               <option value="">— select element —</option>
-                              {ITEMS.map(it=><option key={it} value={it}>{it}</option>)}
+                              {validItemsForArea(t.area).map(it=><option key={it} value={it}>{it}</option>)}
                             </select>
                           </div>
                           <div style={{minWidth:160}}>
@@ -2223,6 +2310,10 @@ Screenshot attached: Yes / No`}</pre>
                               {specMpa||"— select area & element —"}
                             </div>
                           </div>
+                          {parseFloat(t.volume_m3)>0&&<div style={{flex:1,minWidth:180}}>
+                            <label style={{display:"block",color:C.muted,fontSize:10,fontWeight:700,letterSpacing:1,textTransform:"uppercase",marginBottom:4}}>Ticket Mix / MPa *</label>
+                            <input value={t.mix_design||""} onChange={e=>setReviewQueue(q=>q.map((x,j)=>j===i?{...x,mix_design:e.target.value,_codingConfirmed:false}:x))} placeholder="e.g. 35 MPa" style={{width:"100%",background:C.bg,border:`1px solid ${parseMpaNum(t.mix_design)?C.blue:C.yellow}`,borderRadius:8,padding:"9px 12px",color:C.text,fontSize:14,boxSizing:"border-box",minHeight:38}}/>
+                          </div>}
                         </div>
 
                         {mismatch&&(
@@ -2235,6 +2326,10 @@ Screenshot attached: Yes / No`}</pre>
                             ✓ Mix design matches spec
                           </div>
                         )}
+                        {parseFloat(t.volume_m3)>0&&<label style={{display:"flex",alignItems:"center",gap:9,marginTop:12,color:t._codingConfirmed?C.green:C.yellow,fontSize:13,fontWeight:700,cursor:"pointer"}}>
+                          <input type="checkbox" checked={!!t._codingConfirmed} onChange={e=>setReviewQueue(q=>q.map((x,j)=>j===i?{...x,_codingConfirmed:e.target.checked}:x))}/>
+                          I confirmed the area, element and ticket mix are coded correctly
+                        </label>}
                       </div>
                     );
                   })}
@@ -2490,13 +2585,13 @@ Screenshot attached: Yes / No`}</pre>
           const invoicedAmount=invoices.reduce((s,inv)=>s+(parseFloat(inv.total_amount)||0),0);
           const derivedRate=invoicedVolume>0&&invoicedAmount>0?invoicedAmount/invoicedVolume:null;
           const totalEstCost=rate?remaining*rate:null;
-          const areaRows=AREAS.map(area=>{ const at=areaTotals[area]||{scope:0,poured:0}; const hasScope=at.scope>0; const rem=hasScope?Math.max(0,at.scope-at.poured):null; const p=hasScope?(at.poured/at.scope)*100:0; const status=hasScope&&p>=100?"complete":at.poured>0?"inprogress":"notstarted"; const estCost=rate&&rem>0?rem*rate:null; const areaMpas=[...new Set(Object.entries(MPA_SPEC).filter(([key])=>key.startsWith(`${area}|||`)).map(([,mpa])=>mpa))]; return{area,scope:at.scope,poured:at.poured,rem,p,status,estCost,areaMpas,hasScope}; });
-          const STATUS_CONFIG={complete:{label:"✅ Complete",color:C.green},inprogress:{label:"🟡 In Progress",color:C.yellow},notstarted:{label:"🔴 Not Started",color:C.red}};
+          const areaRows=AREAS.map(area=>{ const lines=scopeProgress.filter(r=>r.area===area); const scope=lines.reduce((s,r)=>s+r.m3,0); const poured=lines.reduce((s,r)=>s+r.poured,0); const hasScope=scope>0; const rem=lines.reduce((s,r)=>s+r.remaining,0); const over=lines.reduce((s,r)=>s+r.overage,0); const p=hasScope?(poured/scope)*100:0; const status=over>0.01?"over":hasScope&&rem<=0.01?"complete":poured>0?"inprogress":"notstarted"; const estCost=rate&&rem>0?rem*rate:null; const areaMpas=[...new Set(Object.entries(MPA_SPEC).filter(([key])=>key.startsWith(`${area}|||`)).map(([,mpa])=>mpa))]; return{area,scope,poured,rem,over,p,status,estCost,areaMpas,hasScope}; });
+          const STATUS_CONFIG={over:{label:"⚠️ Over Scope",color:C.red},complete:{label:"✅ Complete",color:C.green},inprogress:{label:"🟡 In Progress",color:C.yellow},notstarted:{label:"🔴 Not Started",color:C.red}};
           return(<div>
             <div style={{fontWeight:700,fontSize:18,marginBottom:6}}>Remaining Works</div>
             <div style={{color:C.muted,fontSize:13,marginBottom:22}}>Live picture of what's done, in progress, and still to pour</div>
             <div style={{display:"flex",gap:12,flexWrap:"wrap",marginBottom:24}}>
-              {[{emoji:"✅",count:areaRows.filter(r=>r.status==="complete").length,label:"Complete",color:C.green},{emoji:"🟡",count:areaRows.filter(r=>r.status==="inprogress").length,label:"In Progress",color:C.yellow},{emoji:"🔴",count:areaRows.filter(r=>r.status==="notstarted").length,label:"Not Started",color:C.red},{emoji:"🏗️",count:fmt(remaining,1),label:"m³ left",color:C.accent}].map(({emoji,count,label,color})=>(<div key={label} style={{background:color+"18",border:`1px solid ${color}44`,borderRadius:12,padding:"14px 20px",flex:1,minWidth:110,textAlign:"center"}}><div style={{fontSize:28}}>{emoji}</div><div style={{fontWeight:800,fontSize:22,color}}>{count}</div><div style={{color:C.muted,fontSize:12,marginTop:2}}>{label}</div></div>))}
+              {[{emoji:"⚠️",count:areaRows.filter(r=>r.status==="over").length,label:"Over Scope",color:C.red},{emoji:"✅",count:areaRows.filter(r=>r.status==="complete").length,label:"Complete",color:C.green},{emoji:"🟡",count:areaRows.filter(r=>r.status==="inprogress").length,label:"In Progress",color:C.yellow},{emoji:"🔴",count:areaRows.filter(r=>r.status==="notstarted").length,label:"Not Started",color:C.red},{emoji:"🏗️",count:fmt(remaining,1),label:"m³ left",color:C.accent}].map(({emoji,count,label,color})=>(<div key={label} style={{background:color+"18",border:`1px solid ${color}44`,borderRadius:12,padding:"14px 20px",flex:1,minWidth:110,textAlign:"center"}}><div style={{fontSize:28}}>{emoji}</div><div style={{fontWeight:800,fontSize:22,color}}>{count}</div><div style={{color:C.muted,fontSize:12,marginTop:2}}>{label}</div></div>))}
             </div>
             <div style={{background:C.card,border:`1px solid ${C.border}`,borderRadius:14,padding:"18px 22px",marginBottom:24}}>
               <div style={{fontWeight:700,marginBottom:12}}>💲 Estimated Remaining Cost</div>
@@ -2511,16 +2606,16 @@ Screenshot attached: Yes / No`}</pre>
                 {totalEstCost!==null&&<div style={{background:C.bg,borderRadius:10,padding:"12px 20px"}}><div style={{color:C.muted,fontSize:11,fontWeight:700,textTransform:"uppercase",letterSpacing:1}}>Est. Remaining Cost</div><div style={{color:C.green,fontWeight:800,fontSize:24,fontFamily:"monospace"}}>${totalEstCost.toLocaleString(undefined,{maximumFractionDigits:0})}</div></div>}
               </div>
             </div>
-            {areaRows.map(row=>{ const sc=STATUS_CONFIG[row.status]; return(<div key={row.area} style={{background:C.card,border:`1px solid ${row.status==="complete"?C.green+"44":row.status==="inprogress"?C.yellow+"44":C.border}`,borderRadius:13,padding:"15px 20px",marginBottom:10}}>
+            {areaRows.map(row=>{ const sc=STATUS_CONFIG[row.status]; return(<div key={row.area} style={{background:C.card,border:`1px solid ${row.status==="over"?C.red+"88":row.status==="complete"?C.green+"44":row.status==="inprogress"?C.yellow+"44":C.border}`,borderRadius:13,padding:"15px 20px",marginBottom:10}}>
               <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:8,flexWrap:"wrap",gap:8}}>
                 <div style={{display:"flex",alignItems:"center",gap:10,flexWrap:"wrap"}}><span style={{fontWeight:800,fontSize:15}}>📍 {row.area}</span><Badge color={sc.color}>{sc.label}</Badge>{row.areaMpas.map(m=><MpaBadge key={m} mpa={m}/>)}</div>
                 <div style={{display:"flex",gap:8,flexWrap:"wrap"}}>{row.hasScope?<Badge color={C.accent}>{fmt(row.p,1)}%</Badge>:<Badge color={C.yellow}>Scope Not Set</Badge>}{row.estCost!==null&&<Badge color={C.green}>${row.estCost.toLocaleString(undefined,{maximumFractionDigits:0})} est.</Badge>}</div>
               </div>
-              <Bar pct={row.p} color={row.status==="complete"?C.green:row.status==="inprogress"?C.yellow:C.border}/>
+              <Bar pct={row.p} color={row.status==="over"?C.red:row.status==="complete"?C.green:row.status==="inprogress"?C.yellow:C.border}/>
               <div style={{display:"flex",gap:20,marginTop:9,fontSize:13,flexWrap:"wrap"}}>
                 <span style={{color:C.muted}}>Poured: <b style={{color:C.text}}>{fmt(row.poured)} m³</b></span>
                 <span style={{color:C.muted}}>Scope: <b style={{color:row.hasScope?C.text:C.yellow}}>{row.hasScope?`${fmt(row.scope)} m³`:"Not set"}</b></span>
-                {!row.hasScope?null:row.rem>0?<span style={{color:C.muted}}>Still to pour: <b style={{color:C.yellow}}>{fmt(row.rem)} m³</b></span>:<span style={{color:C.green,fontWeight:700}}>✓ All poured</span>}
+                {!row.hasScope?null:row.over>0?<span style={{color:C.red,fontWeight:800}}>⚠ {fmt(row.over)} m³ over scope</span>:row.rem>0?<span style={{color:C.muted}}>Still to pour: <b style={{color:C.yellow}}>{fmt(row.rem)} m³</b></span>:<span style={{color:C.green,fontWeight:700}}>✓ All poured</span>}
               </div>
             </div>); })}
           </div>);
@@ -2657,22 +2752,24 @@ Screenshot attached: Yes / No`}</pre>
           <div style={{fontWeight:700,fontSize:18,marginBottom:20}}>Full Project Scope</div>
           <div style={{overflowX:"auto"}}>
             <table style={{width:"100%",borderCollapse:"collapse",fontSize:13}}>
-              <thead><tr style={{color:C.muted,textAlign:"left"}}>{["Area","Element","Spec MPa","Scope (m³)","Poured (m³)","Remaining (m³)","% Done"].map(h=><th key={h} style={{padding:"8px 14px",borderBottom:`1px solid ${C.border}`,fontWeight:700,whiteSpace:"nowrap"}}>{h}</th>)}</tr></thead>
-              <tbody>{SCOPE.map((r,i)=>{ const poured=pouredMap[`${r.area}|||${r.item}`]||0; const rem=Math.max(0,r.m3-poured); const p=r.m3>0?(poured/r.m3)*100:0; return(<tr key={i} style={{borderBottom:`1px solid ${C.border}22`,background:i%2===0?"transparent":C.card+"88"}}>
+              <thead><tr style={{color:C.muted,textAlign:"left"}}>{["Area","Element","Spec MPa","Scope (m³)","Poured (m³)","Remaining (m³)","Overage (m³)","% Done"].map(h=><th key={h} style={{padding:"8px 14px",borderBottom:`1px solid ${C.border}`,fontWeight:700,whiteSpace:"nowrap"}}>{h}</th>)}</tr></thead>
+              <tbody>{SCOPE.map((r,i)=>{ const poured=pouredMap[`${r.area}|||${r.item}`]||0; const rem=Math.max(0,r.m3-poured); const over=Math.max(0,poured-r.m3); const p=r.m3>0?(poured/r.m3)*100:0; return(<tr key={i} style={{borderBottom:`1px solid ${C.border}22`,background:over>0.01?C.red+"12":i%2===0?"transparent":C.card+"88"}}>
                 <td style={{padding:"9px 14px",color:C.sub}}>{r.area}</td>
                 <td style={{padding:"9px 14px"}}>{r.item}</td>
                 <td style={{padding:"9px 14px"}}>{r.mpa?<MpaBadge mpa={r.mpa}/>:"—"}</td>
                 <td style={{padding:"9px 14px",fontFamily:"monospace"}}>{r.m3.toFixed(1)}</td>
                 <td style={{padding:"9px 14px",fontFamily:"monospace",color:poured>0?C.green:C.muted}}>{poured>0?poured.toFixed(2):"—"}</td>
                 <td style={{padding:"9px 14px",fontFamily:"monospace",color:rem>0?C.yellow:C.green}}>{rem>0?rem.toFixed(2):"✓"}</td>
-                <td style={{padding:"9px 14px"}}>{poured>0?<Badge color={p>=100?C.green:C.accent}>{fmt(p,0)}%</Badge>:<span style={{color:C.muted}}>—</span>}</td>
+                <td style={{padding:"9px 14px",fontFamily:"monospace",color:over>0?C.red:C.muted}}>{over>0?over.toFixed(2):"—"}</td>
+                <td style={{padding:"9px 14px"}}>{poured>0?<Badge color={over>0?C.red:p>=100?C.green:C.accent}>{fmt(p,0)}%</Badge>:<span style={{color:C.muted}}>—</span>}</td>
               </tr>); })}</tbody>
               <tfoot><tr style={{borderTop:`2px solid ${C.border}`,fontWeight:800}}>
                 <td colSpan={3} style={{padding:"11px 14px"}}>TOTAL</td>
                 <td style={{padding:"11px 14px",fontFamily:"monospace"}}>{fmt(TOTAL_SCOPE_M3,1)}</td>
                 <td style={{padding:"11px 14px",fontFamily:"monospace",color:C.green}}>{totalPoured>0?fmt(totalPoured):"—"}</td>
                 <td style={{padding:"11px 14px",fontFamily:"monospace",color:C.yellow}}>{fmt(remaining)}</td>
-                <td style={{padding:"11px 14px"}}><Badge color={pct>=100?C.green:C.accent}>{fmt(pct,1)}%</Badge></td>
+                <td style={{padding:"11px 14px",fontFamily:"monospace",color:totalOverage>0?C.red:C.muted}}>{totalOverage>0?fmt(totalOverage):"—"}</td>
+                <td style={{padding:"11px 14px"}}><Badge color={totalOverage>0?C.red:pct>=100?C.green:C.accent}>{fmt(pct,1)}%</Badge></td>
               </tr></tfoot>
             </table>
           </div>
