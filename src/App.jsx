@@ -8,7 +8,7 @@ const C = {
   yellow: "#EAB308", red: "#EF4444", purple: "#A855F7",
   muted: "#6B7280", text: "#F9FAFB", sub: "#9CA3AF", teal: "#14B8A6",
 };
-const APP_VERSION = "17.3";
+const APP_VERSION = "17.4";
 
 // ─── SUPABASE STORAGE HELPERS ────────────────────────────────────────────────
 // Calls server-side API routes which talk to Supabase.
@@ -386,7 +386,7 @@ function LandingScreen({ onSelect }) {
       <div style={{ background:C.card, borderBottom:`1px solid ${C.border}`, padding:"20px 32px", display:"flex", alignItems:"center", gap:14 }}>
         <div style={{ width:44, height:44, borderRadius:12, background:`linear-gradient(135deg,${C.accent},${C.teal})`, display:"flex", alignItems:"center", justifyContent:"center", fontSize:22 }}>⚡</div>
         <div>
-          <div style={{ fontWeight:800, fontSize:19 }}>Site Document Intelligence</div>
+          <div style={{ fontWeight:800, fontSize:19 }}>Southwest Project Tools</div>
           <div style={{ color:C.muted, fontSize:13 }}>Fortuna Project</div>
         </div>
       </div>
@@ -1840,7 +1840,7 @@ Return ONLY valid JSON, no markdown:
           const printedItem = ITEMS.find(item=>item.toLowerCase()===String(extracted.item||"").trim().toLowerCase()) || "";
           extracted.area = printedArea || suggestion.area || "";
           extracted.item = printedItem || suggestion.item || "";
-          pending.push({id:Date.now()+Math.random(),filename:file.name,fileType:file.type,file_url:fileUrl,added_at:new Date().toISOString(),...extracted,_suggested:!printedArea&&!!(suggestion.area),_codingConfirmed:false});
+          pending.push({id:Date.now()+Math.random(),filename:file.name,fileType:file.type,file_url:fileUrl,added_at:new Date().toISOString(),...extracted,_suggested:!printedArea&&!!(suggestion.area)});
         }
       }catch(e){ showToast(`Could not read "${file.name}": ${e.message}`,"err"); }
     }
@@ -2219,11 +2219,6 @@ Screenshot attached: Yes / No`}</pre>
                           showToast(`Ticket ${codingProblem.ticket_number||"—"} needs a ${ticketCodingIssue(codingProblem)} before it can be saved.`,"err");
                           return;
                         }
-                        const unconfirmed=reviewQueue.find(t=>parseFloat(t.volume_m3)>0&&!t._codingConfirmed);
-                        if(unconfirmed){
-                          showToast(`Confirm the area, element and mix coding for ticket ${unconfirmed.ticket_number||"—"} before saving.`,"err");
-                          return;
-                        }
                         // Re-check the shared store at the final commit point in
                         // case somebody saved one of these tickets during review.
                         const latestSaved = await storageGet("concrete-data");
@@ -2240,7 +2235,7 @@ Screenshot attached: Yes / No`}</pre>
                         if(mpaWarnings.length&&!window.confirm(`${mpaWarnings.length} ticket${mpaWarnings.length>1?"s have":" has"} an MPa mismatch. Save the actual ticket data anyway?`)) return;
                         // Merge with the freshest shared copy so another user's
                         // recently saved tickets are not overwritten.
-                        const ticketsToSave=reviewQueue.map(({_codingConfirmed,...t})=>t);
+                        const ticketsToSave=reviewQueue;
                         setTickets([...latestTickets,...ticketsToSave]);
                         setReviewQueue([]);
                         if(mpaWarnings.length>0) showToast(`⚠ ${mpaWarnings.length} MPa mismatch${mpaWarnings.length>1?"es":""} detected!`,"err");
@@ -2278,7 +2273,7 @@ Screenshot attached: Yes / No`}</pre>
                             </label>
                             <select value={t.area||""} onChange={e=>{
                               const val=e.target.value;
-                              setReviewQueue(q=>q.map((x,j)=>j===i?{...x,area:val,item:"",_suggested:false,_codingConfirmed:false}:x));
+                              setReviewQueue(q=>q.map((x,j)=>j===i?{...x,area:val,item:"",_suggested:false}:x));
                             }} style={{width:"100%",background:C.bg,border:`1px solid ${t.area?C.blue:C.yellow}`,borderRadius:8,padding:"9px 12px",color:C.text,fontSize:14,boxSizing:"border-box"}}>
                               <option value="">— select area —</option>
                               {AREAS.map(a=><option key={a} value={a}>{a}</option>)}
@@ -2297,7 +2292,7 @@ Screenshot attached: Yes / No`}</pre>
                             </label>
                             <select value={t.item||""} onChange={e=>{
                               const val=e.target.value;
-                              setReviewQueue(q=>q.map((x,j)=>j===i?{...x,item:val,_suggested:false,_codingConfirmed:false}:x));
+                              setReviewQueue(q=>q.map((x,j)=>j===i?{...x,item:val,_suggested:false}:x));
                             }} style={{width:"100%",background:C.bg,border:`1px solid ${t.item?C.blue:C.yellow}`,borderRadius:8,padding:"9px 12px",color:C.text,fontSize:14,boxSizing:"border-box"}}>
                               <option value="">— select element —</option>
                               {ITEMS.map(it=><option key={it} value={it}>{it}</option>)}
@@ -2311,7 +2306,7 @@ Screenshot attached: Yes / No`}</pre>
                           </div>
                           {parseFloat(t.volume_m3)>0&&<div style={{flex:1,minWidth:180}}>
                             <label style={{display:"block",color:C.muted,fontSize:10,fontWeight:700,letterSpacing:1,textTransform:"uppercase",marginBottom:4}}>Ticket Mix / MPa *</label>
-                            <input value={t.mix_design||""} onChange={e=>setReviewQueue(q=>q.map((x,j)=>j===i?{...x,mix_design:e.target.value,_codingConfirmed:false}:x))} placeholder="e.g. 35 MPa" style={{width:"100%",background:C.bg,border:`1px solid ${parseMpaNum(t.mix_design)?C.blue:C.yellow}`,borderRadius:8,padding:"9px 12px",color:C.text,fontSize:14,boxSizing:"border-box",minHeight:38}}/>
+                            <input value={t.mix_design||""} onChange={e=>setReviewQueue(q=>q.map((x,j)=>j===i?{...x,mix_design:e.target.value}:x))} placeholder="e.g. 35 MPa" style={{width:"100%",background:C.bg,border:`1px solid ${parseMpaNum(t.mix_design)?C.blue:C.yellow}`,borderRadius:8,padding:"9px 12px",color:C.text,fontSize:14,boxSizing:"border-box",minHeight:38}}/>
                           </div>}
                         </div>
 
@@ -2325,10 +2320,6 @@ Screenshot attached: Yes / No`}</pre>
                             ✓ Mix design matches spec
                           </div>
                         )}
-                        {parseFloat(t.volume_m3)>0&&<label style={{display:"flex",alignItems:"center",gap:9,marginTop:12,color:t._codingConfirmed?C.green:C.yellow,fontSize:13,fontWeight:700,cursor:"pointer"}}>
-                          <input type="checkbox" checked={!!t._codingConfirmed} onChange={e=>setReviewQueue(q=>q.map((x,j)=>j===i?{...x,_codingConfirmed:e.target.checked}:x))}/>
-                          I confirmed the area, element and ticket mix are coded correctly
-                        </label>}
                       </div>
                     );
                   })}
