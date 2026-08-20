@@ -1142,7 +1142,14 @@ Return ONLY valid JSON (no markdown):
   const critical = tradeDocs.filter(c => { const d = daysUntilExpiry(c.expiry_date); return d!==null && d>=0 && d<=30; });
   const warning  = tradeDocs.filter(c => { const d = daysUntilExpiry(c.expiry_date); return d!==null && d>30 && d<=60; });
   // Group OCR/manual name variants while retaining a clean display name.
-  const companyKey = name => normEntity((name||"").replace(/\(\s*20\d{2}\s*\)/g, ""));
+  const companyKey = name => {
+    const cleaned = (name||"").replace(/\(\s*20\d{2}\s*\)/g, "").trim();
+    // Quebec numbered companies may be followed by different operating/trade
+    // names. The corporation number is the stable legal-company identifier.
+    const quebecNumber = cleaned.match(/\b(\d{4})\s*[-–—]\s*(\d{4})\s+qu[eé]bec\s+inc\b/i);
+    if (quebecNumber) return `quebec${quebecNumber[1]}${quebecNumber[2]}`;
+    return normEntity(cleaned);
+  };
   const companyGroups = Object.values(tradeDocs.reduce((groups, doc) => {
     if (!doc.company_name) return groups;
     const key = companyKey(doc.company_name);
@@ -1375,7 +1382,7 @@ Return ONLY valid JSON (no markdown):
                 const presentTypes = new Set(cDocs.map(c=>c.doc_type));
                 const missingTypes = TRADE_DOC_TYPES.filter(t=>!presentTypes.has(t));
                 const hasIssues = cExpired.length>0||cIssues.length>0||missingTypes.length>0;
-                return {group,name,cDocs,cExpired,cIssues,missingTypes,hasIssues};
+                return {group,name,cDocs,cExpired,cIssues,presentTypes,missingTypes,hasIssues};
               }).filter(x=>{
                 const search=x.name.toLowerCase().includes(companySearch.trim().toLowerCase());
                 const filter=companyFilter==='all'||(companyFilter==='action'&&x.hasIssues)||(companyFilter==='expired'&&x.cExpired.length)||(companyFilter==='missing'&&x.missingTypes.length)||(companyFilter==='complete'&&!x.hasIssues);
@@ -1383,13 +1390,13 @@ Return ONLY valid JSON (no markdown):
               }).sort((a,b)=>{
                 const urgency=x=>x.cIssues.length?0:x.cExpired.length?1:x.missingTypes.length?2:3;
                 return urgency(a)-urgency(b)||a.name.localeCompare(b.name);
-              }).map(({group,name,cDocs,cExpired,cIssues,missingTypes,hasIssues}) => {
+              }).map(({group,name,cDocs,cExpired,cIssues,presentTypes,missingTypes,hasIssues}) => {
                 const isOpen=expandedCompany===group.key;
                 return (
                   <div key={group.key} style={{ background:C.card, border:`1px solid ${cIssues.length||cExpired.length?C.red+"66":missingTypes.length?C.yellow+"44":C.border}`, borderRadius:11, marginBottom:8, overflow:"hidden" }}>
                     <div onClick={()=>setExpandedCompany(isOpen?null:group.key)} style={{ display:"grid", gridTemplateColumns:"minmax(220px,2fr) repeat(4,minmax(80px,.6fr)) 24px", gap:10, alignItems:"center", padding:"13px 16px", cursor:"pointer" }}>
                       <div style={{fontWeight:800,fontSize:14}}>🏢 {name}</div>
-                      <div style={{color:C.sub,fontSize:12}}><b style={{color:C.text}}>{cDocs.length}/{TRADE_DOC_TYPES.length}</b> documents</div>
+                      <div style={{color:C.sub,fontSize:12}}><b style={{color:C.text}}>{presentTypes.size}/{TRADE_DOC_TYPES.length}</b> document types</div>
                       <div>{missingTypes.length?<Badge color={C.yellow}>{missingTypes.length} missing</Badge>:<Badge color={C.green}>None missing</Badge>}</div>
                       <div>{cExpired.length?<Badge color={C.red}>{cExpired.length} expired</Badge>:<span style={{color:C.muted,fontSize:11}}>No expired</span>}</div>
                       <div>{cIssues.length?<Badge color={C.red}>{cIssues.length} issue{cIssues.length!==1?'s':''}</Badge>:!hasIssues?<Badge color={C.green}>Complete</Badge>:<span style={{color:C.muted,fontSize:11}}>Action required</span>}</div>
