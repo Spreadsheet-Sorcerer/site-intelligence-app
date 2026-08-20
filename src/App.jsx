@@ -1032,7 +1032,7 @@ Known document types: ${TRADE_DOC_TYPES.join(", ")}
 
 Return ONLY valid JSON (no markdown):
 {
-  "company_name": "the trade/subcontractor company this document belongs to",
+  "company_name": "the PRIMARY trade/subcontractor legal company this document belongs to. If an affiliate, parent, operating name, DBA, group name, broker, or additional company is also shown, do NOT combine the names with '&' or 'and'; return only the primary subcontractor company",
   "doc_type": "best matching document type from the known list, or as written if not listed",
   "issued_date": "YYYY-MM-DD or as written, else null",
   "expiry_date": "YYYY-MM-DD or as written, else null — look for expiry/renewal/valid until dates",
@@ -1152,7 +1152,12 @@ Return ONLY valid JSON (no markdown):
   const warning  = tradeDocs.filter(c => { const d = daysUntilExpiry(c.expiry_date); return d!==null && d>30 && d<=60; });
   // Group OCR/manual name variants while retaining a clean display name.
   const companyKey = name => {
-    let cleaned = (name||"").replace(/\(\s*20\d{2}\s*\)/g, "").replace(/&/g, " and ").trim();
+    let cleaned = (name||"").replace(/\(\s*20\d{2}\s*\)/g, "").trim();
+    // When OCR combines a legal entity with an affiliate/operating/group name,
+    // use the first complete legal entity as the stable company identity.
+    const primaryEntity = cleaned.match(/^(.+?\b(?:limited|ltd|ltee|ltée|incorporated|inc|corporation|corp|company|co|ulc|llc|llp|lp)\.?)(?:\s*(?:&|and|o\/?a|operating\s+as|d\/?b\/?a|dba)\s+.+)$/i);
+    if (primaryEntity) cleaned = primaryEntity[1].trim();
+    cleaned = cleaned.replace(/&/g, " and ");
     // Quebec numbered companies may be followed by different operating/trade
     // names. The corporation number is the stable legal-company identifier.
     const quebecNumber = cleaned.match(/\b(\d{4})\s*[-–—]\s*(\d{4})\s+qu[eé]bec\s+inc\b/i);
