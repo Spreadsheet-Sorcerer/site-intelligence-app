@@ -996,6 +996,18 @@ function TradeDocsModule({ onBack }) {
     setTimeout(() => setToast(null), 3500);
   }
 
+  function viewTradeDocument(doc) {
+    const src = doc.file_url || doc.originalFile;
+    if (!src) { showToast("No uploaded file is attached to this document.", "err"); return; }
+    const isImg = /^data:image|\.(jpg|jpeg|png|gif|webp|heic)(\?|$)/i.test(src);
+    const w = window.open("", "_blank");
+    if (!w) { showToast("Please allow pop-ups to view the document.", "err"); return; }
+    w.document.write(isImg
+      ? `<html><head><title>${doc.doc_type||"Trade Document"}</title></head><body style="margin:0;background:#000;display:flex;align-items:center;justify-content:center;min-height:100vh"><img src="${src}" style="max-width:100%;max-height:100vh;object-fit:contain"></body></html>`
+      : `<html><head><title>${doc.doc_type||"Trade Document"}</title></head><body style="margin:0"><iframe src="${src}" width="100%" height="100%" style="border:none;position:fixed;inset:0"></iframe></body></html>`);
+    w.document.close();
+  }
+
   async function toB64(file) {
     return new Promise((res,rej) => {
       const r = new FileReader(); r.onload = () => res(r.result.split(",")[1]); r.onerror = rej; r.readAsDataURL(file);
@@ -1387,7 +1399,7 @@ Return ONLY valid JSON (no markdown):
                       {TRADE_DOC_TYPES.map(type=>{
                         const docs=cDocs.filter(c=>c.doc_type===type);
                         if(!docs.length)return <div key={type} style={{display:"flex",justifyContent:"space-between",alignItems:"center",gap:12,padding:"9px 8px",borderBottom:`1px solid ${C.border}55`}}><span style={{fontSize:12,color:C.sub}}>{type}</span><button onClick={()=>{setManual(m=>({...m,company_name:name,doc_type:type}));setManualOpen(true);}} style={{background:C.yellow+"18",color:C.yellow,border:`1px solid ${C.yellow}44`,borderRadius:6,padding:"4px 9px",fontSize:11,fontWeight:700,cursor:"pointer"}}>Missing · Add</button></div>;
-                        return docs.map(c=>{const s=expiryStatus(c.expiry_date),flags=cglComplianceFlags(c);return <div key={c.id} style={{display:"flex",justifyContent:"space-between",alignItems:"center",gap:12,padding:"9px 8px",borderBottom:`1px solid ${C.border}55`,flexWrap:"wrap"}}><div><div style={{fontSize:12,fontWeight:700}}>{type}</div><div style={{fontSize:10,color:C.muted}}>{c.expiry_date?`Expires ${c.expiry_date}`:'No expiry date recorded'}</div></div><div style={{display:"flex",gap:6,alignItems:"center"}}>{flags.length>0&&<Badge color={C.red}>Compliance issue</Badge>}<Badge color={s.color}>{s.label}</Badge><button onClick={()=>setSelectedCompany(name)} style={{background:"transparent",border:`1px solid ${C.blue}44`,color:C.blue,borderRadius:6,padding:"3px 9px",fontSize:11,fontWeight:700,cursor:"pointer"}}>Details</button></div></div>})
+                        return docs.map(c=>{const s=expiryStatus(c.expiry_date),flags=cglComplianceFlags(c),hasFile=!!(c.file_url||c.originalFile);return <div key={c.id} onClick={()=>viewTradeDocument(c)} role="button" tabIndex={0} onKeyDown={e=>{if(e.key==='Enter'||e.key===' ')viewTradeDocument(c)}} title={hasFile?'Click to view document':'No uploaded file attached'} style={{display:"flex",justifyContent:"space-between",alignItems:"center",gap:12,padding:"11px 8px",borderBottom:`1px solid ${C.border}55`,flexWrap:"wrap",cursor:hasFile?'pointer':'default',borderRadius:6}}><div><div style={{fontSize:12,fontWeight:700,color:hasFile?C.text:C.sub}}>📄 {type}</div><div style={{fontSize:10,color:C.muted}}>{c.expiry_date?`Expires ${c.expiry_date}`:'No expiry date recorded'} · {hasFile?'Click to view':'No file attached'}</div></div><div style={{display:"flex",gap:6,alignItems:"center"}}>{flags.length>0&&<Badge color={C.red}>Compliance issue</Badge>}<Badge color={s.color}>{s.label}</Badge>{hasFile&&<span style={{color:C.blue,fontSize:11,fontWeight:800,padding:"3px 8px",border:`1px solid ${C.blue}44`,borderRadius:6}}>View document ↗</span>}</div></div>})
                       })}
                       <div style={{display:"flex",justifyContent:"flex-end",marginTop:10}}><button onClick={()=>{setManual(m=>({...m,company_name:name,doc_type:""}));setManualOpen(true);}} style={{background:C.purple,color:"#fff",border:"none",borderRadius:7,padding:"7px 12px",fontSize:11,fontWeight:800,cursor:"pointer"}}>＋ Add Document</button></div>
                     </div>}
