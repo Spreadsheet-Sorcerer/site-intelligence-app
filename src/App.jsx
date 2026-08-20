@@ -8,7 +8,7 @@ const C = {
   yellow: "#EAB308", red: "#EF4444", purple: "#A855F7",
   muted: "#6B7280", text: "#F9FAFB", sub: "#9CA3AF", teal: "#14B8A6",
 };
-const APP_VERSION = "18.12";
+const APP_VERSION = "18.13";
 
 // ─── SUPABASE STORAGE HELPERS ────────────────────────────────────────────────
 // Calls server-side API routes which talk to Supabase.
@@ -1908,16 +1908,18 @@ Return ONLY valid JSON, no markdown:
   const pouredMap={};
   tickets.forEach(t=>{ const key=`${t.area||"Unknown"}|||${t.item||""}`; pouredMap[key]=(pouredMap[key]||0)+(parseFloat(t.volume_m3)||0); });
   const scopeProgress=SCOPE.map(r=>{ const poured=pouredMap[`${r.area}|||${r.item}`]||0; return{...r,poured,remaining:Math.max(0,r.m3-poured),overage:Math.max(0,poured-r.m3)}; });
-  // Remaining work and overages are kept separate. An overage in one element
-  // must never cancel unfinished work in another element.
-  const remaining=scopeProgress.reduce((s,r)=>s+r.remaining,0);
-  const totalOverage=scopeProgress.reduce((s,r)=>s+r.overage,0);
-  const overageElements=scopeProgress.filter(r=>r.overage>0.01);
-  const codedPoured=scopeProgress.reduce((s,r)=>s+r.poured,0);
-  const pct=(codedPoured/TOTAL_SCOPE_M3)*100;
+  // Scope is controlled at the area level. Estimate subcategories are useful
+  // for coding, but an overrun in one element can be covered by unused scope
+  // in another element within the same area.
   const areaTotals={};
   SCOPE.forEach(r=>{ if(!areaTotals[r.area]) areaTotals[r.area]={scope:0,poured:0}; areaTotals[r.area].scope+=r.m3; });
   Object.entries(pouredMap).forEach(([key,val])=>{ const area=key.split("|||")[0]; if(!areaTotals[area]) areaTotals[area]={scope:0,poured:0}; areaTotals[area].poured+=val; });
+  const areaProgress=Object.entries(areaTotals).filter(([area])=>area!=="Unknown").map(([area,v])=>({area,...v,remaining:Math.max(0,v.scope-v.poured),overage:Math.max(0,v.poured-v.scope)}));
+  const remaining=areaProgress.reduce((s,r)=>s+r.remaining,0);
+  const totalOverage=areaProgress.reduce((s,r)=>s+r.overage,0);
+  const overageAreas=areaProgress.filter(r=>r.overage>0.01);
+  const codedPoured=scopeProgress.reduce((s,r)=>s+r.poured,0);
+  const pct=(codedPoured/TOTAL_SCOPE_M3)*100;
   const invoicesWithIssues=invoices.filter(inv=>{ const m=matchInvoiceToTickets(inv,tickets); return m.unmatched.length>0||m.volumeMatch===false; }).length;
   const totalInvoiced=invoices.reduce((s,inv)=>s+(parseFloat(inv.total_amount)||0),0);
   const searchableDate=value=>{
@@ -2182,7 +2184,7 @@ Screenshot attached: Yes / No`}</pre>
             <div style={{display:"flex",gap:14,flexWrap:"wrap",marginBottom:26}}>
               <Stat label="Total Poured"   value={`${fmt(totalPoured)} m³`}  sub={`${fmt(totalYd3)} yd³`}             color={C.accent}/>
               <Stat label="Remaining"      value={`${fmt(remaining)} m³`}    sub={`${fmt(remaining*M3_TO_YD3)} yd³`}  color={remaining>0?C.yellow:C.green}/>
-              <Stat label="Overage"        value={`${fmt(totalOverage)} m³`} sub={overageElements.length?`${overageElements.length} element${overageElements.length>1?"s":""} over scope`:"none recorded"} color={totalOverage>0?C.red:C.green}/>
+              <Stat label="Overage"        value={`${fmt(totalOverage)} m³`} sub={overageAreas.length?`${overageAreas.length} area${overageAreas.length>1?"s":""} over scope`:"none recorded"} color={totalOverage>0?C.red:C.green}/>
               <Stat label="Tickets"        value={tickets.length}             sub="dockets scanned"                    color={C.blue}/>
               <Stat label="Pump Used"      value={`${fmt(totalPumpM3)} m³`}  sub={`$${totalPumpCost.toLocaleString(undefined,{minimumFractionDigits:2,maximumFractionDigits:2})} charged`} color={pumpPct>90?C.red:C.teal}/>
               <Stat label="MPa Mismatches" value={mpaMismatches.length}       sub={mpaMismatches.length>0?"⚠ review required":"✓ all clear"} color={mpaMismatches.length>0?C.red:C.green}/>
@@ -2587,7 +2589,7 @@ Screenshot attached: Yes / No`}</pre>
           const invoicedAmount=invoices.reduce((s,inv)=>s+(parseFloat(inv.total_amount)||0),0);
           const derivedRate=invoicedVolume>0&&invoicedAmount>0?invoicedAmount/invoicedVolume:null;
           const totalEstCost=rate?remaining*rate:null;
-          const areaRows=AREAS.map(area=>{ const lines=scopeProgress.filter(r=>r.area===area); const scope=lines.reduce((s,r)=>s+r.m3,0); const poured=lines.reduce((s,r)=>s+r.poured,0); const hasScope=scope>0; const rem=lines.reduce((s,r)=>s+r.remaining,0); const over=lines.reduce((s,r)=>s+r.overage,0); const p=hasScope?(poured/scope)*100:0; const status=over>0.01?"over":hasScope&&rem<=0.01?"complete":poured>0?"inprogress":"notstarted"; const estCost=rate&&rem>0?rem*rate:null; const areaMpas=[...new Set(Object.entries(MPA_SPEC).filter(([key])=>key.startsWith(`${area}|||`)).map(([,mpa])=>mpa))]; return{area,scope,poured,rem,over,p,status,estCost,areaMpas,hasScope}; });
+          const areaRows=AREAS.map(area=>{ const lines=scopeProgress.filter(r=>r.area===area); const scope=lines.reduce((s,r)=>s+r.m3,0); const poured=lines.reduce((s,r)=>s+r.poured,0); const hasScope=scope>0; const rem=Math.max(0,scope-poured); const over=Math.max(0,poured-scope); const p=hasScope?(poured/scope)*100:0; const status=over>0.01?"over":hasScope&&rem<=0.01?"complete":poured>0?"inprogress":"notstarted"; const estCost=rate&&rem>0?rem*rate:null; const areaMpas=[...new Set(Object.entries(MPA_SPEC).filter(([key])=>key.startsWith(`${area}|||`)).map(([,mpa])=>mpa))]; return{area,scope,poured,rem,over,p,status,estCost,areaMpas,hasScope}; });
           const STATUS_CONFIG={over:{label:"⚠️ Over Scope",color:C.red},complete:{label:"✅ Complete",color:C.green},inprogress:{label:"🟡 In Progress",color:C.yellow},notstarted:{label:"🔴 Not Started",color:C.red}};
           return(<div>
             <div style={{fontWeight:700,fontSize:18,marginBottom:6}}>Remaining Works</div>
