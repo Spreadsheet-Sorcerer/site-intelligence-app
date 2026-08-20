@@ -1065,15 +1065,20 @@ Return ONLY valid JSON (no markdown):
       setLoadMsg(`Reading: "${file.name}"…`);
       try {
         const [extracted, dataURL] = await Promise.all([extractTradeDoc(file), toDataURL(file)]);
-        setCerts(prev => [...prev, {
-          id: Date.now() + Math.random(),
-          filename: file.name,
-          originalFile: dataURL,
-          fileType: file.type,
-          added_at: new Date().toISOString(),
-          category: "trade",
-          ...extracted
-        }]);
+        setCerts(prev => {
+          const existing = prev.find(c => c.category==="trade" && companyKey(c.company_name)===companyKey(extracted.company_name));
+          const company_name = existing?.company_name || extracted.company_name;
+          return [...prev, {
+            id: Date.now() + Math.random(),
+            filename: file.name,
+            originalFile: dataURL,
+            fileType: file.type,
+            added_at: new Date().toISOString(),
+            category: "trade",
+            ...extracted,
+            company_name
+          }];
+        });
         added++;
       } catch(e) {
         showToast(`Could not read "${file.name}": ${e.message}`, "err");
@@ -1086,7 +1091,11 @@ Return ONLY valid JSON (no markdown):
   function addManual() {
     if (!manual.company_name || !manual.doc_type) { showToast("Company name and document type are required.", "err"); return; }
     const additional_insured = manual.additional_insured ? manual.additional_insured.split(",").map(s=>s.trim()).filter(Boolean) : [];
-    setCerts(prev => [...prev, { id:Date.now(), filename:"Manual entry", added_at:new Date().toISOString(), category:"trade", ...manual, additional_insured }]);
+    setCerts(prev => {
+      const existing = prev.find(c => c.category==="trade" && companyKey(c.company_name)===companyKey(manual.company_name));
+      const company_name = existing?.company_name || manual.company_name;
+      return [...prev, { id:Date.now(), filename:"Manual entry", added_at:new Date().toISOString(), category:"trade", ...manual, company_name, additional_insured }];
+    });
     setManual({ company_name:"", doc_type:"", issued_date:"", expiry_date:"", doc_number:"", issuing_body:"", per_occurrence_limit:"", certificate_holder:"", additional_insured:"", notes:"" });
     setManualOpen(false);
     showToast("Document added ✓");
@@ -1143,11 +1152,18 @@ Return ONLY valid JSON (no markdown):
   const warning  = tradeDocs.filter(c => { const d = daysUntilExpiry(c.expiry_date); return d!==null && d>30 && d<=60; });
   // Group OCR/manual name variants while retaining a clean display name.
   const companyKey = name => {
-    const cleaned = (name||"").replace(/\(\s*20\d{2}\s*\)/g, "").trim();
+    let cleaned = (name||"").replace(/\(\s*20\d{2}\s*\)/g, "").replace(/&/g, " and ").trim();
     // Quebec numbered companies may be followed by different operating/trade
     // names. The corporation number is the stable legal-company identifier.
     const quebecNumber = cleaned.match(/\b(\d{4})\s*[-–—]\s*(\d{4})\s+qu[eé]bec\s+inc\b/i);
     if (quebecNumber) return `quebec${quebecNumber[1]}${quebecNumber[2]}`;
+    // Remove equivalent legal suffixes. Repeat so names ending in combinations
+    // such as "Company Limited" and "Co. Ltd." resolve to the same base name.
+    let previous;
+    do {
+      previous = cleaned;
+      cleaned = cleaned.replace(/[\s,.-]+(?:limited|ltd|ltee|ltée|incorporated|inc|corporation|corp|company|co|ulc|llc|llp|lp)\.?$/i, "").trim();
+    } while (cleaned !== previous);
     return normEntity(cleaned);
   };
   const companyGroups = Object.values(tradeDocs.reduce((groups, doc) => {
