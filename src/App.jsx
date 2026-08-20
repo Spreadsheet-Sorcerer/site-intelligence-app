@@ -71,7 +71,6 @@ const CERT_TYPES = [
 // ─── TRADE / SAFETY PROGRAM DOCUMENT TYPES ────────────────────────────────────
 const TRADE_DOC_TYPES = [
   "WCB Clearance Letter",
-  "Safety Data Sheet (SDS)",
   "COR Certification (or Letter Confirming Process Started)",
   "CGL Insurance Certificate",
 ];
@@ -383,9 +382,9 @@ function LandingScreen({ onSelect }) {
     },
     {
       id:"tradedocs", emoji:"🦺", title:"Trade Documents",
-      desc:"Track each trade's compliance documents — WCB letters, SDS sheets, COR status, and CGL insurance — with automatic compliance checks.",
+      desc:"Track each trade's legal-risk documents — WCB clearance, COR status, and CGL insurance — with automatic compliance checks.",
       color: C.purple,
-      stats: ["WCB · SDS · COR · CGL","$5M CGL auto-check","Company roster","Expiry tracking"],
+      stats: ["WCB · COR · CGL","$5M CGL auto-check","Company roster","Expiry tracking"],
     },
     {
       id:"tm", emoji:"⏱️", title:"Time & Materials",
@@ -987,7 +986,10 @@ function TradeDocsModule({ onBack }) {
   // This module only manages trade/company documents (category:"trade").
   // Worker certs (managed by the Worker Certificates module) share the same
   // storage row but are filtered out here so the two never mix.
-  const tradeDocs = certs.filter(c => c.category === "trade");
+  // SDS files do not expire and are outside this legal-risk tracker. Preserve
+  // any previously uploaded SDS data in storage, but exclude it from all views,
+  // counts, alerts, exports, and company completion requirements.
+  const tradeDocs = certs.filter(c => c.category === "trade" && !/safety data sheet|\bsds\b/i.test(c.doc_type||""));
 
   function showToast(msg, type="ok") {
     setToast({ msg, type });
@@ -1279,7 +1281,7 @@ Return ONLY valid JSON (no markdown):
               style={{ border:`2px dashed ${drag?C.purple:C.border}`, borderRadius:16, padding:"36px 24px", textAlign:"center", cursor:"pointer", background:drag?C.purple+"11":C.card, transition:"all .2s", marginBottom:16 }}>
               <div style={{ fontSize:36, marginBottom:10 }}>📎</div>
               <div style={{ fontWeight:700, fontSize:16, marginBottom:6 }}>Scan a Trade Document</div>
-              <div style={{ color:C.muted, fontSize:13, marginBottom:6 }}>WCB letter, SDS, COR cert, or CGL insurance certificate · Photo or PDF</div>
+              <div style={{ color:C.muted, fontSize:13, marginBottom:6 }}>WCB clearance letter, COR certification, or CGL insurance certificate · Photo or PDF</div>
               <div style={{ color:C.muted, fontSize:12 }}>Drag & drop or click to browse</div>
               <input ref={fileRef} type="file" multiple accept="image/*,application/pdf" style={{ display:"none" }} onChange={e=>handleFiles(e.target.files)} />
             </div>
