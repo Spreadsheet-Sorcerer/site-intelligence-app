@@ -967,6 +967,9 @@ function TradeDocsModule({ onBack }) {
   const [manualOpen, setManualOpen] = useState(false);
   const [manual, setManual] = useState({ company_name:"", doc_type:"", issued_date:"", expiry_date:"", doc_number:"", issuing_body:"", per_occurrence_limit:"", certificate_holder:"", additional_insured:"", notes:"" });
   const [storageReady, setStorageReady] = useState(false);
+  const [companySearch, setCompanySearch] = useState("");
+  const [companyFilter, setCompanyFilter] = useState("all");
+  const [expandedCompany, setExpandedCompany] = useState(null);
   const fileRef = useRef();
 
   useEffect(() => {
@@ -1124,12 +1127,21 @@ Return ONLY valid JSON (no markdown):
   const expired  = tradeDocs.filter(c => { const d = daysUntilExpiry(c.expiry_date); return d!==null && d<0; });
   const critical = tradeDocs.filter(c => { const d = daysUntilExpiry(c.expiry_date); return d!==null && d>=0 && d<=30; });
   const warning  = tradeDocs.filter(c => { const d = daysUntilExpiry(c.expiry_date); return d!==null && d>30 && d<=60; });
-  const companies = [...new Set(tradeDocs.map(c=>c.company_name).filter(Boolean))];
+  // Group OCR/manual name variants while retaining a clean display name.
+  const companyKey = name => normEntity((name||"").replace(/\(\s*20\d{2}\s*\)/g, ""));
+  const companyGroups = Object.values(tradeDocs.reduce((groups, doc) => {
+    if (!doc.company_name) return groups;
+    const key = companyKey(doc.company_name);
+    if (!groups[key]) groups[key] = { key, name:doc.company_name.replace(/\s*\(\s*20\d{2}\s*\)\s*$/g, "").trim(), docs:[] };
+    groups[key].docs.push(doc);
+    return groups;
+  }, {}));
+  const companies = companyGroups.map(g=>g.name);
   const complianceIssues = tradeDocs.filter(c => cglComplianceFlags(c).length > 0);
 
   // Company detail modal
   function CompanyModal({ name, onClose }) {
-    const cDocs = tradeDocs.filter(c => c.company_name === name);
+    const cDocs = tradeDocs.filter(c => companyKey(c.company_name) === companyKey(name));
     return (
       <div style={{ position:"fixed", inset:0, background:"#000c", zIndex:200, display:"flex", alignItems:"center", justifyContent:"center" }}
         onClick={e => e.target===e.currentTarget && onClose()}>
@@ -1330,36 +1342,53 @@ Return ONLY valid JSON (no markdown):
         {/* COMPANIES */}
         {tab==="companies" && (
           <div>
-            <div style={{ fontWeight:700, fontSize:18, marginBottom:20 }}>Company Roster</div>
+            <div style={{ display:"flex", justifyContent:"space-between", alignItems:"flex-end", gap:12, flexWrap:"wrap", marginBottom:16 }}>
+              <div>
+                <div style={{ fontWeight:700, fontSize:18 }}>Trade Companies & Documents</div>
+                <div style={{ color:C.muted, fontSize:12, marginTop:4 }}>Select a company to see its requirements and files.</div>
+              </div>
+              <div style={{ display:"flex", gap:8, flexWrap:"wrap" }}>
+                <input value={companySearch} onChange={e=>setCompanySearch(e.target.value)} placeholder="Search companies…" style={{ width:210, background:C.card, border:`1px solid ${C.border}`, borderRadius:8, padding:"8px 11px", color:C.text, fontSize:12 }} />
+                {[['all','All'],['action','Action Required'],['expired','Expired'],['missing','Missing'],['complete','Complete']].map(([id,label])=><button key={id} onClick={()=>setCompanyFilter(id)} style={{ background:companyFilter===id?C.purple:"transparent", color:companyFilter===id?"#fff":C.muted, border:`1px solid ${companyFilter===id?C.purple:C.border}`, borderRadius:7, padding:"7px 10px", fontSize:11, fontWeight:700, cursor:"pointer" }}>{label}</button>)}
+              </div>
+            </div>
             {companies.length===0
               ? <div style={{ color:C.muted, textAlign:"center", padding:"60px 0" }}>No companies yet. Scan a document to add one.</div>
-              : companies.map(name => {
-                const cDocs = tradeDocs.filter(c=>c.company_name===name);
+              : companyGroups.map(group => {
+                const name=group.name, cDocs=group.docs;
                 const cExpired = cDocs.filter(c=>{ const d=daysUntilExpiry(c.expiry_date); return d!==null&&d<0; });
                 const cIssues = cDocs.filter(c=>cglComplianceFlags(c).length>0);
-                const hasIssues = cExpired.length>0||cIssues.length>0;
                 const presentTypes = new Set(cDocs.map(c=>c.doc_type));
                 const missingTypes = TRADE_DOC_TYPES.filter(t=>!presentTypes.has(t));
+                const hasIssues = cExpired.length>0||cIssues.length>0||missingTypes.length>0;
+                return {group,name,cDocs,cExpired,cIssues,missingTypes,hasIssues};
+              }).filter(x=>{
+                const search=x.name.toLowerCase().includes(companySearch.trim().toLowerCase());
+                const filter=companyFilter==='all'||(companyFilter==='action'&&x.hasIssues)||(companyFilter==='expired'&&x.cExpired.length)||(companyFilter==='missing'&&x.missingTypes.length)||(companyFilter==='complete'&&!x.hasIssues);
+                return search&&filter;
+              }).sort((a,b)=>{
+                const urgency=x=>x.cIssues.length?0:x.cExpired.length?1:x.missingTypes.length?2:3;
+                return urgency(a)-urgency(b)||a.name.localeCompare(b.name);
+              }).map(({group,name,cDocs,cExpired,cIssues,missingTypes,hasIssues}) => {
+                const isOpen=expandedCompany===group.key;
                 return (
-                  <div key={name} onClick={()=>setSelectedCompany(name)} style={{ background:C.card, border:`1px solid ${hasIssues?C.red+"55":C.border}`, borderRadius:12, padding:"16px 20px", marginBottom:10, cursor:"pointer" }}>
-                    <div style={{ display:"flex", justifyContent:"space-between", alignItems:"center", flexWrap:"wrap", gap:8, marginBottom:8 }}>
-                      <span style={{ fontWeight:800, fontSize:15 }}>🏢 {name}</span>
-                      <div style={{ display:"flex", gap:6, flexWrap:"wrap" }}>
-                        <Badge color={C.purple}>{cDocs.length} doc{cDocs.length!==1?"s":""}</Badge>
-                        {cExpired.length>0 && <Badge color={C.red}>{cExpired.length} expired</Badge>}
-                        {cIssues.length>0 && <Badge color={C.red}>{cIssues.length} compliance issue{cIssues.length>1?"s":""}</Badge>}
-                      </div>
+                  <div key={group.key} style={{ background:C.card, border:`1px solid ${cIssues.length||cExpired.length?C.red+"66":missingTypes.length?C.yellow+"44":C.border}`, borderRadius:11, marginBottom:8, overflow:"hidden" }}>
+                    <div onClick={()=>setExpandedCompany(isOpen?null:group.key)} style={{ display:"grid", gridTemplateColumns:"minmax(220px,2fr) repeat(4,minmax(80px,.6fr)) 24px", gap:10, alignItems:"center", padding:"13px 16px", cursor:"pointer" }}>
+                      <div style={{fontWeight:800,fontSize:14}}>🏢 {name}</div>
+                      <div style={{color:C.sub,fontSize:12}}><b style={{color:C.text}}>{cDocs.length}/{TRADE_DOC_TYPES.length}</b> documents</div>
+                      <div>{missingTypes.length?<Badge color={C.yellow}>{missingTypes.length} missing</Badge>:<Badge color={C.green}>None missing</Badge>}</div>
+                      <div>{cExpired.length?<Badge color={C.red}>{cExpired.length} expired</Badge>:<span style={{color:C.muted,fontSize:11}}>No expired</span>}</div>
+                      <div>{cIssues.length?<Badge color={C.red}>{cIssues.length} issue{cIssues.length!==1?'s':''}</Badge>:!hasIssues?<Badge color={C.green}>Complete</Badge>:<span style={{color:C.muted,fontSize:11}}>Action required</span>}</div>
+                      <div style={{color:C.muted,transform:isOpen?'rotate(180deg)':'none'}}>⌄</div>
                     </div>
-                    {missingTypes.length>0 && (
-                      <div style={{ fontSize:11, color:C.yellow, marginBottom:6 }}>Missing: {missingTypes.join(", ")}</div>
-                    )}
-                    <div style={{ display:"flex", gap:6, flexWrap:"wrap" }}>
-                      {cDocs.map(c => {
-                        const s = expiryStatus(c.expiry_date);
-                        return <Badge key={c.id} color={s.color}>{c.doc_type?.split(" ")[0]||"Doc"}</Badge>;
+                    {isOpen&&<div style={{borderTop:`1px solid ${C.border}`,padding:"8px 16px 14px",background:C.bg+"88"}}>
+                      {TRADE_DOC_TYPES.map(type=>{
+                        const docs=cDocs.filter(c=>c.doc_type===type);
+                        if(!docs.length)return <div key={type} style={{display:"flex",justifyContent:"space-between",alignItems:"center",gap:12,padding:"9px 8px",borderBottom:`1px solid ${C.border}55`}}><span style={{fontSize:12,color:C.sub}}>{type}</span><button onClick={()=>{setManual(m=>({...m,company_name:name,doc_type:type}));setManualOpen(true);}} style={{background:C.yellow+"18",color:C.yellow,border:`1px solid ${C.yellow}44`,borderRadius:6,padding:"4px 9px",fontSize:11,fontWeight:700,cursor:"pointer"}}>Missing · Add</button></div>;
+                        return docs.map(c=>{const s=expiryStatus(c.expiry_date),flags=cglComplianceFlags(c);return <div key={c.id} style={{display:"flex",justifyContent:"space-between",alignItems:"center",gap:12,padding:"9px 8px",borderBottom:`1px solid ${C.border}55`,flexWrap:"wrap"}}><div><div style={{fontSize:12,fontWeight:700}}>{type}</div><div style={{fontSize:10,color:C.muted}}>{c.expiry_date?`Expires ${c.expiry_date}`:'No expiry date recorded'}</div></div><div style={{display:"flex",gap:6,alignItems:"center"}}>{flags.length>0&&<Badge color={C.red}>Compliance issue</Badge>}<Badge color={s.color}>{s.label}</Badge><button onClick={()=>setSelectedCompany(name)} style={{background:"transparent",border:`1px solid ${C.blue}44`,color:C.blue,borderRadius:6,padding:"3px 9px",fontSize:11,fontWeight:700,cursor:"pointer"}}>Details</button></div></div>})
                       })}
-                    </div>
-                    <div style={{ marginTop:7, color:C.muted, fontSize:11 }}>Tap to view full document list →</div>
+                      <div style={{display:"flex",justifyContent:"flex-end",marginTop:10}}><button onClick={()=>{setManual(m=>({...m,company_name:name,doc_type:""}));setManualOpen(true);}} style={{background:C.purple,color:"#fff",border:"none",borderRadius:7,padding:"7px 12px",fontSize:11,fontWeight:800,cursor:"pointer"}}>＋ Add Document</button></div>
+                    </div>}
                   </div>
                 );
               })
