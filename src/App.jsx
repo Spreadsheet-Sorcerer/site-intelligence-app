@@ -1179,6 +1179,13 @@ Return ONLY valid JSON (no markdown):
     return groups;
   }, {}));
   const companies = companyGroups.map(g=>g.name);
+  const expiryCompanyGroups = Object.values([...expired,...critical,...warning].reduce((groups, doc) => {
+    const key = companyKey(doc.company_name);
+    const canonical = companyGroups.find(g=>g.key===key)?.name || doc.company_name || "Unknown Company";
+    if (!groups[key]) groups[key] = { key, name:canonical, docs:[] };
+    groups[key].docs.push(doc);
+    return groups;
+  }, {})).sort((a,b)=>a.name.localeCompare(b.name, undefined, { sensitivity:"base", numeric:true }));
   const complianceIssues = tradeDocs.filter(c => cglComplianceFlags(c).length > 0);
 
   // Company detail modal
@@ -1472,34 +1479,23 @@ Return ONLY valid JSON (no markdown):
                   <div style={{ fontWeight:700, fontSize:16, color:C.green }}>All documents are current</div>
                   <div style={{ color:C.muted, fontSize:13, marginTop:6 }}>No expirations within 60 days</div>
                 </div>
-              : <>
-                {[
-                  { group: expired,  label:"🚨 Expired", color: C.red    },
-                  { group: critical, label:"⚠ Expiring Within 30 Days", color: C.red    },
-                  { group: warning,  label:"⏰ Expiring in 31–60 Days",  color: C.yellow },
-                ].map(({ group, label, color }) => group.length > 0 && (
-                  <div key={label} style={{ marginBottom:28 }}>
-                    <div style={{ fontWeight:700, fontSize:14, color, marginBottom:12, display:"flex", alignItems:"center", gap:8 }}>
-                      {label} <Badge color={color}>{group.length}</Badge>
+              : <div>
+                {expiryCompanyGroups.map(group=>{
+                  const sortedDocs=[...group.docs].sort((a,b)=>(daysUntilExpiry(a.expiry_date)??9999)-(daysUntilExpiry(b.expiry_date)??9999));
+                  const expiredCount=group.docs.filter(c=>(daysUntilExpiry(c.expiry_date)??0)<0).length;
+                  const soonCount=group.docs.length-expiredCount;
+                  return <div key={group.key} style={{background:C.card,border:`1px solid ${expiredCount?C.red+"55":C.yellow+"44"}`,borderRadius:11,marginBottom:10,overflow:"hidden"}}>
+                    <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",gap:10,flexWrap:"wrap",padding:"13px 18px",borderBottom:`1px solid ${C.border}`}}>
+                      <span style={{fontWeight:800,fontSize:14}}>🏢 {group.name}</span>
+                      <div style={{display:"flex",gap:6}}>{expiredCount>0&&<Badge color={C.red}>{expiredCount} expired</Badge>}{soonCount>0&&<Badge color={C.yellow}>{soonCount} expiring soon</Badge>}</div>
                     </div>
-                    {group.map(c => {
-                      const s = expiryStatus(c.expiry_date);
-                      return (
-                        <div key={c.id} onClick={()=>setSelectedCompany(c.company_name)} style={{ background:C.card, border:`1px solid ${color}44`, borderRadius:11, padding:"14px 18px", marginBottom:9, cursor:"pointer" }}>
-                          <div style={{ display:"flex", justifyContent:"space-between", flexWrap:"wrap", gap:8, marginBottom:6 }}>
-                            <span style={{ fontWeight:800 }}>🏢 {c.company_name||"Unknown"}</span>
-                            <Badge color={color}>{s.label}</Badge>
-                          </div>
-                          <div style={{ color:C.purple, fontWeight:600, fontSize:13, marginBottom:4 }}>{c.doc_type}</div>
-                          <div style={{ fontSize:12, color:C.sub }}>
-                            {c.expiry_date && <span>Expires: {c.expiry_date}</span>}
-                          </div>
-                        </div>
-                      );
-                    })}
-                  </div>
-                ))}
-              </>
+                    <div style={{padding:"4px 18px 8px"}}>{sortedDocs.map(c=>{const s=expiryStatus(c.expiry_date),hasFile=!!(c.file_url||c.originalFile);return <div key={c.id} onClick={()=>viewTradeDocument(c)} style={{display:"flex",justifyContent:"space-between",alignItems:"center",gap:12,flexWrap:"wrap",padding:"10px 2px",borderBottom:`1px solid ${C.border}55`,cursor:hasFile?"pointer":"default"}}>
+                      <div><div style={{color:C.purple,fontWeight:700,fontSize:12}}>📄 {c.doc_type}</div><div style={{fontSize:11,color:C.sub}}>{c.expiry_date?`Expires: ${c.expiry_date}`:"No expiry date"}{hasFile?" · Click to view":""}</div></div>
+                      <Badge color={s.color}>{s.label}</Badge>
+                    </div>})}</div>
+                  </div>;
+                })}
+              </div>
             }
           </div>
         )}
