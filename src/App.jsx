@@ -1640,11 +1640,17 @@ and item "Interior foundations"; "MUD SLAB" means area "Mud Slabs" and item "Sla
 
 Return ONLY a valid JSON array (even if only one ticket). No markdown, no explanation:
 [{"date":"YYYY-MM-DD","ticket_number":"ticket number or pumping Slip No.","supplier":"supplier name","mix_design":"MPa strength and mix code, or null for pumping slip","volume_m3":number or null,"volume_yd3":number or null,"pump_volume_m3":number or null,"pump_cost":number or null,"pump_hours_worked":number or null,"pump_travel_hours":number or null,"pump_hours_charged":number or null,"pump_category":"one exact pumping budget category or null","area":"best match from area list or null","item":"best match from element list or null","invoice_number":"string or null","driver":"driver or pump operator","truck_number":"truck or pump unit number","notes":"string or null"}]`;
-    const res = await fetch("/api/claude",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({model:"claude-sonnet-4-6",max_tokens:4000,messages:[{role:"user",content:[block,{type:"text",text:prompt}]}]})});
+    // Multi-page ticket PDFs can contain many records. A 4,000-token response
+    // limit can cut the JSON array off mid-record, which makes it impossible to
+    // parse even though Claude read the PDF successfully.
+    const res = await fetch("/api/claude",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({model:"claude-sonnet-4-6",max_tokens:16000,messages:[{role:"user",content:[block,{type:"text",text:prompt}]}]})});
     const data = await res.json();
     if(data.error) throw new Error("API error: "+(data.error.message||JSON.stringify(data.error)));
     const text = data.content?.map(b=>b.text||"").join("")||"";
     if(!text) throw new Error("Empty API response (HTTP "+res.status+")");
+    if(data.stop_reason === "max_tokens") {
+      throw new Error("The PDF contains too many tickets to finish reading in one response. Split it into two smaller PDFs and upload each one.");
+    }
     const parsed = extractJSON(text);
     return Array.isArray(parsed) ? parsed : [parsed];
   }
