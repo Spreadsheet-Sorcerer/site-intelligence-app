@@ -1408,10 +1408,7 @@ Return ONLY valid JSON (no markdown):
                 const search=x.name.toLowerCase().includes(companySearch.trim().toLowerCase());
                 const filter=companyFilter==='all'||(companyFilter==='action'&&x.hasIssues)||(companyFilter==='expired'&&x.cExpired.length)||(companyFilter==='missing'&&x.missingTypes.length)||(companyFilter==='complete'&&!x.hasIssues);
                 return search&&filter;
-              }).sort((a,b)=>{
-                const urgency=x=>x.cIssues.length?0:x.cExpired.length?1:x.missingTypes.length?2:3;
-                return urgency(a)-urgency(b)||a.name.localeCompare(b.name);
-              }).map(({group,name,cDocs,cExpired,cIssues,presentTypes,missingTypes,hasIssues}) => {
+              }).sort((a,b)=>a.name.localeCompare(b.name, undefined, { sensitivity:"base", numeric:true })).map(({group,name,cDocs,cExpired,cIssues,presentTypes,missingTypes,hasIssues}) => {
                 const isOpen=expandedCompany===group.key;
                 return (
                   <div key={group.key} style={{ background:C.card, border:`1px solid ${cIssues.length||cExpired.length?C.red+"66":missingTypes.length?C.yellow+"44":C.border}`, borderRadius:11, marginBottom:8, overflow:"hidden" }}>
