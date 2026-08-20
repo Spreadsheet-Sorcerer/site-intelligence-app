@@ -8,7 +8,7 @@ const C = {
   yellow: "#EAB308", red: "#EF4444", purple: "#A855F7",
   muted: "#6B7280", text: "#F9FAFB", sub: "#9CA3AF", teal: "#14B8A6",
 };
-const APP_VERSION = "18.9";
+const APP_VERSION = "18.12";
 
 // ─── SUPABASE STORAGE HELPERS ────────────────────────────────────────────────
 // Calls server-side API routes which talk to Supabase.
@@ -248,7 +248,9 @@ function checkMpaMismatch(ticket) {
   const specNum = parseMpaNum(specStr);
   const ticketNum = parseMpaNum(ticket.mix_design);
   if (!specNum || !ticketNum) return null;
-  if (ticketNum !== specNum) return { specMpa: specStr, ticketMpa: ticket.mix_design };
+  // A higher-strength mix meets or exceeds the specified compressive strength.
+  // Only warn when the delivered ticket strength is below the specification.
+  if (ticketNum < specNum) return { specMpa: specStr, ticketMpa: ticket.mix_design };
   return null;
 }
 
@@ -2327,7 +2329,7 @@ Screenshot attached: Yes / No`}</pre>
                         )}
                         {specMpa&&!mismatch&&(
                           <div style={{marginTop:10,background:"#052e16",border:`1px solid ${C.green}44`,borderRadius:8,padding:"9px 14px",fontSize:13,color:"#86efac",fontWeight:600}}>
-                            ✓ Mix design matches spec
+                            ✓ Ticket strength meets or exceeds spec
                           </div>
                         )}
                       </div>
@@ -2781,7 +2783,7 @@ Screenshot attached: Yes / No`}</pre>
           <div style={{background:C.card,border:`1px solid ${C.border}`,borderRadius:16,padding:30,width:"92%",maxWidth:500,maxHeight:"90vh",overflowY:"auto"}}>
             <div style={{fontWeight:800,fontSize:18,marginBottom:20}}>✏️ Add Ticket Manually</div>
             {INPUT("date","Date","date")}{INPUT("ticket_number","Ticket / Docket #")}{INPUT("supplier","Supplier")}{INPUT("mix_design","Mix Design / Strength (e.g. 35 MPa)")}{INPUT("volume_m3","Volume (m³)","number")}{INPUT("volume_yd3","Volume (yd³)","number")}{INPUT("area","Area","text",AREAS)}{INPUT("item","Element Type","text",ITEMS)}{INPUT("invoice_number","Invoice #")}{INPUT("notes","Notes")}
-            {manual.area&&manual.item&&manual.mix_design&&(()=>{ const preview=checkMpaMismatch({area:manual.area,item:manual.item,mix_design:manual.mix_design}); const spec=MPA_SPEC[`${manual.area}|||${manual.item}`]; if(preview) return(<div style={{background:"#450a0a",border:`1px solid ${C.red}`,borderRadius:8,padding:"10px 14px",marginBottom:12,fontSize:13,color:"#fca5a5"}}>⚠ MPa mismatch — you entered <b>{preview.ticketMpa}</b> but this element requires <b>{preview.specMpa}</b></div>); if(spec) return(<div style={{background:"#052e16",border:`1px solid ${C.green}44`,borderRadius:8,padding:"10px 14px",marginBottom:12,fontSize:13,color:"#86efac"}}>✓ Mix design matches spec ({spec})</div>); return null; })()}
+            {manual.area&&manual.item&&manual.mix_design&&(()=>{ const preview=checkMpaMismatch({area:manual.area,item:manual.item,mix_design:manual.mix_design}); const spec=MPA_SPEC[`${manual.area}|||${manual.item}`]; if(preview) return(<div style={{background:"#450a0a",border:`1px solid ${C.red}`,borderRadius:8,padding:"10px 14px",marginBottom:12,fontSize:13,color:"#fca5a5"}}>⚠ MPa mismatch — you entered <b>{preview.ticketMpa}</b> but this element requires <b>{preview.specMpa}</b></div>); if(spec) return(<div style={{background:"#052e16",border:`1px solid ${C.green}44`,borderRadius:8,padding:"10px 14px",marginBottom:12,fontSize:13,color:"#86efac"}}>✓ Ticket strength meets or exceeds spec ({spec})</div>); return null; })()}
             <div style={{display:"flex",gap:10,marginTop:18}}><button onClick={addManual} style={{background:C.accent,color:"#fff",border:"none",borderRadius:9,padding:"11px 0",fontWeight:800,cursor:"pointer",flex:1}}>Add Ticket</button><button onClick={()=>setManualOpen(false)} style={{background:C.bg,color:C.muted,border:`1px solid ${C.border}`,borderRadius:9,padding:"11px 18px",fontWeight:700,cursor:"pointer"}}>Cancel</button></div>
           </div>
         </div>
