@@ -8,7 +8,7 @@ const C = {
   yellow: "#EAB308", red: "#EF4444", purple: "#A855F7",
   muted: "#6B7280", text: "#F9FAFB", sub: "#9CA3AF", teal: "#14B8A6",
 };
-const APP_VERSION = "18.13";
+const APP_VERSION = "18.22";
 
 // ─── SUPABASE STORAGE HELPERS ────────────────────────────────────────────────
 // Calls server-side API routes which talk to Supabase.
@@ -25,7 +25,12 @@ async function storageGet(key) {
     return await res.json();
   } catch { return null; }
 }
-async function storageSet(key, value) {
+// Keep one write line per dataset. Several records can be added while a file is
+// being read/uploaded; without this queue, an older PATCH can finish last and
+// replace newer records with an earlier snapshot.
+const storageWriteQueues = new Map();
+
+async function storageSetNow(key, value) {
   // A brief API/database hiccup should not lose a user's change. Retry the
   // same payload before reporting a failure.
   for (let attempt = 0; attempt < 3; attempt++) {
@@ -43,6 +48,20 @@ async function storageSet(key, value) {
     if (attempt < 2) await new Promise(resolve=>setTimeout(resolve, 500*(attempt+1)));
   }
   return false;
+}
+function storageSet(key, value) {
+  // Freeze the payload at the moment this save was requested. This also keeps
+  // later React state changes from affecting an already-queued write.
+  const snapshot = JSON.parse(JSON.stringify(value));
+  const previous = storageWriteQueues.get(key) || Promise.resolve(true);
+  const next = previous
+    .catch(() => false)
+    .then(() => storageSetNow(key, snapshot));
+  storageWriteQueues.set(key, next);
+  next.finally(() => {
+    if (storageWriteQueues.get(key) === next) storageWriteQueues.delete(key);
+  });
+  return next;
 }
 async function storageDel(key) {
   const empty = key === "concrete-data"
