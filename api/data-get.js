@@ -1,6 +1,16 @@
 export default async function handler(req, res) {
+  // Never allow an older cached copy of the records to be returned.
+  res.setHeader(
+    "Cache-Control",
+    "no-store, no-cache, must-revalidate, proxy-revalidate"
+  );
+  res.setHeader("Pragma", "no-cache");
+  res.setHeader("Expires", "0");
+
   if (req.method !== "GET") {
-    return res.status(405).json({ error: "Method not allowed" });
+    return res.status(405).json({
+      error: "Method not allowed",
+    });
   }
 
   const supabaseUrl = process.env.SUPABASE_URL;
@@ -8,10 +18,8 @@ export default async function handler(req, res) {
 
   if (!supabaseUrl || !supabaseKey) {
     console.error(
-      "Missing environment variables:",
-      "SUPABASE_URL:",
+      "Missing Supabase variables:",
       !!supabaseUrl,
-      "SUPABASE_SERVICE_KEY:",
       !!supabaseKey
     );
 
@@ -24,19 +32,18 @@ export default async function handler(req, res) {
 
   const { table } = req.query;
 
-  const allowedTables = [
-    "concrete_data",
-    "certs_data",
-  ];
-
-  if (!table || !allowedTables.includes(table)) {
+  if (
+    !table ||
+    !["concrete_data", "certs_data"].includes(table)
+  ) {
     return res.status(400).json({
       error: "Invalid table",
     });
   }
 
   try {
-    const url = `${supabaseUrl}/rest/v1/${table}?id=eq.1`;
+    const url =
+      `${supabaseUrl}/rest/v1/${table}?id=eq.1`;
 
     const response = await fetch(url, {
       method: "GET",
@@ -44,6 +51,7 @@ export default async function handler(req, res) {
         apikey: supabaseKey,
         Authorization: `Bearer ${supabaseKey}`,
         "Content-Type": "application/json",
+        "Cache-Control": "no-cache",
       },
     });
 
@@ -68,7 +76,8 @@ export default async function handler(req, res) {
     console.error("data-get error:", error);
 
     return res.status(500).json({
-      error: error.message || "Unexpected server error",
+      error:
+        error.message || "Unexpected server error",
     });
   }
 }
