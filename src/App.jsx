@@ -8,7 +8,7 @@ const C = {
   yellow: "#EAB308", red: "#EF4444", purple: "#A855F7",
   muted: "#6B7280", text: "#F9FAFB", sub: "#9CA3AF", teal: "#14B8A6",
 };
-const APP_VERSION = "18.22";
+const APP_VERSION = "18.23";
 
 // ─── SUPABASE STORAGE HELPERS ────────────────────────────────────────────────
 // Calls server-side API routes which talk to Supabase.
@@ -19,11 +19,24 @@ function tableFor(key) {
   return "certs_data";
 }
 async function storageGet(key) {
-  try {
-    const res = await fetch(`/api/data-get?table=${tableFor(key)}`);
-    if (!res.ok) return null;
-    return await res.json();
-  } catch { return null; }
+  // If this module was just closed/reopened, finish its last queued write
+  // before reading. Otherwise a stale read can be auto-saved over new docs.
+  const pendingWrite = storageWriteQueues.get(key);
+  if (pendingWrite) await pendingWrite;
+  for (let attempt = 0; attempt < 3; attempt++) {
+    try {
+      const res = await fetch(`/api/data-get?table=${tableFor(key)}&_=${Date.now()}`, {
+        cache: "no-store",
+        headers: { "Cache-Control": "no-cache" },
+      });
+      if (res.ok) return await res.json();
+      console.error(`storageGet failed (${res.status})`, await res.text());
+    } catch (error) {
+      console.error("storageGet network error", error);
+    }
+    if (attempt < 2) await new Promise(resolve=>setTimeout(resolve, 500*(attempt+1)));
+  }
+  return null;
 }
 // Keep one write line per dataset. Several records can be added while a file is
 // being read/uploaded; without this queue, an older PATCH can finish last and
@@ -498,7 +511,11 @@ function CertsModule({ onBack }) {
 
   useEffect(() => {
     storageGet("certs-data").then(saved => {
-      if (saved?.certs) setCerts(saved.certs);
+      if (saved === null) {
+        showToast("Could not load saved records. Auto-save is paused so nothing can be overwritten. Refresh to try again.", "err");
+        return;
+      }
+      setCerts(Array.isArray(saved.certs) ? saved.certs : []);
       setStorageReady(true);
     });
   }, []);
@@ -992,7 +1009,11 @@ function TradeDocsModule({ onBack }) {
 
   useEffect(() => {
     storageGet("certs-data").then(saved => {
-      if (saved?.certs) setCerts(saved.certs);
+      if (saved === null) {
+        showToast("Could not load saved records. Auto-save is paused so nothing can be overwritten. Refresh to try again.", "err");
+        return;
+      }
+      setCerts(Array.isArray(saved.certs) ? saved.certs : []);
       setStorageReady(true);
     });
   }, []);
