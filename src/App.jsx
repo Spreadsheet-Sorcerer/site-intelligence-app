@@ -8,7 +8,7 @@ const C = {
   yellow: "#EAB308", red: "#EF4444", purple: "#A855F7",
   muted: "#6B7280", text: "#F9FAFB", sub: "#9CA3AF", teal: "#14B8A6",
 };
-const APP_VERSION = "19.0";
+const APP_VERSION = "19.1";
 
 // ─── SUPABASE STORAGE HELPERS ────────────────────────────────────────────────
 // Calls server-side API routes which talk to Supabase.
@@ -256,6 +256,17 @@ function invoiceAmountBeforeHst(invoice) {
   // Ocean's Nova Scotia invoices currently include 14% HST in total_amount.
   const invoiceTotal = parseFloat(invoice?.total_amount) || 0;
   return invoiceTotal > 0 ? invoiceTotal / 1.14 : 0;
+}
+
+function invoiceBaseConcreteBeforeHst(invoice) {
+  return (invoice?.line_items || []).reduce((sum,line) => {
+    const description = String(line?.description || "").toLowerCase();
+    // Ocean's base-material rows are described as "20/25/35 MPA Plain".
+    // Grout is also a base material, although it was not in the original rate
+    // schedule and will therefore correctly remain visible as a small variance.
+    const isBaseMaterial = /(\d+)\s*mpa.*plain|grout.*plain|plain.*grout/.test(description);
+    return sum + (isBaseMaterial ? (parseFloat(line?.amount)||0) : 0);
+  },0);
 }
 
 function oceanBaseRateForMpa(value) {
@@ -2071,6 +2082,8 @@ Return ONLY valid JSON, no markdown:
   const invoicesWithIssues=invoices.filter(inv=>{ const m=matchInvoiceToTickets(inv,tickets); return m.unmatched.length>0||m.volumeMatch===false; }).length;
   const totalInvoiced=invoices.reduce((s,inv)=>s+(parseFloat(inv.total_amount)||0),0);
   const invoicedBeforeHst=invoices.reduce((s,inv)=>s+invoiceAmountBeforeHst(inv),0);
+  const actualBaseConcreteCost=invoices.reduce((s,inv)=>s+invoiceBaseConcreteBeforeHst(inv),0);
+  const actualAllowanceCost=Math.max(0,invoicedBeforeHst-actualBaseConcreteCost);
   const scopeByStrength={};
   SCOPE.forEach(row=>{ const strength=parseMpaNum(row.mpa); if(strength) scopeByStrength[strength]=(scopeByStrength[strength]||0)+row.m3; });
   const pouredByStrength={};
@@ -2082,13 +2095,17 @@ Return ONLY valid JSON, no markdown:
     const remainingVolume=Math.max(0,scopeVolume-(pouredByStrength[strength]||0));
     return sum+remainingVolume*(OCEAN_BASE_RATES[strength]||0);
   },0);
-  const remainingForecastAllowances=remaining*OCEAN_ALLOWANCE_PER_M3;
+  // Additives/pumping are deliberately not spread across remaining volume.
+  // Early pours can consume waterproofing, cooling and pumping unevenly. Draw
+  // actual non-base invoice charges from the original allowance pool so those
+  // costs are never projected a second time.
+  const remainingForecastAllowances=Math.max(0,originalForecastAllowances-actualAllowanceCost);
+  const remainingAllowanceRate=remaining>0?remainingForecastAllowances/remaining:0;
   const estimateToComplete=remainingBaseEstimate+remainingForecastAllowances;
   const forecastAtCompletion=invoicedBeforeHst+estimateToComplete;
   const forecastVariance=forecastAtCompletion-originalForecast;
-  const expectedCostToDate=originalForecast-estimateToComplete;
-  const costVarianceToDate=invoicedBeforeHst-expectedCostToDate;
   const costProgressPct=originalForecast>0?(invoicedBeforeHst/originalForecast)*100:0;
+  const forecastOnTrack=Math.abs(forecastVariance)<1000;
   const searchableDate=value=>{
     const raw=String(value||"").trim();
     if(!raw) return "";
@@ -2751,7 +2768,7 @@ Screenshot attached: Yes / No`}</pre>
         )}
 
         {tab==="remaining"&&(()=>{
-          const areaRows=AREAS.map(area=>{ const lines=scopeProgress.filter(r=>r.area===area); const scope=lines.reduce((s,r)=>s+r.m3,0); const poured=lines.reduce((s,r)=>s+r.poured,0); const hasScope=scope>0; const rem=Math.max(0,scope-poured); const over=Math.max(0,poured-scope); const p=hasScope?(poured/scope)*100:0; const status=over>0.01?"over":hasScope&&rem<=0.01?"complete":poured>0?"inprogress":"notstarted"; const baseRemaining=lines.reduce((s,line)=>s+line.remaining*(oceanBaseRateForMpa(line.mpa)||0),0); const estCost=rem>0?baseRemaining+rem*OCEAN_ALLOWANCE_PER_M3:0; const areaMpas=[...new Set(Object.entries(MPA_SPEC).filter(([key])=>key.startsWith(`${area}|||`)).map(([,mpa])=>mpa))]; return{area,scope,poured,rem,over,p,status,estCost,areaMpas,hasScope}; });
+          const areaRows=AREAS.map(area=>{ const lines=scopeProgress.filter(r=>r.area===area); const scope=lines.reduce((s,r)=>s+r.m3,0); const poured=lines.reduce((s,r)=>s+r.poured,0); const hasScope=scope>0; const rem=Math.max(0,scope-poured); const over=Math.max(0,poured-scope); const p=hasScope?(poured/scope)*100:0; const status=over>0.01?"over":hasScope&&rem<=0.01?"complete":poured>0?"inprogress":"notstarted"; const baseRemaining=lines.reduce((s,line)=>s+line.remaining*(oceanBaseRateForMpa(line.mpa)||0),0); const estCost=rem>0?baseRemaining+rem*remainingAllowanceRate:0; const areaMpas=[...new Set(Object.entries(MPA_SPEC).filter(([key])=>key.startsWith(`${area}|||`)).map(([,mpa])=>mpa))]; return{area,scope,poured,rem,over,p,status,estCost,areaMpas,hasScope}; });
           const STATUS_CONFIG={over:{label:"⚠️ Over Scope",color:C.red},complete:{label:"✅ Complete",color:C.green},inprogress:{label:"🟡 In Progress",color:C.yellow},notstarted:{label:"🔴 Not Started",color:C.red}};
           return(<div>
             <div style={{fontWeight:700,fontSize:18,marginBottom:6}}>Concrete Cost Forecast & Remaining Works</div>
@@ -2762,9 +2779,9 @@ Screenshot attached: Yes / No`}</pre>
               <Stat label="Forecast at Completion" value={`$${forecastAtCompletion.toLocaleString(undefined,{maximumFractionDigits:0})}`} sub="actual to date + remaining estimate" color={forecastVariance>0?C.yellow:C.teal}/>
               <Stat label="Original Scope Estimate" value={`$${originalForecast.toLocaleString(undefined,{maximumFractionDigits:0})}`} sub="Ocean rates + scaled project allowances" color={C.blue}/>
             </div>
-            <div style={{background:costVarianceToDate>0?C.yellow+"12":C.green+"12",border:`1px solid ${costVarianceToDate>0?C.yellow:C.green}44`,borderRadius:12,padding:"13px 16px",marginBottom:20,display:"flex",justifyContent:"space-between",gap:12,alignItems:"center",flexWrap:"wrap"}}>
-              <div><div style={{fontWeight:800,color:costVarianceToDate>0?C.yellow:C.green}}>{costVarianceToDate>0?"Spending is ahead of estimated progress":"Spending is at or below estimated progress"}</div><div style={{color:C.muted,fontSize:12,marginTop:3}}>Cost used {fmt(costProgressPct,1)}% · Concrete poured {fmt(pct,1)}% · Variance to expected spend {costVarianceToDate>=0?"+":"-"}${Math.abs(costVarianceToDate).toLocaleString(undefined,{maximumFractionDigits:0})}</div></div>
-              <Badge color={forecastVariance>0?C.yellow:C.green}>{forecastVariance>=0?"+":"-"}${Math.abs(forecastVariance).toLocaleString(undefined,{maximumFractionDigits:0})} forecast variance</Badge>
+            <div style={{background:forecastOnTrack?C.green+"12":C.yellow+"12",border:`1px solid ${forecastOnTrack?C.green:C.yellow}44`,borderRadius:12,padding:"13px 16px",marginBottom:20,display:"flex",justifyContent:"space-between",gap:12,alignItems:"center",flexWrap:"wrap"}}>
+              <div><div style={{fontWeight:800,color:forecastOnTrack?C.green:C.yellow}}>{forecastOnTrack?"Quoted-rate forecast is on track":"Forecast variance needs review"}</div><div style={{color:C.muted,fontSize:12,marginTop:3}}>Cost invoiced {fmt(costProgressPct,1)}% · Concrete poured {fmt(pct,1)}% · Allowances used ${actualAllowanceCost.toLocaleString(undefined,{maximumFractionDigits:0})} of ${originalForecastAllowances.toLocaleString(undefined,{maximumFractionDigits:0})}</div></div>
+              <Badge color={forecastOnTrack?C.green:C.yellow}>{forecastVariance>=0?"+":"-"}${Math.abs(forecastVariance).toLocaleString(undefined,{maximumFractionDigits:0})} forecast variance</Badge>
             </div>
             <div style={{display:"flex",gap:12,flexWrap:"wrap",marginBottom:24}}>
               {[{emoji:"⚠️",count:areaRows.filter(r=>r.status==="over").length,label:"Over Scope",color:C.red},{emoji:"✅",count:areaRows.filter(r=>r.status==="complete").length,label:"Complete",color:C.green},{emoji:"🟡",count:areaRows.filter(r=>r.status==="inprogress").length,label:"In Progress",color:C.yellow},{emoji:"🔴",count:areaRows.filter(r=>r.status==="notstarted").length,label:"Not Started",color:C.red},{emoji:"🏗️",count:fmt(remaining,1),label:"m³ left",color:C.accent}].map(({emoji,count,label,color})=>(<div key={label} style={{background:color+"18",border:`1px solid ${color}44`,borderRadius:12,padding:"14px 20px",flex:1,minWidth:110,textAlign:"center"}}><div style={{fontSize:28}}>{emoji}</div><div style={{fontWeight:800,fontSize:22,color}}>{count}</div><div style={{color:C.muted,fontSize:12,marginTop:2}}>{label}</div></div>))}
@@ -2772,9 +2789,9 @@ Screenshot attached: Yes / No`}</pre>
             <div style={{background:C.card,border:`1px solid ${C.border}`,borderRadius:14,padding:"18px 22px",marginBottom:24}}>
               <div style={{fontWeight:700,marginBottom:10}}>Forecast basis</div>
               <div style={{display:"grid",gridTemplateColumns:"repeat(auto-fit,minmax(180px,1fr))",gap:10,fontSize:12}}>
-                {[['20 MPa','$205.90/m³'],['25 MPa','$214.80/m³'],['35 MPa','$247.20/m³'],['Additives & pumping',`$${OCEAN_ALLOWANCE_PER_M3.toFixed(2)}/m³ allowance`]].map(([label,value])=><div key={label} style={{background:C.bg,borderRadius:9,padding:"10px 13px"}}><div style={{color:C.muted}}>{label}</div><div style={{fontWeight:800,marginTop:3}}>{value}</div></div>)}
+                {[['20 MPa','$205.90/m³'],['25 MPa','$214.80/m³'],['35 MPa','$247.20/m³'],['Original allowance basis',`$${OCEAN_ALLOWANCE_PER_M3.toFixed(2)}/m³`]].map(([label,value])=><div key={label} style={{background:C.bg,borderRadius:9,padding:"10px 13px"}}><div style={{color:C.muted}}>{label}</div><div style={{fontWeight:800,marginTop:3}}>{value}</div></div>)}
               </div>
-              <div style={{color:C.muted,fontSize:11,marginTop:10}}>Actual invoices replace estimated spending as they are uploaded. Remaining work stays priced at Ocean's quoted base rates plus the estimator's scaled allowances for admixtures, environmental charges, escalation, heating/cooling and pumping.</div>
+              <div style={{color:C.muted,fontSize:11,marginTop:10}}>Actual invoices replace estimated spending as they are uploaded. Base concrete remaining is priced at Ocean's quoted rates. Actual additives, environmental charges, heating/cooling and pumping draw down the original allowance pool so early high-cost pours are not projected a second time.</div>
             </div>
             {areaRows.map(row=>{ const sc=STATUS_CONFIG[row.status]; return(<div key={row.area} style={{background:C.card,border:`1px solid ${row.status==="over"?C.red+"88":row.status==="complete"?C.green+"44":row.status==="inprogress"?C.yellow+"44":C.border}`,borderRadius:13,padding:"15px 20px",marginBottom:10}}>
               <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:8,flexWrap:"wrap",gap:8}}>
