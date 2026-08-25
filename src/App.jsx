@@ -8,7 +8,7 @@ const C = {
   yellow: "#EAB308", red: "#EF4444", purple: "#A855F7",
   muted: "#6B7280", text: "#F9FAFB", sub: "#9CA3AF", teal: "#14B8A6",
 };
-const APP_VERSION = "18.23";
+const APP_VERSION = "18.24";
 
 // ─── SUPABASE STORAGE HELPERS ────────────────────────────────────────────────
 // Calls server-side API routes which talk to Supabase.
@@ -252,9 +252,15 @@ const M3_TO_YD3 = 1.30795;
 // under the request-body limit.
 const MAX_API_FILE_BYTES = 3 * 1024 * 1024;
 const AREAS = [...new Set(SCOPE.map(r => r.area))];
-const ITEMS = [...new Set(SCOPE.map(r => r.item).filter(Boolean))];
+// All project shear walls are free-standing and specified at 35 MPa. Walls
+// that are cast integrally with the foundation wall remain coded as "Wall"
+// and keep the area's existing wall specification (25 MPa where applicable).
+const SHEAR_WALL_ITEM = "Shear Wall";
+const SHEAR_WALL_AREAS = [...new Set(SCOPE.filter(r => r.item === "Wall").map(r => r.area))];
+const ITEMS = [...new Set([...SCOPE.map(r => r.item).filter(Boolean), SHEAR_WALL_ITEM])];
 const MPA_SPEC = {};
 SCOPE.forEach(r => { if (r.area && r.item) MPA_SPEC[`${r.area}|||${r.item}`] = r.mpa; });
+SHEAR_WALL_AREAS.forEach(area => { MPA_SPEC[`${area}|||${SHEAR_WALL_ITEM}`] = "35 MPa/N-CF"; });
 
 function parseMpaNum(str) {
   if (!str) return null;
@@ -286,7 +292,7 @@ function checkMpaMismatch(ticket) {
 }
 
 function validItemsForArea(area) {
-  return [...new Set(SCOPE.filter(r=>r.area===area&&r.item).map(r=>r.item))];
+  return ITEMS.filter(item => MPA_SPEC[`${area}|||${item}`]);
 }
 function ticketCodingIssue(ticket) {
   if (!(parseFloat(ticket.volume_m3)>0)) return null;
@@ -1703,7 +1709,10 @@ Screenshot attached: Yes / No`;
     const b64 = await toB64(file);
     const isPDF = file.type==="application/pdf";
     const block = isPDF ? {type:"document",source:{type:"base64",media_type:"application/pdf",data:b64}} : {type:"image",source:{type:"base64",media_type:file.type,data:b64}};
-    const mpaRef = SCOPE.filter(r=>r.item).map(r=>`${r.area} ${r.item}: ${r.mpa}`).join(", ");
+    const mpaRef = Object.entries(MPA_SPEC).map(([key,mpa])=>{
+      const [area,item]=key.split("|||");
+      return `${area} ${item}: ${mpa}`;
+    }).join(", ");
     const prompt = `You are a construction data extraction assistant. This file may contain ONE or MULTIPLE concrete delivery dockets AND separate pumping/equipment slips. Extract EVERY concrete ticket and EVERY pumping slip as its own record. Do not ignore the last page just because it is a different form.
 Project areas: ${AREAS.join(", ")}. Element types: ${ITEMS.join(", ")}.
 
@@ -2010,7 +2019,14 @@ Return ONLY valid JSON, no markdown:
   const pumpPct       = TOTAL_PUMP_BUDGET_M3 > 0 ? Math.min(100,(totalPumpM3/TOTAL_PUMP_BUDGET_M3)*100) : 0;
   const mpaMismatches=tickets.filter(t=>checkMpaMismatch(t));
   const pouredMap={};
-  tickets.forEach(t=>{ const key=`${t.area||"Unknown"}|||${t.item||""}`; pouredMap[key]=(pouredMap[key]||0)+(parseFloat(t.volume_m3)||0); });
+  tickets.forEach(t=>{
+    // Shear walls retain their own 35 MPa coding, but their volume rolls into
+    // the existing Wall scope allowance so the new label does not create a
+    // false overrun or leave poured concrete out of progress totals.
+    const scopeItem=t.item===SHEAR_WALL_ITEM?"Wall":(t.item||"");
+    const key=`${t.area||"Unknown"}|||${scopeItem}`;
+    pouredMap[key]=(pouredMap[key]||0)+(parseFloat(t.volume_m3)||0);
+  });
   const scopeProgress=SCOPE.map(r=>{ const poured=pouredMap[`${r.area}|||${r.item}`]||0; return{...r,poured,remaining:Math.max(0,r.m3-poured),overage:Math.max(0,poured-r.m3)}; });
   // Scope is controlled at the area level. Estimate subcategories are useful
   // for coding, but an overrun in one element can be covered by unused scope
