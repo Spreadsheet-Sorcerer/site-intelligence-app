@@ -8,7 +8,7 @@ const C = {
   yellow: "#EAB308", red: "#EF4444", purple: "#A855F7",
   muted: "#6B7280", text: "#F9FAFB", sub: "#9CA3AF", teal: "#14B8A6",
 };
-const APP_VERSION = "19.7";
+const APP_VERSION = "19.8";
 
 // ─── SUPABASE STORAGE HELPERS ────────────────────────────────────────────────
 // Calls server-side API routes which talk to Supabase.
@@ -2741,9 +2741,9 @@ Screenshot attached: Yes / No`}</pre>
               <input ref={invFileRef} type="file" multiple accept="image/*,application/pdf" style={{display:"none"}} onChange={e=>handleInvoiceFiles(e.target.files)}/>
             </div>
             <div style={{background:C.card,border:`1px solid ${C.border}`,borderRadius:14,padding:"18px 22px",marginBottom:20}}>
-              <div style={{color:C.muted,fontSize:11,fontWeight:700,letterSpacing:1,textTransform:"uppercase",marginBottom:5}}>Total Billed to Date</div>
-              <div style={{fontWeight:850,fontSize:28,color:C.green}}>${totalInvoiced.toLocaleString(undefined,{minimumFractionDigits:2,maximumFractionDigits:2})}</div>
-              <div style={{color:C.muted,fontSize:11,marginTop:4}}>Total of all uploaded invoices</div>
+              <div style={{color:C.muted,fontSize:11,fontWeight:700,letterSpacing:1,textTransform:"uppercase",marginBottom:5}}>Total Billed to Date — Before HST</div>
+              <div style={{fontWeight:850,fontSize:28,color:C.green}}>${invoicedBeforeHst.toLocaleString(undefined,{minimumFractionDigits:2,maximumFractionDigits:2})}</div>
+              <div style={{color:C.muted,fontSize:11,marginTop:4}}>Before HST · based on all uploaded invoices</div>
             </div>
             {invoices.length===0?<div style={{color:C.muted,textAlign:"center",padding:"60px 0"}}>No invoices yet.</div>
             :filteredInvoices.length===0?<div style={{color:C.muted,textAlign:"center",padding:"60px 0"}}>No invoices match “{invoiceSearch}”.</div>
