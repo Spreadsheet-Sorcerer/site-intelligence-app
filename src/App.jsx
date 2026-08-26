@@ -8,7 +8,7 @@ const C = {
   yellow: "#EAB308", red: "#EF4444", purple: "#A855F7",
   muted: "#6B7280", text: "#F9FAFB", sub: "#9CA3AF", teal: "#14B8A6",
 };
-const APP_VERSION = "19.4";
+const APP_VERSION = "19.5";
 
 // ─── SUPABASE STORAGE HELPERS ────────────────────────────────────────────────
 // Calls server-side API routes which talk to Supabase.
@@ -150,13 +150,13 @@ function cglComplianceFlags(doc) {
 // ─── CONCRETE SCOPE ───────────────────────────────────────────────────────────
 const SCOPE = [
   { area:"Mud Slabs",   item:"Slabs",                m3:185.0,  mpa:"20 MPa"       },
-  { area:"Crane Base",  item:"Interior foundations", m3:137.7,  mpa:"35 MPa"       },
+  { area:"Crane Base",  item:"Pad footings",         m3:137.7,  mpa:"35 MPa"       },
   { area:"SOG",         item:"Slabs",                m3:305.0,  mpa:"25 MPa/N-CF" },
   { area:"Foundations", item:"Wall",                 m3:287.3,  mpa:"25 MPa/F-2"  },
-  { area:"Foundations", item:"Raft",                 m3:327.6,  mpa:"25 MPa/F-2"  },
+  { area:"Foundations", item:"Pad footings",         m3:327.6,  mpa:"25 MPa/F-2"  },
   { area:"Foundations", item:"Strip foundations",    m3:42.1,   mpa:"25 MPa/F-2"  },
   { area:"Foundations", item:"Columns",              m3:36.1,   mpa:"25 MPa/F-2"  },
-  { area:"Foundations", item:"Interior foundations", m3:128.0,  mpa:"25 MPa/F-2"  },
+  { area:"Foundations", item:"Interior walls",       m3:128.0,  mpa:"25 MPa/F-2"  },
   { area:"Foundations", item:"Slabs",                m3:276.9,  mpa:"25 MPa/N-CF" },
   { area:"P2",          item:"Wall",                 m3:239.6,  mpa:"25 MPa/N-CF" },
   { area:"P2",          item:"Columns",              m3:29.9,   mpa:"35 MPa/N-CF" },
@@ -359,9 +359,9 @@ function migrateConcreteTicketsV17(allTickets) {
     // The crane-base pour is tracked as interior foundations. Versions 17.1
     // and 17.2 incorrectly changed these saved tickets to Slabs; reverse that
     // correction without changing ticket quantities or mix data.
-    if (ticket.area === "Crane Base" && ticket.item !== "Interior foundations") {
+    if (ticket.area === "Crane Base" && ticket.item !== "Pad footings") {
       changed = true;
-      return { ...ticket, item:"Interior foundations", _v17_location_corrected:true };
+      return { ...ticket, item:"Pad footings", _v17_location_corrected:true };
     }
     if (ticket.area === "Mud Slabs" && ticket.item !== "Slabs") {
       changed = true;
@@ -370,6 +370,23 @@ function migrateConcreteTicketsV17(allTickets) {
     return ticket;
   });
   return { tickets, changed };
+}
+
+// v19.5 scope correction: the estimator's 327.60 m³ line is Pad Footings,
+// not a raft, and the 128.00 m³ line is Interior Walls. Existing August 17
+// and August 20 records were saved under the old broad "Interior foundations"
+// label; move only Foundations-area records to Pad footings. Crane Base remains
+// its own area, but its foundation type is also correctly labelled Pad footings.
+function migrateFoundationScopeV195(allTickets) {
+  let changed=false;
+  const tickets=(allTickets||[]).map(ticket=>{
+    if(ticket.area==="Foundations" && (ticket.item==="Interior foundations" || ticket.item==="Raft")){
+      changed=true;
+      return {...ticket,item:"Pad footings",_v195_foundation_scope_corrected:true};
+    }
+    return ticket;
+  });
+  return {tickets,changed};
 }
 
 // A pump slip is the authoritative record of pumped volume and hours. Some
@@ -1703,12 +1720,13 @@ function ConcreteModule({ onBack }) {
         if(saved!==null){
           if(cancelled)return;
           const locationMigration = migrateConcreteTicketsV17(saved?.tickets || []);
-          const pumpMigration = migratePumpSlipAuthority(locationMigration.tickets);
+          const foundationMigration = migrateFoundationScopeV195(locationMigration.tickets);
+          const pumpMigration = migratePumpSlipAuthority(foundationMigration.tickets);
           setTickets(pumpMigration.tickets);
           if(saved?.invoices) setInvoices(saved.invoices);
           if(saved?.tests)    setTests(saved.tests);
           if(saved?.deletedRecords) setDeletedRecords(saved.deletedRecords);
-          if(locationMigration.changed || pumpMigration.changed){
+          if(locationMigration.changed || foundationMigration.changed || pumpMigration.changed){
             const migrationSaved = await storageSet("concrete-data", { ...saved, tickets:pumpMigration.tickets });
             if(!migrationSaved) console.error("concrete ticket migration could not be saved");
           }
@@ -1824,7 +1842,7 @@ CRITICAL FIELD EXTRACTION RULES — read carefully:
 
 4A. location: Treat the printed WORK TYPE as authoritative when it clearly
 names a project location. In particular, "CRANE BASE" means area "Crane Base"
-and item "Interior foundations"; "MUD SLAB" means area "Mud Slabs" and item "Slabs".
+and item "Pad footings"; "MUD SLAB" means area "Mud Slabs" and item "Slabs".
 
 5. pumping: Look for a line item labelled "Pumping", "Pump", or "Pompage" on a delivery ticket AND look for a separate yellow or white "EXTRA WORK ORDERS / HOURLY EQUIPMENT RENTALS" form where TYPE OF EQUIPMENT says Pump. A pumping form is a valid record even though it has no concrete mix design. Extract:
    - pump_volume_m3: the volume pumped in m³ (e.g. 8.00)
