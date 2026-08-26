@@ -8,7 +8,7 @@ const C = {
   yellow: "#EAB308", red: "#EF4444", purple: "#A855F7",
   muted: "#6B7280", text: "#F9FAFB", sub: "#9CA3AF", teal: "#14B8A6",
 };
-const APP_VERSION = "19.9";
+const APP_VERSION = "19.10";
 
 // ─── SUPABASE STORAGE HELPERS ────────────────────────────────────────────────
 // Calls server-side API routes which talk to Supabase.
@@ -2491,13 +2491,6 @@ Screenshot attached: Yes / No`}</pre>
               <div style={{display:"flex",justifyContent:"space-between",marginBottom:10}}><span style={{fontWeight:700}}>Overall Progress</span><span style={{color:C.accent,fontWeight:800,fontFamily:"monospace"}}>{fmt(pct,1)}%</span></div>
               <Bar pct={pct} color={pct>=100?C.green:C.accent}/>
               <div style={{display:"flex",justifyContent:"space-between",marginTop:8,color:C.muted,fontSize:12}}><span>{fmt(codedPoured)} m³ coded to scope</span><span>{fmt(TOTAL_SCOPE_M3,1)} m³ total scope</span></div>
-            </div>
-            <div style={{background:C.accent+"10",border:`1px solid ${C.accent}44`,borderRadius:14,padding:"16px 20px",marginBottom:24,display:"flex",justifyContent:"space-between",alignItems:"center",gap:14,flexWrap:"wrap"}}>
-              <div style={{display:"flex",alignItems:"center",gap:12}}>
-                <div style={{width:38,height:38,borderRadius:10,background:C.accent+"20",display:"grid",placeItems:"center",color:C.accent,fontSize:20,fontWeight:900}}>↗</div>
-                <div><div style={{fontWeight:800,color:C.accent}}>Concrete Forecast & Remaining Works</div><div style={{color:C.muted,fontSize:12,marginTop:3}}>{fmt(remaining,1)} m³ remaining · {fmt(pct,1)}% of live concrete scope poured · tracks scope progress, remaining demand and areas requiring attention</div></div>
-              </div>
-              <button onClick={()=>setTab("remaining")} style={{background:C.accent+"18",color:C.accent,border:`1px solid ${C.accent}55`,borderRadius:8,padding:"8px 13px",fontSize:12,fontWeight:800,cursor:"pointer"}}>View Forecast →</button>
             </div>
             <div style={{display:"flex",gap:14,marginBottom:16,flexWrap:"wrap"}}>
               <div onDragOver={e=>{e.preventDefault();setDrag(true);}} onDragLeave={()=>setDrag(false)} onDrop={e=>{e.preventDefault();setDrag(false);handleTicketFiles(e.dataTransfer.files);}} onClick={()=>fileRef.current.click()} style={{border:`2px dashed ${drag?C.accent:C.border}`,borderRadius:14,padding:"28px 20px",textAlign:"center",cursor:"pointer",flex:1,minWidth:200,background:drag?C.accent+"11":C.card,transition:"all .2s"}}>
