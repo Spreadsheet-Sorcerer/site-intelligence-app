@@ -8,7 +8,7 @@ const C = {
   yellow: "#EAB308", red: "#EF4444", purple: "#A855F7",
   muted: "#6B7280", text: "#F9FAFB", sub: "#9CA3AF", teal: "#14B8A6",
 };
-const APP_VERSION = "19.2";
+const APP_VERSION = "19.3";
 
 // ─── SUPABASE STORAGE HELPERS ────────────────────────────────────────────────
 // Calls server-side API routes which talk to Supabase.
@@ -368,6 +368,51 @@ function migrateConcreteTicketsV17(allTickets) {
       return { ...ticket, item:"Slabs", _v17_location_corrected:true };
     }
     return ticket;
+  });
+  return { tickets, changed };
+}
+
+// A pump slip is the authoritative record of pumped volume and hours. Some
+// older scans also copied the delivered volume onto every concrete docket,
+// which counted the same pour once on the delivery tickets and again on the
+// pump slip. When a standalone pump slip exists for a date, retain its values
+// and remove the duplicated pumping fields from that date's delivery tickets.
+function isStandalonePumpSlip(ticket) {
+  return (parseFloat(ticket?.pump_volume_m3) || 0) > 0 &&
+    !(parseFloat(ticket?.volume_m3) > 0);
+}
+function migratePumpSlipAuthority(allTickets) {
+  const source = allTickets || [];
+  const authoritativeDates = new Set(
+    source.filter(isStandalonePumpSlip).map(ticket=>String(ticket.date||"")).filter(Boolean)
+  );
+  let changed = false;
+  const tickets = source.map(ticket => {
+    const hasDuplicatePumpData = authoritativeDates.has(String(ticket.date||"")) &&
+      (parseFloat(ticket.volume_m3) > 0) &&
+      ((parseFloat(ticket.pump_volume_m3)||0) > 0 ||
+       (parseFloat(ticket.pump_hours_charged)||0) > 0 ||
+       (parseFloat(ticket.pump_cost)||0) > 0);
+    if (!hasDuplicatePumpData) return ticket;
+    changed = true;
+    return {
+      ...ticket,
+      _superseded_pump_data: {
+        pump_volume_m3: ticket.pump_volume_m3 ?? null,
+        pump_cost: ticket.pump_cost ?? null,
+        pump_hours_worked: ticket.pump_hours_worked ?? null,
+        pump_travel_hours: ticket.pump_travel_hours ?? null,
+        pump_hours_charged: ticket.pump_hours_charged ?? null,
+        pump_category: ticket.pump_category ?? null,
+      },
+      pump_volume_m3: null,
+      pump_cost: null,
+      pump_hours_worked: null,
+      pump_travel_hours: null,
+      pump_hours_charged: null,
+      pump_category: null,
+      _pump_replaced_by_slip: true,
+    };
   });
   return { tickets, changed };
 }
@@ -1657,14 +1702,15 @@ function ConcreteModule({ onBack }) {
         const saved=await storageGet("concrete-data");
         if(saved!==null){
           if(cancelled)return;
-          const migrated = migrateConcreteTicketsV17(saved?.tickets || []);
-          setTickets(migrated.tickets);
+          const locationMigration = migrateConcreteTicketsV17(saved?.tickets || []);
+          const pumpMigration = migratePumpSlipAuthority(locationMigration.tickets);
+          setTickets(pumpMigration.tickets);
           if(saved?.invoices) setInvoices(saved.invoices);
           if(saved?.tests)    setTests(saved.tests);
           if(saved?.deletedRecords) setDeletedRecords(saved.deletedRecords);
-          if(migrated.changed){
-            const migrationSaved = await storageSet("concrete-data", { ...saved, tickets:migrated.tickets });
-            if(!migrationSaved) console.error("v17 ticket-location migration could not be saved");
+          if(locationMigration.changed || pumpMigration.changed){
+            const migrationSaved = await storageSet("concrete-data", { ...saved, tickets:pumpMigration.tickets });
+            if(!migrationSaved) console.error("concrete ticket migration could not be saved");
           }
           skipInitialSaveRef.current=true;
           setStorageReady(true);
@@ -2448,7 +2494,11 @@ Screenshot attached: Yes / No`}</pre>
                         // Merge with the freshest shared copy so another user's
                         // recently saved tickets are not overwritten.
                         const ticketsToSave=reviewQueue;
-                        setTickets([...latestTickets,...ticketsToSave]);
+                        // If this batch includes a standalone pump slip, it
+                        // replaces any pump estimate copied onto that date's
+                        // delivery tickets instead of being added to it.
+                        const pumpMigration=migratePumpSlipAuthority([...latestTickets,...ticketsToSave]);
+                        setTickets(pumpMigration.tickets);
                         setReviewQueue([]);
                         if(mpaWarnings.length>0) showToast(`⚠ ${mpaWarnings.length} MPa mismatch${mpaWarnings.length>1?"es":""} detected!`,"err");
                         else showToast(`${reviewQueue.length} ticket${reviewQueue.length>1?"s":""} saved ✓`);
