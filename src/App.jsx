@@ -8,7 +8,7 @@ const C = {
   yellow: "#EAB308", red: "#EF4444", purple: "#A855F7",
   muted: "#6B7280", text: "#F9FAFB", sub: "#9CA3AF", teal: "#14B8A6",
 };
-const APP_VERSION = "19.3";
+const APP_VERSION = "19.4";
 
 // ─── SUPABASE STORAGE HELPERS ────────────────────────────────────────────────
 // Calls server-side API routes which talk to Supabase.
@@ -2081,7 +2081,22 @@ Return ONLY valid JSON, no markdown:
   const totalPoured=tickets.reduce((s,t)=>s+(parseFloat(t.volume_m3)||0),0);
   const totalYd3=tickets.reduce((s,t)=>s+(parseFloat(t.volume_yd3)||0),0);
   const totalPumpM3   = tickets.reduce((s,t) => s + (parseFloat(t.pump_volume_m3)||0), 0);
-  const totalPumpHours = tickets.reduce((s,t) => s + (parseFloat(t.pump_hours_charged)||0), 0);
+  // Invoice hourly rows are authoritative once received. Pump slips fill the
+  // gap for dates that have not yet been invoiced, so hours are never counted
+  // twice and a missing standalone slip does not hide invoiced hours.
+  const invoicePumpHoursData = invoices.map(inv => {
+    const hours = (inv.line_items||[])
+      .filter(line=>/pump/i.test(String(line.description||"")) && /hour|hr\b/i.test(`${line.description||""} ${line.unit||""}`))
+      .reduce((sum,line)=>sum+(parseFloat(line.quantity)||0),0);
+    return { date:String(inv.invoice_date||"").slice(0,10), hours };
+  }).filter(row=>row.hours>0);
+  const invoicedPumpHourDates = new Set(invoicePumpHoursData.map(row=>row.date).filter(Boolean));
+  const invoicePumpHours = invoicePumpHoursData.reduce((sum,row)=>sum+row.hours,0);
+  const uninvoicedSlipHours = tickets.reduce((sum,ticket)=>{
+    const date=String(ticket.date||"").slice(0,10);
+    return sum+(invoicedPumpHourDates.has(date)?0:(parseFloat(ticket.pump_hours_charged)||0));
+  },0);
+  const totalPumpHours = invoicePumpHours + uninvoicedSlipHours;
   // Pump slips usually record volume/hours but not pricing. Pull pumping charges
   // from uploaded invoice line items, while retaining ticket-entered costs only
   // when that ticket is not already represented by a priced invoice.
@@ -2210,6 +2225,26 @@ Return ONLY valid JSON, no markdown:
     const ws2=XLSX.utils.json_to_sheet(scopeProgress.map(r=>({"Area":r.area,"Element":r.item,"Spec MPa":r.mpa||"","Scope (m³)":r.m3,"Poured (m³)":r.poured||"","Remaining (m³)":r.remaining||"","Overage (m³)":r.overage||"","Variance (m³)":+(r.poured-r.m3).toFixed(2),"% Complete":r.m3>0?((r.poured/r.m3)*100).toFixed(1)+"%":"0%"})));
     ws2["!cols"]=[14,22,14,14,14,16,14,14,12].map(w=>({wch:w}));
     XLSX.utils.book_append_sheet(wb,ws2,"Progress by Element");
+    const pumpDates=[...new Set([
+      ...tickets.filter(t=>(parseFloat(t.pump_volume_m3)||0)>0||(parseFloat(t.pump_hours_charged)||0)>0).map(t=>String(t.date||"").slice(0,10)),
+      ...invoicePumpHoursData.map(row=>row.date),
+    ].filter(Boolean))].sort();
+    const pumpRows=pumpDates.map(date=>{
+      const dateTickets=tickets.filter(t=>String(t.date||"").slice(0,10)===date);
+      const pumped=dateTickets.reduce((sum,t)=>sum+(parseFloat(t.pump_volume_m3)||0),0);
+      const invoiceHoursForDate=invoicePumpHoursData.filter(row=>row.date===date).reduce((sum,row)=>sum+row.hours,0);
+      const slipHoursForDate=dateTickets.reduce((sum,t)=>sum+(parseFloat(t.pump_hours_charged)||0),0);
+      return {
+        "Date":toExcelDate(date),
+        "Pumped (m³)":pumped,
+        "Pump Hours Charged":invoiceHoursForDate||slipHoursForDate,
+        "Hours Source":invoiceHoursForDate?"Invoice":"Pump slip",
+      };
+    });
+    pumpRows.push({"Date":"TOTAL","Pumped (m³)":totalPumpM3,"Pump Hours Charged":totalPumpHours,"Hours Source":"Reconciled"});
+    const wsp=XLSX.utils.json_to_sheet(pumpRows,{cellDates:true,dateNF:"yyyy-mm-dd"});
+    wsp["!cols"]=[14,18,20,18].map(w=>({wch:w}));
+    XLSX.utils.book_append_sheet(wb,wsp,"Pumping Summary");
     if(mpaMismatches.length>0){ const wsm=XLSX.utils.json_to_sheet(mpaMismatches.map(t=>({ "Ticket #":t.ticket_number||"","Date":t.date||"","Area":t.area||"","Element":t.item||"","Ticket Mix":t.mix_design||"","Spec MPa":MPA_SPEC[`${t.area}|||${t.item}`]||"","Supplier":t.supplier||"","Volume (m³)":parseFloat(t.volume_m3)||"" }))); wsm["!cols"]=[14,12,14,16,20,16,20,14].map(w=>({wch:w})); XLSX.utils.book_append_sheet(wb,wsm,"⚠ MPa Mismatches"); }
     XLSX.writeFile(wb,`concrete-tracker-${new Date().toISOString().slice(0,10)}.xlsx`);
     showToast("Spreadsheet downloaded ✓");
@@ -2728,7 +2763,24 @@ Screenshot attached: Yes / No`}</pre>
             {PUMP_BUDGET.map(row => {
               const categoryTickets = tickets.filter(t => t.pump_category === row.category);
               const used = categoryTickets.reduce((s,t) => s + (parseFloat(t.pump_volume_m3)||0), 0);
-              const hoursUsed = categoryTickets.reduce((s,t) => s + (parseFloat(t.pump_hours_charged)||0), 0);
+              const ticketHours = categoryTickets.reduce((s,t) => {
+                const date=String(t.date||"").slice(0,10);
+                return s+(invoicedPumpHourDates.has(date)?0:(parseFloat(t.pump_hours_charged)||0));
+              }, 0);
+              const invoiceHours = invoicePumpHoursData.reduce((sum,invoiceRow)=>{
+                // Assign an invoice's hourly charge to the pumping category
+                // with the greatest pumped volume on that date. This correctly
+                // places shared-pour invoices such as July 27 with the primary
+                // pumped scope instead of duplicating hours across categories.
+                const volumeByCategory={};
+                tickets.filter(t=>String(t.date||"").slice(0,10)===invoiceRow.date).forEach(t=>{
+                  if(!t.pump_category)return;
+                  volumeByCategory[t.pump_category]=(volumeByCategory[t.pump_category]||0)+(parseFloat(t.pump_volume_m3)||0);
+                });
+                const primaryCategory=Object.entries(volumeByCategory).sort((a,b)=>b[1]-a[1])[0]?.[0];
+                return sum+(primaryCategory===row.category?invoiceRow.hours:0);
+              },0);
+              const hoursUsed = ticketHours + invoiceHours;
               const pct2 = row.volume_m3 > 0 ? Math.min(100,(used/row.volume_m3)*100) : 0;
               const over = used > row.volume_m3;
               const hoursOver = hoursUsed > row.hours;
