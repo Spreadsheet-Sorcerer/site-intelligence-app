@@ -8,7 +8,7 @@ const C = {
   yellow: "#EAB308", red: "#EF4444", purple: "#A855F7",
   muted: "#6B7280", text: "#F9FAFB", sub: "#9CA3AF", teal: "#14B8A6",
 };
-const APP_VERSION = "19.8";
+const APP_VERSION = "19.9";
 
 // ─── SUPABASE STORAGE HELPERS ────────────────────────────────────────────────
 // Calls server-side API routes which talk to Supabase.
@@ -2226,12 +2226,19 @@ Return ONLY valid JSON, no markdown:
     };
     const ticketRows=tickets.map((t,i)=>{
       const mismatch=checkMpaMismatch(t);
-      const ticketKey=String(t.ticket_number||"").trim().toLowerCase();
+      // Use the exact same reconciliation logic as the Invoices tab so the
+      // exported Ticket Log shows the invoice number on EVERY matched ticket.
+      // This is especially important for Ocean consolidated invoices, where the
+      // invoice may list only a reference ticket even though the full same-day
+      // batch is correctly reconciled to that invoice in the app.
+      const ticketKey=ticketNumberKey(t.ticket_number);
       const matchedInvoice=invoices.find(inv=>{
-        const invoiceTickets=(inv.ticket_numbers||[]).map(n=>String(n).trim().toLowerCase());
-        const directMatch=ticketKey!==""&&invoiceTickets.includes(ticketKey);
-        const savedInvoiceMatch=String(t.invoice_number||"").trim()!==""&&String(t.invoice_number).trim().toLowerCase()===String(inv.invoice_number||"").trim().toLowerCase();
-        return directMatch||savedInvoiceMatch;
+        const match=matchInvoiceToTickets(inv,tickets);
+        return match.ticketsOnInvoice.some(mt=>{
+          if(mt.id!=null&&t.id!=null&&mt.id===t.id) return true;
+          const matchedKey=ticketNumberKey(mt.ticket_number);
+          return ticketKey!==""&&matchedKey===ticketKey;
+        });
       });
       const exportInvoiceNumber=matchedInvoice?.invoice_number||t.invoice_number||"";
       return {"#":i+1,"Date":toExcelDate(t.date),"Ticket #":t.ticket_number||"","Supplier":t.supplier||"","Mix Design (Ticket)":t.mix_design||"","Spec MPa":t.area&&t.item?(MPA_SPEC[`${t.area}|||${t.item}`]||""):"","MPa Status":mismatch?`⚠ MISMATCH (spec: ${mismatch.specMpa})`:t.mix_design?"✓ OK":"—","Area":t.area||"","Element":t.item||"","Volume (m³)":parseFloat(t.volume_m3)||"","Volume (yd³)":parseFloat(t.volume_yd3)||"","Pumped (m³)":parseFloat(t.pump_volume_m3)||"","Pump Hours Charged":parseFloat(t.pump_hours_charged)||"","Invoice #":exportInvoiceNumber,"Driver / Operator":t.driver||"","Truck / Unit #":t.truck_number||"","Notes":t.notes||""};
