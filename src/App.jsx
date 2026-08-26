@@ -2485,12 +2485,12 @@ Screenshot attached: Yes / No`}</pre>
               <Bar pct={pct} color={pct>=100?C.green:C.accent}/>
               <div style={{display:"flex",justifyContent:"space-between",marginTop:8,color:C.muted,fontSize:12}}><span>{fmt(codedPoured)} m³ coded to scope</span><span>{fmt(TOTAL_SCOPE_M3,1)} m³ total scope</span></div>
             </div>
-            <div style={{background:forecastStatus.color+"12",border:`1px solid ${forecastStatus.color}55`,borderRadius:14,padding:"16px 20px",marginBottom:24,display:"flex",justifyContent:"space-between",alignItems:"center",gap:14,flexWrap:"wrap"}}>
+            <div style={{background:C.accent+"10",border:`1px solid ${C.accent}44`,borderRadius:14,padding:"16px 20px",marginBottom:24,display:"flex",justifyContent:"space-between",alignItems:"center",gap:14,flexWrap:"wrap"}}>
               <div style={{display:"flex",alignItems:"center",gap:12}}>
-                <div style={{width:38,height:38,borderRadius:10,background:forecastStatus.color+"22",display:"grid",placeItems:"center",color:forecastStatus.color,fontSize:20,fontWeight:900}}>{forecastStatus.icon}</div>
-                <div><div style={{fontWeight:800,color:forecastStatus.color}}>Financial Forecast: {forecastStatus.label}</div><div style={{color:C.muted,fontSize:12,marginTop:3}}>Projected completion is {Math.abs(forecastVariancePct).toFixed(2)}% {forecastVariance>=0?"above":"below"} the original scope estimate · based on {matchedInvoiceCount} matched invoice{matchedInvoiceCount===1?"":"s"}</div></div>
+                <div style={{width:38,height:38,borderRadius:10,background:C.accent+"20",display:"grid",placeItems:"center",color:C.accent,fontSize:20,fontWeight:900}}>↗</div>
+                <div><div style={{fontWeight:800,color:C.accent}}>Concrete Forecast & Remaining Works</div><div style={{color:C.muted,fontSize:12,marginTop:3}}>{fmt(remaining,1)} m³ remaining · {fmt(pct,1)}% of live concrete scope poured · tracks scope progress, remaining demand and areas requiring attention</div></div>
               </div>
-              <button onClick={()=>setTab("remaining")} style={{background:forecastStatus.color+"18",color:forecastStatus.color,border:`1px solid ${forecastStatus.color}55`,borderRadius:8,padding:"8px 13px",fontSize:12,fontWeight:800,cursor:"pointer"}}>View Forecast →</button>
+              <button onClick={()=>setTab("remaining")} style={{background:C.accent+"18",color:C.accent,border:`1px solid ${C.accent}55`,borderRadius:8,padding:"8px 13px",fontSize:12,fontWeight:800,cursor:"pointer"}}>View Forecast →</button>
             </div>
             <div style={{display:"flex",gap:14,marginBottom:16,flexWrap:"wrap"}}>
               <div onDragOver={e=>{e.preventDefault();setDrag(true);}} onDragLeave={()=>setDrag(false)} onDrop={e=>{e.preventDefault();setDrag(false);handleTicketFiles(e.dataTransfer.files);}} onClick={()=>fileRef.current.click()} style={{border:`2px dashed ${drag?C.accent:C.border}`,borderRadius:14,padding:"28px 20px",textAlign:"center",cursor:"pointer",flex:1,minWidth:200,background:drag?C.accent+"11":C.card,transition:"all .2s"}}>
@@ -2905,32 +2905,49 @@ Screenshot attached: Yes / No`}</pre>
           const areaRows=AREAS.map(area=>{ const lines=scopeProgress.filter(r=>r.area===area); const scope=lines.reduce((s,r)=>s+r.m3,0); const poured=lines.reduce((s,r)=>s+r.poured,0); const hasScope=scope>0; const rem=Math.max(0,scope-poured); const over=Math.max(0,poured-scope); const p=hasScope?(poured/scope)*100:0; const status=over>0.01?"over":hasScope&&rem<=0.01?"complete":poured>0?"inprogress":"notstarted"; const baseRemaining=lines.reduce((s,line)=>s+line.remaining*(oceanBaseRateForMpa(line.mpa)||0),0); const estCost=rem>0?baseRemaining+rem*remainingAllowanceRate:0; const areaMpas=[...new Set(Object.entries(MPA_SPEC).filter(([key])=>key.startsWith(`${area}|||`)).map(([,mpa])=>mpa))]; return{area,scope,poured,rem,over,p,status,estCost,areaMpas,hasScope}; });
           const STATUS_CONFIG={over:{label:"⚠️ Over Scope",color:C.red},complete:{label:"✅ Complete",color:C.green},inprogress:{label:"🟡 In Progress",color:C.yellow},notstarted:{label:"🔴 Not Started",color:C.red}};
           return(<div>
-            <div style={{fontWeight:700,fontSize:18,marginBottom:6}}>Concrete Cost Forecast & Remaining Works</div>
-            <div style={{color:C.muted,fontSize:13,marginBottom:22}}>Ocean quoted rates applied to the app's live {fmt(TOTAL_SCOPE_M3,1)} m³ scope · all figures before HST · no Southwest budget included</div>
+            <div style={{fontWeight:700,fontSize:18,marginBottom:6}}>Concrete Forecast & Remaining Works</div>
+            <div style={{color:C.muted,fontSize:13,marginBottom:22}}>Live scope forecast based on recorded concrete tickets · quantity and progress are shown first so the project status is clear at a glance</div>
             <div style={{display:"grid",gridTemplateColumns:"repeat(auto-fit,minmax(190px,1fr))",gap:12,marginBottom:14}}>
-              <Stat label="Actual Invoiced" value={`$${invoicedBeforeHst.toLocaleString(undefined,{maximumFractionDigits:0})}`} sub={`${invoices.length} invoice${invoices.length===1?"":"s"} · before HST`} color={C.green}/>
-              <Stat label="Estimate to Complete" value={`$${estimateToComplete.toLocaleString(undefined,{maximumFractionDigits:0})}`} sub={`${fmt(remaining,1)} m³ remaining`} color={C.accent}/>
-              <Stat label="Forecast at Completion" value={`$${forecastAtCompletion.toLocaleString(undefined,{maximumFractionDigits:0})}`} sub="actual to date + remaining estimate" color={forecastVariance>0?C.yellow:C.teal}/>
-              <Stat label="Original Scope Estimate" value={`$${originalForecast.toLocaleString(undefined,{maximumFractionDigits:0})}`} sub="Ocean rates + scaled project allowances" color={C.blue}/>
+              <Stat label="Total Concrete Scope" value={`${fmt(TOTAL_SCOPE_M3,1)} m³`} sub="live scope in tracker" color={C.blue}/>
+              <Stat label="Poured to Date" value={`${fmt(codedPoured,1)} m³`} sub={`${fmt(pct,1)}% complete`} color={C.green}/>
+              <Stat label="Remaining Forecast" value={`${fmt(remaining,1)} m³`} sub="still to pour" color={remaining>0?C.yellow:C.green}/>
+              <Stat label="Scope Overage" value={`${fmt(totalOverage,1)} m³`} sub={overageAreas.length?`${overageAreas.length} area${overageAreas.length===1?"":"s"} over scope`:"none recorded"} color={totalOverage>0?C.red:C.teal}/>
             </div>
-            <div style={{background:forecastStatus.color+"12",border:`1px solid ${forecastStatus.color}44`,borderRadius:12,padding:"13px 16px",marginBottom:20,display:"flex",justifyContent:"space-between",gap:12,alignItems:"center",flexWrap:"wrap"}}>
-              <div><div style={{fontWeight:800,color:forecastStatus.color}}>Financial Forecast: {forecastStatus.label}</div><div style={{color:C.muted,fontSize:12,marginTop:3}}>Cost invoiced {fmt(costProgressPct,1)}% · Concrete poured {fmt(pct,1)}% · Allowances used ${actualAllowanceCost.toLocaleString(undefined,{maximumFractionDigits:0})} of ${originalForecastAllowances.toLocaleString(undefined,{maximumFractionDigits:0})}</div></div>
-              <Badge color={forecastStatus.color}>{forecastVariance>=0?"+":"-"}${Math.abs(forecastVariance).toLocaleString(undefined,{maximumFractionDigits:0})} · {Math.abs(forecastVariancePct).toFixed(2)}%</Badge>
+            <div style={{background:C.accent+"10",border:`1px solid ${C.accent}44`,borderRadius:12,padding:"13px 16px",marginBottom:20,display:"flex",justifyContent:"space-between",gap:12,alignItems:"center",flexWrap:"wrap"}}>
+              <div><div style={{fontWeight:800,color:C.accent}}>Project Quantity Forecast</div><div style={{color:C.muted,fontSize:12,marginTop:3}}>{fmt(pct,1)}% poured · {fmt(remaining,1)} m³ remaining · {areaRows.filter(r=>r.status==="inprogress").length} area{areaRows.filter(r=>r.status==="inprogress").length===1?"":"s"} in progress · {areaRows.filter(r=>r.status==="over").length} over scope</div></div>
+              <Badge color={totalOverage>0?C.yellow:C.green}>{totalOverage>0?"Review scope variances":"On scope"}</Badge>
             </div>
             <div style={{display:"flex",gap:12,flexWrap:"wrap",marginBottom:24}}>
               {[{emoji:"⚠️",count:areaRows.filter(r=>r.status==="over").length,label:"Over Scope",color:C.red},{emoji:"✅",count:areaRows.filter(r=>r.status==="complete").length,label:"Complete",color:C.green},{emoji:"🟡",count:areaRows.filter(r=>r.status==="inprogress").length,label:"In Progress",color:C.yellow},{emoji:"🔴",count:areaRows.filter(r=>r.status==="notstarted").length,label:"Not Started",color:C.red},{emoji:"🏗️",count:fmt(remaining,1),label:"m³ left",color:C.accent}].map(({emoji,count,label,color})=>(<div key={label} style={{background:color+"18",border:`1px solid ${color}44`,borderRadius:12,padding:"14px 20px",flex:1,minWidth:110,textAlign:"center"}}><div style={{fontSize:28}}>{emoji}</div><div style={{fontWeight:800,fontSize:22,color}}>{count}</div><div style={{color:C.muted,fontSize:12,marginTop:2}}>{label}</div></div>))}
             </div>
-            <div style={{background:C.card,border:`1px solid ${C.border}`,borderRadius:14,padding:"18px 22px",marginBottom:24}}>
-              <div style={{fontWeight:700,marginBottom:10}}>Forecast basis</div>
-              <div style={{display:"grid",gridTemplateColumns:"repeat(auto-fit,minmax(180px,1fr))",gap:10,fontSize:12}}>
-                {[['20 MPa','$205.90/m³'],['25 MPa','$214.80/m³'],['35 MPa','$247.20/m³'],['Original allowance basis',`$${OCEAN_ALLOWANCE_PER_M3.toFixed(2)}/m³`]].map(([label,value])=><div key={label} style={{background:C.bg,borderRadius:9,padding:"10px 13px"}}><div style={{color:C.muted}}>{label}</div><div style={{fontWeight:800,marginTop:3}}>{value}</div></div>)}
+            <details style={{background:C.card,border:`1px solid ${C.border}`,borderRadius:14,marginBottom:24,overflow:"hidden"}}>
+              <summary style={{padding:"15px 18px",cursor:"pointer",fontWeight:800,listStyle:"none",display:"flex",justifyContent:"space-between",alignItems:"center",gap:10}}>
+                <span>Financial Forecast <span style={{color:C.muted,fontSize:11,fontWeight:600}}>— planning reference</span></span>
+                <span style={{color:C.muted,fontSize:12}}>View cost details ▾</span>
+              </summary>
+              <div style={{padding:"0 18px 18px"}}>
+                <div style={{background:C.yellow+"10",border:`1px solid ${C.yellow}44`,borderRadius:10,padding:"10px 13px",color:C.muted,fontSize:11,marginBottom:14}}>Planning reference only. Based on Ocean quoted rates and actual uploaded invoices, before HST. This is not a Southwest budget, accounting forecast, or approved cost report.</div>
+                <div style={{display:"grid",gridTemplateColumns:"repeat(auto-fit,minmax(190px,1fr))",gap:12,marginBottom:14}}>
+                  <Stat label="Actual Invoiced" value={`$${invoicedBeforeHst.toLocaleString(undefined,{maximumFractionDigits:0})}`} sub={`${invoices.length} invoice${invoices.length===1?"":"s"} · before HST`} color={C.green}/>
+                  <Stat label="Estimated Remaining Cost" value={`$${estimateToComplete.toLocaleString(undefined,{maximumFractionDigits:0})}`} sub={`${fmt(remaining,1)} m³ remaining`} color={C.accent}/>
+                  <Stat label="Projected Concrete Cost" value={`$${forecastAtCompletion.toLocaleString(undefined,{maximumFractionDigits:0})}`} sub="actual to date + planning estimate" color={forecastVariance>0?C.yellow:C.teal}/>
+                  <Stat label="Quoted Scope Benchmark" value={`$${originalForecast.toLocaleString(undefined,{maximumFractionDigits:0})}`} sub="Ocean rates + scaled project allowances" color={C.blue}/>
+                </div>
+                <div style={{background:forecastStatus.color+"12",border:`1px solid ${forecastStatus.color}44`,borderRadius:12,padding:"13px 16px",marginBottom:16,display:"flex",justifyContent:"space-between",gap:12,alignItems:"center",flexWrap:"wrap"}}>
+                  <div><div style={{fontWeight:800,color:forecastStatus.color}}>Cost Planning Indicator: {forecastStatus.label}</div><div style={{color:C.muted,fontSize:12,marginTop:3}}>Cost invoiced {fmt(costProgressPct,1)}% · concrete poured {fmt(pct,1)}% · based on {matchedInvoiceCount} matched invoice{matchedInvoiceCount===1?"":"s"}</div></div>
+                  <Badge color={forecastStatus.color}>{forecastVariance>=0?"+":"-"}${Math.abs(forecastVariance).toLocaleString(undefined,{maximumFractionDigits:0})} · {Math.abs(forecastVariancePct).toFixed(2)}%</Badge>
+                </div>
+                <div style={{fontWeight:700,marginBottom:10}}>Forecast basis</div>
+                <div style={{display:"grid",gridTemplateColumns:"repeat(auto-fit,minmax(180px,1fr))",gap:10,fontSize:12}}>
+                  {[['20 MPa','$205.90/m³'],['25 MPa','$214.80/m³'],['35 MPa','$247.20/m³'],['Original allowance basis',`$${OCEAN_ALLOWANCE_PER_M3.toFixed(2)}/m³`]].map(([label,value])=><div key={label} style={{background:C.bg,borderRadius:9,padding:"10px 13px"}}><div style={{color:C.muted}}>{label}</div><div style={{fontWeight:800,marginTop:3}}>{value}</div></div>)}
+                </div>
+                <div style={{color:C.muted,fontSize:11,marginTop:10}}>Actual invoices replace estimated spending as they are uploaded. Base concrete remaining is priced at Ocean's quoted rates. Actual additives, environmental charges, heating/cooling and pumping draw down the original allowance pool so early high-cost pours are not projected a second time.</div>
               </div>
-              <div style={{color:C.muted,fontSize:11,marginTop:10}}>Actual invoices replace estimated spending as they are uploaded. Base concrete remaining is priced at Ocean's quoted rates. Actual additives, environmental charges, heating/cooling and pumping draw down the original allowance pool so early high-cost pours are not projected a second time.</div>
-            </div>
+            </details>
             {areaRows.map(row=>{ const sc=STATUS_CONFIG[row.status]; return(<div key={row.area} style={{background:C.card,border:`1px solid ${row.status==="over"?C.red+"88":row.status==="complete"?C.green+"44":row.status==="inprogress"?C.yellow+"44":C.border}`,borderRadius:13,padding:"15px 20px",marginBottom:10}}>
               <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:8,flexWrap:"wrap",gap:8}}>
                 <div style={{display:"flex",alignItems:"center",gap:10,flexWrap:"wrap"}}><span style={{fontWeight:800,fontSize:15}}>📍 {row.area}</span><Badge color={sc.color}>{sc.label}</Badge>{row.areaMpas.map(m=><MpaBadge key={m} mpa={m}/>)}</div>
-                <div style={{display:"flex",gap:8,flexWrap:"wrap"}}>{row.hasScope?<Badge color={C.accent}>{fmt(row.p,1)}%</Badge>:<Badge color={C.yellow}>Scope Not Set</Badge>}{row.estCost!==null&&<Badge color={C.green}>${row.estCost.toLocaleString(undefined,{maximumFractionDigits:0})} est.</Badge>}</div>
+                <div style={{display:"flex",gap:8,flexWrap:"wrap"}}>{row.hasScope?<Badge color={C.accent}>{fmt(row.p,1)}%</Badge>:<Badge color={C.yellow}>Scope Not Set</Badge>}</div>
               </div>
               <Bar pct={row.p} color={row.status==="over"?C.red:row.status==="complete"?C.green:row.status==="inprogress"?C.yellow:C.border}/>
               <div style={{display:"flex",gap:20,marginTop:9,fontSize:13,flexWrap:"wrap"}}>
