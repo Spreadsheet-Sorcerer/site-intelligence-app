@@ -8,7 +8,7 @@ const C = {
   yellow: "#EAB308", red: "#EF4444", purple: "#A855F7",
   muted: "#6B7280", text: "#F9FAFB", sub: "#9CA3AF", teal: "#14B8A6",
 };
-const APP_VERSION = "19.10";
+const APP_VERSION = "19.11";
 
 // ─── SUPABASE STORAGE HELPERS ────────────────────────────────────────────────
 // Calls server-side API routes which talk to Supabase.
@@ -2861,47 +2861,84 @@ Screenshot attached: Yes / No`}</pre>
             </div>
             {tests.length===0
               ? <div style={{color:C.muted,textAlign:"center",padding:"60px 0",fontSize:15}}>No test reports uploaded yet<br/><span style={{fontSize:13}}>Upload lab cylinder break reports to track 7/14/28 day results</span></div>
-              : tests.map(test => {
-                const allPass = test.results?.every(r=>r.result==="pass"||r.result==="pending");
-                const anyFail = test.results?.some(r=>r.result==="fail");
-                const latestBreak = test.results?.filter(r=>r.strength_mpa).sort((a,b)=>b.age_days-a.age_days)[0];
-                return (
-                  <div key={test.id} style={{background:C.card,border:`1px solid ${anyFail?C.red+"66":allPass?C.green+"33":C.border}`,borderRadius:14,padding:"18px 22px",marginBottom:14}}>
-                    <div style={{display:"flex",justifyContent:"space-between",alignItems:"flex-start",flexWrap:"wrap",gap:10,marginBottom:14}}>
-                      <div>
-                        <div style={{fontWeight:800,fontSize:15}}>Report #{test.report_number||"—"}</div>
-                        <div style={{color:C.muted,fontSize:12,marginTop:3}}>
-                          Sampled: {test.date_sampled||"—"} · {test.lab_name||"Lab unknown"}
-                          {test.pour_area&&<span style={{marginLeft:10,color:C.sub}}>📍 {test.pour_area}{test.pour_element?` — ${test.pour_element}`:""}</span>}
+              : (() => {
+                  const formatTestDate = value => {
+                    if (!value) return "Date Not Assigned";
+                    const parts = String(value).split("-").map(Number);
+                    const d = parts.length===3 ? new Date(parts[0], parts[1]-1, parts[2]) : new Date(value);
+                    if (Number.isNaN(d.getTime())) return value;
+                    return d.toLocaleDateString("en-CA", { year:"numeric", month:"long", day:"numeric" });
+                  };
+
+                  const groupedTests = Object.values(tests.reduce((groups, test) => {
+                    const date = test.date_sampled || "";
+                    const area = test.pour_area || "Area Not Assigned";
+                    const element = test.pour_element || "";
+                    const key = `${date}|||${area}|||${element}`;
+                    if (!groups[key]) groups[key] = { date, area, element, tests:[] };
+                    groups[key].tests.push(test);
+                    return groups;
+                  }, {})).sort((a,b) => {
+                    const dateCompare = String(b.date||"").localeCompare(String(a.date||""));
+                    if (dateCompare !== 0) return dateCompare;
+                    const areaCompare = a.area.localeCompare(b.area);
+                    if (areaCompare !== 0) return areaCompare;
+                    return a.element.localeCompare(b.element);
+                  });
+
+                  return groupedTests.map(group => (
+                    <div key={`${group.date}|||${group.area}|||${group.element}`} style={{marginBottom:24}}>
+                      <div style={{background:C.card2,border:`1px solid ${C.border}`,borderRadius:12,padding:"12px 16px",marginBottom:10,display:"flex",justifyContent:"space-between",alignItems:"center",gap:10,flexWrap:"wrap"}}>
+                        <div style={{fontWeight:800,fontSize:15,color:C.text}}>
+                          {formatTestDate(group.date)} — {group.area}{group.element?` — ${group.element}`:""}
                         </div>
+                        <Badge color={C.blue}>{group.tests.length} report{group.tests.length!==1?"s":""}</Badge>
                       </div>
-                      <div style={{display:"flex",gap:7,flexWrap:"wrap",alignItems:"center"}}>
-                        {test.mix_design&&<Badge color={C.accent}>{test.mix_design}</Badge>}
-                        {anyFail?<Badge color={C.red}>⚠ FAIL</Badge>:allPass&&test.results?.some(r=>r.result==="pass")?<Badge color={C.green}>✓ PASS</Badge>:<Badge color={C.yellow}>⏳ Pending</Badge>}
-                        {test.file_url&&<button onClick={()=>window.open(test.file_url,"_blank")} style={{background:"transparent",border:`1px solid ${C.blue}44`,color:C.blue,borderRadius:6,padding:"3px 9px",fontSize:12,fontWeight:700,cursor:"pointer"}}>📄 View</button>}
-                        <button onClick={()=>setTests(prev=>prev.filter(x=>x.id!==test.id))} style={{background:"transparent",border:`1px solid ${C.red}44`,color:C.red,borderRadius:6,padding:"3px 9px",fontSize:12,fontWeight:700,cursor:"pointer"}}>✕</button>
-                      </div>
+
+                      {group.tests.map(test => {
+                        const allPass = test.results?.every(r=>r.result==="pass"||r.result==="pending");
+                        const anyFail = test.results?.some(r=>r.result==="fail");
+                        const latestBreak = test.results?.filter(r=>r.strength_mpa).sort((a,b)=>b.age_days-a.age_days)[0];
+                        return (
+                          <div key={test.id} style={{background:C.card,border:`1px solid ${anyFail?C.red+"66":allPass?C.green+"33":C.border}`,borderRadius:14,padding:"18px 22px",marginBottom:10}}>
+                            <div style={{display:"flex",justifyContent:"space-between",alignItems:"flex-start",flexWrap:"wrap",gap:10,marginBottom:14}}>
+                              <div>
+                                <div style={{fontWeight:800,fontSize:15}}>Report #{test.report_number||"—"}</div>
+                                <div style={{color:C.muted,fontSize:12,marginTop:3}}>
+                                  {test.lab_name||"Lab unknown"}
+                                  {test.ticket_number&&<span> · Ticket #{test.ticket_number}</span>}
+                                </div>
+                              </div>
+                              <div style={{display:"flex",gap:7,flexWrap:"wrap",alignItems:"center"}}>
+                                {test.mix_design&&<Badge color={C.accent}>{test.mix_design}</Badge>}
+                                {anyFail?<Badge color={C.red}>⚠ FAIL</Badge>:allPass&&test.results?.some(r=>r.result==="pass")?<Badge color={C.green}>✓ PASS</Badge>:<Badge color={C.yellow}>⏳ Pending</Badge>}
+                                {test.file_url&&<button onClick={()=>window.open(test.file_url,"_blank")} style={{background:"transparent",border:`1px solid ${C.blue}44`,color:C.blue,borderRadius:6,padding:"3px 9px",fontSize:12,fontWeight:700,cursor:"pointer"}}>📄 View</button>}
+                                <button onClick={()=>setTests(prev=>prev.filter(x=>x.id!==test.id))} style={{background:"transparent",border:`1px solid ${C.red}44`,color:C.red,borderRadius:6,padding:"3px 9px",fontSize:12,fontWeight:700,cursor:"pointer"}}>✕</button>
+                              </div>
+                            </div>
+                            <div style={{display:"flex",gap:10,flexWrap:"wrap",marginBottom:12}}>
+                              {test.slump_mm!=null&&<div style={{background:C.bg,borderRadius:8,padding:"8px 14px",fontSize:12}}><span style={{color:C.muted}}>Slump </span><span style={{fontWeight:700}}>{test.slump_mm} mm</span></div>}
+                              {test.air_content_pct!=null&&<div style={{background:C.bg,borderRadius:8,padding:"8px 14px",fontSize:12}}><span style={{color:C.muted}}>Air </span><span style={{fontWeight:700}}>{test.air_content_pct}%</span></div>}
+                              {test.specified_mpa!=null&&<div style={{background:C.bg,borderRadius:8,padding:"8px 14px",fontSize:12}}><span style={{color:C.muted}}>Spec </span><span style={{fontWeight:700}}>{test.specified_mpa} MPa</span></div>}
+                              {latestBreak&&<div style={{background:C.bg,borderRadius:8,padding:"8px 14px",fontSize:12}}><span style={{color:C.muted}}>Latest ({latestBreak.age_days}d) </span><span style={{fontWeight:700,color:latestBreak.result==="fail"?C.red:C.green}}>{latestBreak.strength_mpa} MPa</span></div>}
+                            </div>
+                            <div style={{display:"flex",gap:8,flexWrap:"wrap"}}>
+                              {(test.results||[]).map((r,i)=>(
+                                <div key={i} style={{background:r.result==="fail"?C.red+"22":r.result==="pass"?C.green+"22":C.bg,border:`1px solid ${r.result==="fail"?C.red+"66":r.result==="pass"?C.green+"44":C.border}`,borderRadius:10,padding:"10px 16px",minWidth:90,textAlign:"center"}}>
+                                  <div style={{color:C.muted,fontSize:11,fontWeight:700}}>{r.age_days} DAY</div>
+                                  <div style={{fontWeight:800,fontSize:18,color:r.result==="fail"?C.red:r.result==="pass"?C.green:C.muted,margin:"4px 0"}}>{r.strength_mpa!=null?`${r.strength_mpa}`:"—"}<span style={{fontSize:11,fontWeight:400}}> MPa</span></div>
+                                  <div style={{fontSize:11,color:r.result==="fail"?C.red:r.result==="pass"?C.green:C.muted,fontWeight:700}}>{r.result==="pending"?"PENDING":r.result?.toUpperCase()}</div>
+                                  {r.break_date&&<div style={{fontSize:10,color:C.muted,marginTop:3}}>{r.break_date}</div>}
+                                </div>
+                              ))}
+                            </div>
+                            {test.notes&&<div style={{marginTop:12,color:C.muted,fontSize:12,borderTop:`1px solid ${C.border}`,paddingTop:10}}>📝 {test.notes}</div>}
+                          </div>
+                        );
+                      })}
                     </div>
-                    <div style={{display:"flex",gap:10,flexWrap:"wrap",marginBottom:12}}>
-                      {test.slump_mm!=null&&<div style={{background:C.bg,borderRadius:8,padding:"8px 14px",fontSize:12}}><span style={{color:C.muted}}>Slump </span><span style={{fontWeight:700}}>{test.slump_mm} mm</span></div>}
-                      {test.air_content_pct!=null&&<div style={{background:C.bg,borderRadius:8,padding:"8px 14px",fontSize:12}}><span style={{color:C.muted}}>Air </span><span style={{fontWeight:700}}>{test.air_content_pct}%</span></div>}
-                      {test.specified_mpa!=null&&<div style={{background:C.bg,borderRadius:8,padding:"8px 14px",fontSize:12}}><span style={{color:C.muted}}>Spec </span><span style={{fontWeight:700}}>{test.specified_mpa} MPa</span></div>}
-                      {latestBreak&&<div style={{background:C.bg,borderRadius:8,padding:"8px 14px",fontSize:12}}><span style={{color:C.muted}}>Latest ({latestBreak.age_days}d) </span><span style={{fontWeight:700,color:latestBreak.result==="fail"?C.red:C.green}}>{latestBreak.strength_mpa} MPa</span></div>}
-                    </div>
-                    <div style={{display:"flex",gap:8,flexWrap:"wrap"}}>
-                      {(test.results||[]).map((r,i)=>(
-                        <div key={i} style={{background:r.result==="fail"?C.red+"22":r.result==="pass"?C.green+"22":C.bg,border:`1px solid ${r.result==="fail"?C.red+"66":r.result==="pass"?C.green+"44":C.border}`,borderRadius:10,padding:"10px 16px",minWidth:90,textAlign:"center"}}>
-                          <div style={{color:C.muted,fontSize:11,fontWeight:700}}>{r.age_days} DAY</div>
-                          <div style={{fontWeight:800,fontSize:18,color:r.result==="fail"?C.red:r.result==="pass"?C.green:C.muted,margin:"4px 0"}}>{r.strength_mpa!=null?`${r.strength_mpa}`:"—"}<span style={{fontSize:11,fontWeight:400}}> MPa</span></div>
-                          <div style={{fontSize:11,color:r.result==="fail"?C.red:r.result==="pass"?C.green:C.muted,fontWeight:700}}>{r.result==="pending"?"PENDING":r.result?.toUpperCase()}</div>
-                          {r.break_date&&<div style={{fontSize:10,color:C.muted,marginTop:3}}>{r.break_date}</div>}
-                        </div>
-                      ))}
-                    </div>
-                    {test.notes&&<div style={{marginTop:12,color:C.muted,fontSize:12,borderTop:`1px solid ${C.border}`,paddingTop:10}}>📝 {test.notes}</div>}
-                  </div>
-                );
-              })
+                  ));
+                })()
             }
           </div>
         )}
