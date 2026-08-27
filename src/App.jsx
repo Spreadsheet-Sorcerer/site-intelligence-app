@@ -8,7 +8,7 @@ const C = {
   yellow: "#EAB308", red: "#EF4444", purple: "#A855F7",
   muted: "#6B7280", text: "#F9FAFB", sub: "#9CA3AF", teal: "#14B8A6",
 };
-const APP_VERSION = "19.11";
+const APP_VERSION = "19.12";
 
 // ─── SUPABASE STORAGE HELPERS ────────────────────────────────────────────────
 // Calls server-side API routes which talk to Supabase.
@@ -1701,6 +1701,7 @@ function ConcreteModule({ onBack }) {
   const [manual, setManual] = useState({ date:"",ticket_number:"",supplier:"",mix_design:"",volume_m3:"",volume_yd3:"",area:"",item:"",invoice_number:"",notes:"" });
   const [reviewQueue, setReviewQueue] = useState([]); // tickets pending area/element confirmation
   const [tests, setTests] = useState([]);
+  const [testSearch, setTestSearch] = useState("");
   const [storageReady, setStorageReady] = useState(false);
   const [saveStatus, setSaveStatus] = useState("loading");
   const [ticketSearch, setTicketSearch] = useState("");
@@ -2859,6 +2860,19 @@ Screenshot attached: Yes / No`}</pre>
                 <div style={{color:C.muted,fontSize:11}}>PDF or photo · AI extracts results</div>
               </div>
             </div>
+            {tests.length>0&&<div style={{marginBottom:18}}>
+              <div style={{position:"relative",maxWidth:520}}>
+                <span style={{position:"absolute",left:13,top:"50%",transform:"translateY(-50%)",color:C.muted,fontSize:14}}>⌕</span>
+                <input
+                  type="text"
+                  value={testSearch}
+                  onChange={e=>setTestSearch(e.target.value)}
+                  placeholder="Search report #, date, area, element, lab, ticket or mix…"
+                  style={{width:"100%",boxSizing:"border-box",background:C.card,border:`1px solid ${C.border}`,borderRadius:10,padding:"11px 38px 11px 38px",color:C.text,fontSize:13,outline:"none"}}
+                />
+                {testSearch&&<button onClick={()=>setTestSearch("")} title="Clear search" style={{position:"absolute",right:9,top:"50%",transform:"translateY(-50%)",background:"transparent",border:"none",color:C.muted,fontSize:18,cursor:"pointer",padding:4}}>×</button>}
+              </div>
+            </div>}
             {tests.length===0
               ? <div style={{color:C.muted,textAlign:"center",padding:"60px 0",fontSize:15}}>No test reports uploaded yet<br/><span style={{fontSize:13}}>Upload lab cylinder break reports to track 7/14/28 day results</span></div>
               : (() => {
@@ -2870,7 +2884,23 @@ Screenshot attached: Yes / No`}</pre>
                     return d.toLocaleDateString("en-CA", { year:"numeric", month:"long", day:"numeric" });
                   };
 
-                  const groupedTests = Object.values(tests.reduce((groups, test) => {
+                  const search = testSearch.trim().toLowerCase();
+                  const visibleTests = !search ? tests : tests.filter(test => {
+                    const haystack = [
+                      test.report_number, test.date_sampled, test.date_cast, test.pour_area, test.pour_element,
+                      test.lab_name, test.ticket_number, test.mix_design, test.supplier, test.technician,
+                      test.slump_mm, test.air_content_pct, test.specified_mpa, test.notes
+                    ].filter(v=>v!=null).join(" ").toLowerCase();
+                    return haystack.includes(search);
+                  });
+
+                  if (visibleTests.length===0) return (
+                    <div style={{color:C.muted,textAlign:"center",padding:"46px 0",fontSize:14}}>
+                      No concrete test reports match “{testSearch}”.
+                    </div>
+                  );
+
+                  const groupedTests = Object.values(visibleTests.reduce((groups, test) => {
                     const date = test.date_sampled || "";
                     const area = test.pour_area || "Area Not Assigned";
                     const element = test.pour_element || "";
