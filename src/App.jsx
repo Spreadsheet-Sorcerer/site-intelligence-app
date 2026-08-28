@@ -8,7 +8,7 @@ const C = {
   yellow: "#EAB308", red: "#EF4444", purple: "#A855F7",
   muted: "#6B7280", text: "#F9FAFB", sub: "#9CA3AF", teal: "#14B8A6",
 };
-const APP_VERSION = "19.12";
+const APP_VERSION = "19.14";
 
 // ─── SUPABASE STORAGE HELPERS ────────────────────────────────────────────────
 // Calls server-side API routes which talk to Supabase.
@@ -155,22 +155,22 @@ const SCOPE = [
   { area:"Foundations", item:"Wall",                 m3:287.3,  mpa:"25 MPa/F-2"  },
   { area:"Foundations", item:"Pad footings",         m3:327.6,  mpa:"25 MPa/F-2"  },
   { area:"Foundations", item:"Strip foundations",    m3:42.1,   mpa:"25 MPa/F-2"  },
-  { area:"Foundations", item:"Columns",              m3:36.1,   mpa:"25 MPa/F-2"  },
+  { area:"Foundations", item:"Columns",              m3:36.1,   mpa:"40 MPa/N-CF" },
   { area:"Foundations", item:"Interior walls",       m3:128.0,  mpa:"25 MPa/F-2"  },
   { area:"Foundations", item:"Slabs",                m3:276.9,  mpa:"25 MPa/N-CF" },
   { area:"P2",          item:"Wall",                 m3:239.6,  mpa:"25 MPa/N-CF" },
-  { area:"P2",          item:"Columns",              m3:29.9,   mpa:"35 MPa/N-CF" },
+  { area:"P2",          item:"Columns",              m3:29.9,   mpa:"40 MPa/N-CF" },
   { area:"P2",          item:"Slabs",                m3:495.5,  mpa:"25 MPa/N-CF" },
   { area:"P1",          item:"Wall",                 m3:290.2,  mpa:"35 MPa/N-CF" },
-  { area:"P1",          item:"Columns",              m3:38.9,   mpa:"35 MPa/N-CF" },
+  { area:"P1",          item:"Columns",              m3:38.9,   mpa:"40 MPa/N-CF" },
   { area:"P1",          item:"Slabs",                m3:534.6,  mpa:"35 MPa/N-CF" },
   { area:"P1",          item:"Curbs",                m3:12.1,   mpa:"35 MPa/N-CF"  },
   { area:"Level 1",     item:"Wall",                 m3:51.5,   mpa:"35 MPa/N-CF" },
-  { area:"Level 1",     item:"Columns",              m3:47.5,   mpa:"35 MPa/N-CF" },
+  { area:"Level 1",     item:"Columns",              m3:47.5,   mpa:"40 MPa/N-CF" },
   { area:"Level 1",     item:"Slabs",                m3:590.7,  mpa:"35 MPa/N-CF" },
   { area:"Level 1",     item:"Curbs",                m3:2.1,    mpa:"35 MPa/N-CF"  },
   { area:"2nd",         item:"Wall",                 m3:43.2,   mpa:"35 MPa/N-CF" },
-  { area:"2nd",         item:"Columns",              m3:36.9,   mpa:"35 MPa/N-CF" },
+  { area:"2nd",         item:"Columns",              m3:36.9,   mpa:"40 MPa/N-CF" },
   { area:"2nd",         item:"Slabs",                m3:390.7,  mpa:"35 MPa/N-CF" },
   { area:"3rd",         item:"Wall",                 m3:48.7,   mpa:"35 MPa/N-CF" },
   { area:"3rd",         item:"Columns",              m3:41.9,   mpa:"35 MPa/N-CF" },
@@ -240,7 +240,10 @@ const TOTAL_SCOPE_M3 = SCOPE.reduce((s,r) => s + r.m3, 0);
 // the estimator's admixture/miscellaneous and pumping total, scaled from the
 // estimate's 9,800.93 m³ pricing quantity to the app's live concrete scope.
 // No Southwest budget or internal allowance is stored or displayed here.
-const OCEAN_BASE_RATES = { 20:205.90, 25:214.80, 35:247.20 };
+// Ocean's quote does not contain a separate 40 MPa row. Keep the existing
+// planning dollars intact by using the quoted 35 MPa rate as a clearly labelled
+// proxy until a 40 MPa unit rate is supplied; quantities remain classified at 40.
+const OCEAN_BASE_RATES = { 20:205.90, 25:214.80, 35:247.20, 40:247.20 };
 const OCEAN_ESTIMATE_REFERENCE_M3 = 9800.93;
 const OCEAN_ESTIMATE_ADDITIVES = 346900;
 const OCEAN_ESTIMATE_PUMPING = 133577;
@@ -291,15 +294,18 @@ const M3_TO_YD3 = 1.30795;
 // under the request-body limit.
 const MAX_API_FILE_BYTES = 3 * 1024 * 1024;
 const AREAS = [...new Set(SCOPE.map(r => r.area))];
-// All project shear walls are free-standing and specified at 35 MPa. Walls
-// that are cast integrally with the foundation wall remain coded as "Wall"
-// and keep the area's existing wall specification (25 MPa where applicable).
+// Free-standing shear walls are specified at 35 MPa. Walls that are cast
+// integrally with the foundation wall remain coded as "Wall" and keep the
+// area's existing wall specification (25 MPa where applicable).
 const SHEAR_WALL_ITEM = "Shear Wall";
+const INTEGRAL_COLUMN_ITEM = "Column - Integral with Foundation Wall";
 const SHEAR_WALL_AREAS = [...new Set(SCOPE.filter(r => r.item === "Wall").map(r => r.area))];
-const ITEMS = [...new Set([...SCOPE.map(r => r.item).filter(Boolean), SHEAR_WALL_ITEM])];
+const INTEGRAL_COLUMN_AREAS = ["Foundations", "P2", "P1", "Level 1"];
+const ITEMS = [...new Set([...SCOPE.map(r => r.item).filter(Boolean), SHEAR_WALL_ITEM, INTEGRAL_COLUMN_ITEM])];
 const MPA_SPEC = {};
 SCOPE.forEach(r => { if (r.area && r.item) MPA_SPEC[`${r.area}|||${r.item}`] = r.mpa; });
 SHEAR_WALL_AREAS.forEach(area => { MPA_SPEC[`${area}|||${SHEAR_WALL_ITEM}`] = "35 MPa/N-CF"; });
+INTEGRAL_COLUMN_AREAS.forEach(area => { MPA_SPEC[`${area}|||${INTEGRAL_COLUMN_ITEM}`] = "25 MPa/F-2"; });
 
 function parseMpaNum(str) {
   if (!str) return null;
@@ -2139,10 +2145,9 @@ Return ONLY valid JSON, no markdown:
   const mpaMismatches=tickets.filter(t=>checkMpaMismatch(t));
   const pouredMap={};
   tickets.forEach(t=>{
-    // Shear walls retain their own 35 MPa coding, but their volume rolls into
-    // the existing Wall scope allowance so the new label does not create a
-    // false overrun or leave poured concrete out of progress totals.
-    const scopeItem=t.item===SHEAR_WALL_ITEM?"Wall":(t.item||"");
+    // Special drawing-based labels retain their own MPa validation while their
+    // volume rolls into the corresponding base scope allowance.
+    const scopeItem=t.item===SHEAR_WALL_ITEM?"Wall":t.item===INTEGRAL_COLUMN_ITEM?"Columns":(t.item||"");
     const key=`${t.area||"Unknown"}|||${scopeItem}`;
     pouredMap[key]=(pouredMap[key]||0)+(parseFloat(t.volume_m3)||0);
   });
@@ -3011,7 +3016,7 @@ Screenshot attached: Yes / No`}</pre>
                 </div>
                 <div style={{fontWeight:700,marginBottom:10}}>Forecast basis</div>
                 <div style={{display:"grid",gridTemplateColumns:"repeat(auto-fit,minmax(180px,1fr))",gap:10,fontSize:12}}>
-                  {[['20 MPa','$205.90/m³'],['25 MPa','$214.80/m³'],['35 MPa','$247.20/m³'],['Original allowance basis',`$${OCEAN_ALLOWANCE_PER_M3.toFixed(2)}/m³`]].map(([label,value])=><div key={label} style={{background:C.bg,borderRadius:9,padding:"10px 13px"}}><div style={{color:C.muted}}>{label}</div><div style={{fontWeight:800,marginTop:3}}>{value}</div></div>)}
+                  {[['20 MPa','$205.90/m³'],['25 MPa','$214.80/m³'],['35 MPa','$247.20/m³'],['40 MPa','Using $247.20/m³ proxy'],['Original allowance basis',`$${OCEAN_ALLOWANCE_PER_M3.toFixed(2)}/m³`]].map(([label,value])=><div key={label} style={{background:C.bg,borderRadius:9,padding:"10px 13px"}}><div style={{color:C.muted}}>{label}</div><div style={{fontWeight:800,marginTop:3}}>{value}</div></div>)}
                 </div>
                 <div style={{color:C.muted,fontSize:11,marginTop:10}}>Actual invoices replace estimated spending as they are uploaded. Base concrete remaining is priced at Ocean's quoted rates. Actual additives, environmental charges, heating/cooling and pumping draw down the original allowance pool so early high-cost pours are not projected a second time.</div>
               </div>
