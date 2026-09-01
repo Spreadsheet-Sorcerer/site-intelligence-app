@@ -8,7 +8,7 @@ const C = {
   yellow: "#EAB308", red: "#EF4444", purple: "#A855F7",
   muted: "#6B7280", text: "#F9FAFB", sub: "#9CA3AF", teal: "#14B8A6",
 };
-const APP_VERSION = "19.14";
+const APP_VERSION = "19.15";
 
 // ─── SUPABASE STORAGE HELPERS ────────────────────────────────────────────────
 // Calls server-side API routes which talk to Supabase.
@@ -1999,23 +1999,24 @@ Extract ALL of the following:
 3. date_cast: date cylinders were cast (YYYY-MM-DD)
 4. pour_area: which project area this test relates to — match to one of: ${AREAS.join(", ")} (or null if unclear)
 5. pour_element: element type e.g. "Slab", "Wall", "Column" (or null)
-6. mix_design: concrete mix or MPa strength e.g. "35 MPa" or product code
-7. supplier: concrete supplier name
-8. ticket_number: delivery ticket number if shown
-9. slump_mm: slump value in mm (number only)
-10. air_content_pct: air content percentage (number only)
-11. results: array of break results, each with:
+6. test_location: copy the complete value printed beside "Location in structure" exactly as written (for example "Staircase B GL 7-8 and D-E"). Do not shorten it to only the element type. Return null only if the report has no location in structure.
+7. mix_design: concrete mix or MPa strength e.g. "35 MPa" or product code
+8. supplier: concrete supplier name
+9. ticket_number: delivery ticket number if shown
+10. slump_mm: slump value in mm (number only)
+11. air_content_pct: air content percentage (number only)
+12. results: array of break results, each with:
     - age_days: number (7, 14, 28, 56 etc)
     - strength_mpa: compressive strength in MPa (number)
     - break_date: date of break test (YYYY-MM-DD or null)
     - result: "pass" if meets spec, "fail" if below spec, "pending" if not yet tested
-12. specified_mpa: the specified design strength in MPa (number)
-13. lab_name: testing laboratory name
-14. technician: technician name if shown
-15. notes: any other relevant notes
+13. specified_mpa: the specified design strength in MPa (number)
+14. lab_name: testing laboratory name
+15. technician: technician name if shown
+16. notes: any other relevant notes
 
 Return ONLY valid JSON, no markdown:
-{"report_number":"string","date_sampled":"YYYY-MM-DD","date_cast":"YYYY-MM-DD","pour_area":"area or null","pour_element":"element or null","mix_design":"string","supplier":"string or null","ticket_number":"string or null","slump_mm":number or null,"air_content_pct":number or null,"specified_mpa":number or null,"lab_name":"string or null","technician":"string or null","results":[{"age_days":number,"strength_mpa":number or null,"break_date":"YYYY-MM-DD or null","result":"pass|fail|pending"}],"notes":"string or null"}`;
+{"report_number":"string","date_sampled":"YYYY-MM-DD","date_cast":"YYYY-MM-DD","pour_area":"area or null","pour_element":"element or null","test_location":"exact Location in structure text or null","mix_design":"string","supplier":"string or null","ticket_number":"string or null","slump_mm":number or null,"air_content_pct":number or null,"specified_mpa":number or null,"lab_name":"string or null","technician":"string or null","results":[{"age_days":number,"strength_mpa":number or null,"break_date":"YYYY-MM-DD or null","result":"pass|fail|pending"}],"notes":"string or null"}`;
     const res = await fetch("/api/claude", { method:"POST", headers:{"Content-Type":"application/json"}, body:JSON.stringify({ model:"claude-sonnet-4-6", max_tokens:2000, messages:[{ role:"user", content:[block, { type:"text", text:prompt }] }] }) });
     const data = await res.json();
     if (data.error) throw new Error("API error: " + (data.error.message || JSON.stringify(data.error)));
@@ -2027,6 +2028,7 @@ Return ONLY valid JSON, no markdown:
   async function handleTestFiles(files) {
     if (!files?.length) return;
     setLoading(true);
+    let added = 0;
     for (const file of Array.from(files)) {
       setLoadMsg(`Reading test report "${file.name}"…`);
       try {
@@ -2034,13 +2036,24 @@ Return ONLY valid JSON, no markdown:
         setLoadMsg(`Saving "${file.name}" to storage…`);
         const fileUrl = await uploadFile(file, "tests");
         setTests(prev => [{ ...extracted, file_url: fileUrl }, ...prev]);
-        showToast(`Test report ${extracted.report_number || file.name} added ✓`);
+        added += 1;
       } catch(e) {
         showToast(`Failed to read ${file.name}: ${e.message}`, "err");
       }
     }
     setLoading(false);
     setLoadMsg("");
+    if (added) showToast(`${added} test report${added!==1?"s":""} uploaded ✓`);
+  }
+
+  function editTestLocation(test) {
+    const current = test.test_location || [test.pour_area, test.pour_element].filter(Boolean).join(" — ");
+    const next = window.prompt("Test location / title", current);
+    if (next === null) return;
+    const cleaned = next.trim();
+    if (!cleaned) { showToast("Enter a test location before saving.", "err"); return; }
+    setTests(prev => prev.map(item => item.id===test.id ? { ...item, test_location: cleaned } : item));
+    showToast("Test location updated ✓");
   }
 
   async function handleTicketFiles(files) {
@@ -2892,7 +2905,7 @@ Screenshot attached: Yes / No`}</pre>
                   const search = testSearch.trim().toLowerCase();
                   const visibleTests = !search ? tests : tests.filter(test => {
                     const haystack = [
-                      test.report_number, test.date_sampled, test.date_cast, test.pour_area, test.pour_element,
+                      test.report_number, test.date_sampled, test.date_cast, test.pour_area, test.pour_element, test.test_location,
                       test.lab_name, test.ticket_number, test.mix_design, test.supplier, test.technician,
                       test.slump_mm, test.air_content_pct, test.specified_mpa, test.notes
                     ].filter(v=>v!=null).join(" ").toLowerCase();
@@ -2907,8 +2920,8 @@ Screenshot attached: Yes / No`}</pre>
 
                   const groupedTests = Object.values(visibleTests.reduce((groups, test) => {
                     const date = test.date_sampled || "";
-                    const area = test.pour_area || "Area Not Assigned";
-                    const element = test.pour_element || "";
+                    const area = test.test_location || test.pour_area || "Location Not Assigned";
+                    const element = test.test_location ? "" : (test.pour_element || "");
                     const key = `${date}|||${area}|||${element}`;
                     if (!groups[key]) groups[key] = { date, area, element, tests:[] };
                     groups[key].tests.push(test);
@@ -2943,11 +2956,13 @@ Screenshot attached: Yes / No`}</pre>
                                   {test.lab_name||"Lab unknown"}
                                   {test.ticket_number&&<span> · Ticket #{test.ticket_number}</span>}
                                 </div>
+                                <div style={{color:C.sub,fontSize:12,marginTop:4}}>📍 {test.test_location || [test.pour_area,test.pour_element].filter(Boolean).join(" — ") || "Location not assigned"}</div>
                               </div>
                               <div style={{display:"flex",gap:7,flexWrap:"wrap",alignItems:"center"}}>
                                 {test.mix_design&&<Badge color={C.accent}>{test.mix_design}</Badge>}
                                 {anyFail?<Badge color={C.red}>⚠ FAIL</Badge>:allPass&&test.results?.some(r=>r.result==="pass")?<Badge color={C.green}>✓ PASS</Badge>:<Badge color={C.yellow}>⏳ Pending</Badge>}
                                 {test.file_url&&<button onClick={()=>window.open(test.file_url,"_blank")} style={{background:"transparent",border:`1px solid ${C.blue}44`,color:C.blue,borderRadius:6,padding:"3px 9px",fontSize:12,fontWeight:700,cursor:"pointer"}}>📄 View</button>}
+                                <button onClick={()=>editTestLocation(test)} title="Edit the descriptive location only; test results remain locked" style={{background:"transparent",border:`1px solid ${C.accent}44`,color:C.accent,borderRadius:6,padding:"3px 9px",fontSize:12,fontWeight:700,cursor:"pointer"}}>✎ Edit Label</button>
                                 <button onClick={()=>setTests(prev=>prev.filter(x=>x.id!==test.id))} style={{background:"transparent",border:`1px solid ${C.red}44`,color:C.red,borderRadius:6,padding:"3px 9px",fontSize:12,fontWeight:700,cursor:"pointer"}}>✕</button>
                               </div>
                             </div>
