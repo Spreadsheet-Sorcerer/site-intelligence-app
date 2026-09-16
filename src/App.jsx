@@ -345,9 +345,11 @@ function invoiceChargeAudit(invoice,matchedTickets) {
     const tolerance=Math.max(0.05,Math.abs(tkt.quantity)*0.005);
     const invoiceRate=inv.unitPrices.length?inv.unitPrices[0]:null;
     const ticketRate=tkt.unitPrices.length?tkt.unitPrices[0]:null;
-    const quantityMismatch=inv.hasQuantity&&tkt.hasQuantity&&Math.abs(difference)>tolerance;
-    const rateMismatch=invoiceRate!=null&&ticketRate!=null&&Math.abs(invoiceRate-ticketRate)>0.01;
-    const amountMismatch=inv.hasAmount&&tkt.hasAmount&&Math.abs(inv.amount-tkt.amount)>0.02;
+    // This is an overbilling audit. Lower invoice quantities, rates or amounts
+    // are intentionally not flagged.
+    const quantityMismatch=inv.hasQuantity&&tkt.hasQuantity&&difference>tolerance;
+    const rateMismatch=invoiceRate!=null&&ticketRate!=null&&(invoiceRate-ticketRate)>0.01;
+    const amountMismatch=inv.hasAmount&&tkt.hasAmount&&(inv.amount-tkt.amount)>0.02;
     const unsupportedInvoiceCharge=inv.lines.length>0&&tkt.lines.length===0;
     return {key,label:inv.label,invoiceQuantity:inv.quantity,ticketQuantity:tkt.quantity,difference,unit:inv.unit||tkt.unit||"",unitPrice:invoiceRate,invoiceRate,ticketRate,invoiceAmount:inv.amount,ticketAmount:tkt.amount,hasInvoiceQuantity:inv.hasQuantity,hasTicketQuantity:tkt.hasQuantity,hasTicketData:tkt.lines.length>0,unsupportedInvoiceCharge,quantityMismatch,rateMismatch,amountMismatch,mismatch:quantityMismatch||rateMismatch||amountMismatch,needsSupport:unsupportedInvoiceCharge};
   });
@@ -356,23 +358,26 @@ function invoiceChargeAudit(invoice,matchedTickets) {
 
 function invoiceCalculatedChecks(invoice) {
   const lines=invoice?.line_items||[];
-  const checks=[];
-  lines.forEach(line=>{
+  const feeLines=lines.filter(line=>/environmental recovery|recovery fee/i.test(String(line?.description||"")));
+  if(!feeLines.length) return [];
+  const rateCandidates=feeLines.map(line=>{
     const description=String(line?.description||"");
-    if(!/environmental recovery|recovery fee/i.test(description)) return;
     const pctMatch=description.match(/(\d+(?:\.\d+)?)\s*%/);
-    const rate=pctMatch?parseFloat(pctMatch[1])/100:(parseFloat(line?.unit_price)>0&&parseFloat(line.unit_price)<1?parseFloat(line.unit_price):null);
-    const billed=parseFloat(line?.amount);
-    if(rate==null||!Number.isFinite(billed)) return;
-    const base=lines.reduce((sum,other)=>{
-      const text=String(other?.description||"").toLowerCase();
-      if(other===line||/hst|gst|tax|invoice total|total sale|subtotal|amount due/.test(text)) return sum;
-      return sum+(parseFloat(other?.amount)||0);
-    },0);
-    const expected=base*rate;
-    checks.push({label:description||"Environmental recovery fee",billed,expected,difference:billed-expected,mismatch:Math.abs(billed-expected)>0.02});
-  });
-  return checks;
+    if(pctMatch) return parseFloat(pctMatch[1])/100;
+    const unitRate=parseFloat(line?.unit_price);
+    return unitRate>0&&unitRate<1?unitRate:null;
+  }).filter(rate=>rate!=null);
+  if(!rateCandidates.length) return [];
+  const rate=rateCandidates[0];
+  const billed=feeLines.reduce((sum,line)=>sum+(parseFloat(line?.amount)||0),0);
+  const base=lines.reduce((sum,line)=>{
+    const text=String(line?.description||"").toLowerCase();
+    if(/environmental recovery|recovery fee|hst|gst|tax|invoice total|total sale|subtotal|amount due/.test(text)) return sum;
+    return sum+(parseFloat(line?.amount)||0);
+  },0);
+  const expected=base*rate;
+  const difference=billed-expected;
+  return [{label:`Environmental Recovery Fees (${(rate*100).toFixed(2)}% total)`,billed,expected,difference,mismatch:difference>0.02}];
 }
 
 function invoiceContractRateChecks(invoice,contractRates=OCEAN_CONTRACT_BASE_RATES) {
@@ -388,12 +393,12 @@ function invoiceContractRateChecks(invoice,contractRates=OCEAN_CONTRACT_BASE_RAT
     const amount=parseFloat(line?.amount);
     const billedRate=Number.isFinite(printedRate)?printedRate:(Number.isFinite(quantity)&&quantity!==0&&Number.isFinite(amount)?amount/quantity:null);
     if(contractRate==null){
-      return [{label:`${strength} MPa concrete`,strength,contractRate:null,billedRate,quantity,amount,expectedAmount:null,difference:null,missingContractRate:true,mismatch:true}];
+      return [{label:`${strength} MPa concrete`,strength,contractRate:null,billedRate,quantity,amount,expectedAmount:null,difference:null,missingContractRate:true,mismatch:false}];
     }
     const expectedAmount=Number.isFinite(quantity)?quantity*contractRate:null;
     const difference=Number.isFinite(amount)&&expectedAmount!=null?amount-expectedAmount:null;
-    const rateMismatch=billedRate!=null&&Math.abs(billedRate-contractRate)>0.01;
-    const amountMismatch=difference!=null&&Math.abs(difference)>0.02;
+    const rateMismatch=billedRate!=null&&(billedRate-contractRate)>0.01;
+    const amountMismatch=difference!=null&&difference>0.02;
     return [{label:`${strength} MPa concrete`,strength,contractRate,billedRate,quantity,amount,expectedAmount,difference,missingContractRate:false,rateMismatch,amountMismatch,mismatch:rateMismatch||amountMismatch}];
   });
 }
@@ -2096,7 +2101,8 @@ Return ONLY valid JSON (no markdown):
     const unmatched=usesConsolidatedBatch?[]:invoiceTicketNums.filter(n=>!allTickets.some(t=>String(t.ticket_number||"").trim().toLowerCase()===n));
     const ticketVolume=ticketsOnInvoice.reduce((s,t)=>s+(parseFloat(t.volume_m3)||0),0);
     const volumeMatch=invoiceVolume>0?Math.abs(ticketVolume-invoiceVolume)<0.5:null;
-    return {matched,unmatched,ticketsOnInvoice,ticketVolume,invoiceVolume,volumeMatch,usesConsolidatedBatch};
+    const volumeOverbilled=invoiceVolume>0&&(invoiceVolume-ticketVolume)>0.5;
+    return {matched,unmatched,ticketsOnInvoice,ticketVolume,invoiceVolume,volumeMatch,volumeOverbilled,usesConsolidatedBatch};
   }
 
   // ── Upload file to Supabase Storage and return public URL ──
@@ -2379,7 +2385,7 @@ Return ONLY valid JSON, no markdown:
   const observed40Rate=observedOceanRate(invoices,40);
   const liveOceanContractRates={...OCEAN_CONTRACT_BASE_RATES,...(observed40Rate?{40:observed40Rate.rate}:{})};
   const liveOceanForecastRates={...OCEAN_BASE_RATES,...(observed40Rate?{40:observed40Rate.rate}:{})};
-  const invoicesWithIssues=invoices.filter(inv=>{ const m=matchInvoiceToTickets(inv,tickets); const audit=invoiceChargeAudit(inv,m.ticketsOnInvoice); const calculated=invoiceCalculatedChecks(inv); const rates=invoiceContractRateChecks(inv,liveOceanContractRates); return m.unmatched.length>0||m.volumeMatch===false||audit.issues.length>0||calculated.some(check=>check.mismatch)||rates.some(check=>check.mismatch); }).length;
+  const invoicesWithIssues=invoices.filter(inv=>{ const m=matchInvoiceToTickets(inv,tickets); const audit=invoiceChargeAudit(inv,m.ticketsOnInvoice); const calculated=invoiceCalculatedChecks(inv); const rates=invoiceContractRateChecks(inv,liveOceanContractRates); return m.unmatched.length>0||m.volumeOverbilled||audit.issues.length>0||calculated.some(check=>check.mismatch)||rates.some(check=>check.mismatch); }).length;
   const matchedInvoiceCount=Math.max(0,invoices.length-invoicesWithIssues);
   const totalInvoiced=invoices.reduce((s,inv)=>s+(parseFloat(inv.total_amount)||0),0);
   const invoicedBeforeHst=invoices.reduce((s,inv)=>s+invoiceAmountBeforeHst(inv),0);
@@ -2597,7 +2603,7 @@ Return ONLY valid JSON, no markdown:
     const chargeAudit=invoiceChargeAudit(invoice,m.ticketsOnInvoice);
     const calculatedChecks=invoiceCalculatedChecks(invoice);
     const contractRateChecks=invoiceContractRateChecks(invoice,liveOceanContractRates);
-    const hasIssues=m.unmatched.length>0||m.volumeMatch===false||chargeAudit.issues.length>0||calculatedChecks.some(check=>check.mismatch)||contractRateChecks.some(check=>check.mismatch);
+    const hasIssues=m.unmatched.length>0||m.volumeOverbilled||chargeAudit.issues.length>0||calculatedChecks.some(check=>check.mismatch)||contractRateChecks.some(check=>check.mismatch);
     const hasWarnings=chargeAudit.warnings.length>0;
     return(<div style={{position:"fixed",inset:0,background:"#000c",zIndex:200,display:"flex",alignItems:"center",justifyContent:"center"}} onClick={e=>e.target===e.currentTarget&&onClose()}>
       <div style={{background:C.card,border:`1px solid ${C.border}`,borderRadius:16,padding:28,width:"94%",maxWidth:580,maxHeight:"90vh",overflowY:"auto"}}>
@@ -2608,9 +2614,9 @@ Return ONLY valid JSON, no markdown:
         <div style={{display:"flex",gap:12,marginBottom:20,flexWrap:"wrap"}}>
           {invoice.total_amount>0&&<div style={{background:C.bg,borderRadius:10,padding:"12px 18px",flex:1}}><div style={{color:C.muted,fontSize:11,fontWeight:700,textTransform:"uppercase",letterSpacing:1}}>Total</div><div style={{color:C.green,fontWeight:800,fontSize:20,fontFamily:"monospace"}}>{invoice.currency||""} {invoice.total_amount?.toLocaleString()}</div></div>}
           {invoice.total_volume_m3>0&&<div style={{background:C.bg,borderRadius:10,padding:"12px 18px",flex:1}}><div style={{color:C.muted,fontSize:11,fontWeight:700,textTransform:"uppercase",letterSpacing:1}}>Invoice Volume</div><div style={{color:C.accent,fontWeight:800,fontSize:20,fontFamily:"monospace"}}>{fmt(invoice.total_volume_m3)} m³</div></div>}
-          {m.ticketVolume>0&&<div style={{background:C.bg,borderRadius:10,padding:"12px 18px",flex:1}}><div style={{color:C.muted,fontSize:11,fontWeight:700,textTransform:"uppercase",letterSpacing:1}}>Ticket Volume</div><div style={{color:m.volumeMatch===false?C.red:C.green,fontWeight:800,fontSize:20,fontFamily:"monospace"}}>{fmt(m.ticketVolume)} m³</div></div>}
+          {m.ticketVolume>0&&<div style={{background:C.bg,borderRadius:10,padding:"12px 18px",flex:1}}><div style={{color:C.muted,fontSize:11,fontWeight:700,textTransform:"uppercase",letterSpacing:1}}>Ticket Volume</div><div style={{color:m.volumeOverbilled?C.red:C.green,fontWeight:800,fontSize:20,fontFamily:"monospace"}}>{fmt(m.ticketVolume)} m³</div></div>}
         </div>
-        {m.volumeMatch===false&&<div style={{background:"#450a0a",border:`1px solid ${C.red}`,borderRadius:10,padding:"12px 16px",marginBottom:14,color:"#fca5a5",fontSize:13}}>⚠ Volume mismatch — invoice shows {fmt(m.invoiceVolume)} m³ but matched tickets total {fmt(m.ticketVolume)} m³</div>}
+        {m.volumeOverbilled&&<div style={{background:"#450a0a",border:`1px solid ${C.red}`,borderRadius:10,padding:"12px 16px",marginBottom:14,color:"#fca5a5",fontSize:13}}>⚠ Possible volume overbilling — invoice shows {fmt(m.invoiceVolume)} m³ but matched tickets support {fmt(m.ticketVolume)} m³</div>}
         {m.usesConsolidatedBatch&&<div style={{background:"#082f49",border:`1px solid ${C.blue}`,borderRadius:10,padding:"12px 16px",marginBottom:14,color:"#bae6fd",fontSize:13}}>✓ Ocean consolidated invoice — reconciled against all {m.matched.length} concrete delivery tickets dated {invoice.invoice_date}. Ocean does not print every delivery ticket number on its invoice.</div>}
         {m.unmatched.length>0&&<div style={{background:"#451a03",border:`1px solid ${C.yellow}`,borderRadius:10,padding:"12px 16px",marginBottom:14,color:"#fde68a",fontSize:13}}>⚠ {m.unmatched.length} ticket{m.unmatched.length>1?"s":""} on invoice not in system: <b>{m.unmatched.join(", ")}</b></div>}
         {chargeAudit.comparisons.length>0&&<div style={{marginBottom:16}}>
@@ -2987,7 +2993,7 @@ Screenshot attached: Yes / No`}</pre>
             </div>
             {invoices.length===0?<div style={{color:C.muted,textAlign:"center",padding:"60px 0"}}>No invoices yet.</div>
             :filteredInvoices.length===0?<div style={{color:C.muted,textAlign:"center",padding:"60px 0"}}>No invoices match “{invoiceSearch}”.</div>
-            :filteredInvoices.map(inv=>{ const m=matchInvoiceToTickets(inv,tickets); const chargeAudit=invoiceChargeAudit(inv,m.ticketsOnInvoice); const calculatedIssues=invoiceCalculatedChecks(inv).filter(check=>check.mismatch); const rateIssues=invoiceContractRateChecks(inv,liveOceanContractRates).filter(check=>check.mismatch); const hasIssues=m.unmatched.length>0||m.volumeMatch===false||chargeAudit.issues.length>0||calculatedIssues.length>0||rateIssues.length>0; const hasWarnings=chargeAudit.warnings.length>0;
+            :filteredInvoices.map(inv=>{ const m=matchInvoiceToTickets(inv,tickets); const chargeAudit=invoiceChargeAudit(inv,m.ticketsOnInvoice); const calculatedIssues=invoiceCalculatedChecks(inv).filter(check=>check.mismatch); const rateIssues=invoiceContractRateChecks(inv,liveOceanContractRates).filter(check=>check.mismatch); const hasIssues=m.unmatched.length>0||m.volumeOverbilled||chargeAudit.issues.length>0||calculatedIssues.length>0||rateIssues.length>0; const hasWarnings=chargeAudit.warnings.length>0;
               return(<div key={inv.id} onClick={()=>setSelectedInvoice(inv)} style={{background:C.card,border:`1px solid ${hasIssues?C.red+"66":C.border}`,borderRadius:12,padding:"16px 20px",marginBottom:12,cursor:"pointer"}}>
                 <div style={{display:"flex",justifyContent:"space-between",alignItems:"flex-start",marginBottom:10,flexWrap:"wrap",gap:8}}>
                   <div><span style={{fontWeight:800,fontSize:15}}>Invoice {inv.invoice_number||"—"}</span><span style={{color:C.muted,fontSize:12,marginLeft:10}}>{inv.invoice_date}</span></div>
@@ -3000,7 +3006,7 @@ Screenshot attached: Yes / No`}</pre>
                   {inv.supplier&&<span>🏭 {inv.supplier}</span>}
                   <span style={{color:m.matched.length>0?C.green:C.muted}}>✓ {m.matched.length} matched</span>
                   {m.unmatched.length>0&&<span style={{color:C.red}}>⚠ {m.unmatched.length} not found</span>}
-                  {m.volumeMatch===false&&<span style={{color:C.red}}>⚠ Volume mismatch</span>}
+                  {m.volumeOverbilled&&<span style={{color:C.red}}>⚠ Possible volume overbilling</span>}
                   {chargeAudit.issues.length>0&&<span style={{color:C.red}}>⚠ {chargeAudit.issues.length} charge mismatch{chargeAudit.issues.length===1?"":"es"}</span>}
                   {chargeAudit.warnings.length>0&&<span style={{color:C.yellow}}>△ {chargeAudit.warnings.length} charge{chargeAudit.warnings.length===1?"":"s"} not verifiable from tickets</span>}
                   {calculatedIssues.length>0&&<span style={{color:C.red}}>⚠ calculated fee mismatch</span>}
