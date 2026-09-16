@@ -334,6 +334,8 @@ function auditLineItems(lines) {
 }
 
 function invoiceChargeAudit(invoice,matchedTickets) {
+  const currentAudit=Number(invoice?.audit_version)>=20&&(matchedTickets||[]).length>0&&(matchedTickets||[]).every(ticket=>Number(ticket?.audit_version)>=20);
+  if(!currentAudit) return {comparisons:[],issues:[],warnings:[]};
   const invoiceTotals=auditLineItems(invoice?.line_items);
   const ticketTotals=auditLineItems((matchedTickets||[]).flatMap(ticket=>ticket?.charge_items||[]));
   const keys=new Set([...Object.keys(invoiceTotals),...Object.keys(ticketTotals)]);
@@ -353,10 +355,14 @@ function invoiceChargeAudit(invoice,matchedTickets) {
     const unsupportedInvoiceCharge=inv.lines.length>0&&tkt.lines.length===0;
     return {key,label:inv.label,invoiceQuantity:inv.quantity,ticketQuantity:tkt.quantity,difference,unit:inv.unit||tkt.unit||"",unitPrice:invoiceRate,invoiceRate,ticketRate,invoiceAmount:inv.amount,ticketAmount:tkt.amount,hasInvoiceQuantity:inv.hasQuantity,hasTicketQuantity:tkt.hasQuantity,hasTicketData:tkt.lines.length>0,unsupportedInvoiceCharge,quantityMismatch,rateMismatch,amountMismatch,mismatch:quantityMismatch||rateMismatch||amountMismatch,needsSupport:unsupportedInvoiceCharge};
   });
-  return {comparisons,issues:comparisons.filter(row=>row.mismatch),warnings:comparisons.filter(row=>row.needsSupport)};
+  // Only show rows with data on both sides. Missing historical extraction is
+  // not an invoice condition and should never appear as a warning.
+  const comparable=comparisons.filter(row=>row.hasTicketData&&invoiceTotals[row.key]?.lines?.length>0);
+  return {comparisons:comparable,issues:comparable.filter(row=>row.mismatch),warnings:[]};
 }
 
 function invoiceCalculatedChecks(invoice) {
+  if(Number(invoice?.audit_version)<20) return [];
   const lines=invoice?.line_items||[];
   const feeLines=lines.filter(line=>/environmental recovery|recovery fee/i.test(String(line?.description||"")));
   if(!feeLines.length) return [];
@@ -381,6 +387,7 @@ function invoiceCalculatedChecks(invoice) {
 }
 
 function invoiceContractRateChecks(invoice,contractRates=OCEAN_CONTRACT_BASE_RATES) {
+  if(Number(invoice?.audit_version)<20) return [];
   if(!String(invoice?.supplier||"").toLowerCase().includes("ocean")) return [];
   return (invoice?.line_items||[]).flatMap(line=>{
     const description=String(line?.description||"");
@@ -1858,7 +1865,6 @@ function ConcreteModule({ onBack }) {
   const [deletedRecords, setDeletedRecords] = useState([]);
   const [deletedOpen, setDeletedOpen] = useState(false);
   const [feedbackOpen, setFeedbackOpen] = useState(false);
-  const [auditRescanning, setAuditRescanning] = useState(false);
   const skipInitialSaveRef = useRef(true);
   const fileRef    = useRef();
   const invFileRef = useRef();
@@ -2235,7 +2241,7 @@ Return ONLY valid JSON, no markdown:
           const printedItem = ITEMS.find(item=>item.toLowerCase()===String(extracted.item||"").trim().toLowerCase()) || "";
           extracted.area = printedArea || suggestion.area || "";
           extracted.item = printedItem || suggestion.item || "";
-          pending.push({id:Date.now()+Math.random(),filename:file.name,fileType:file.type,file_url:fileUrl,added_at:new Date().toISOString(),...extracted,_suggested:!printedArea&&!!(suggestion.area)});
+          pending.push({id:Date.now()+Math.random(),filename:file.name,fileType:file.type,file_url:fileUrl,added_at:new Date().toISOString(),audit_version:20,...extracted,_suggested:!printedArea&&!!(suggestion.area)});
         }
       }catch(e){ showToast(`Could not read "${file.name}": ${e.message}`,"err"); }
     }
@@ -2256,67 +2262,11 @@ Return ONLY valid JSON, no markdown:
       setLoadMsg(`Reading invoice: "${file.name}"…`);
       try{
         const [extracted,fileUrl]=await Promise.all([extractInvoice(file),uploadFile(file,"invoices")]);
-        setInvoices(prev=>[...prev,{id:Date.now()+Math.random(),filename:file.name,fileType:file.type,file_url:fileUrl,added_at:new Date().toISOString(),...extracted}]);
+        setInvoices(prev=>[...prev,{id:Date.now()+Math.random(),filename:file.name,fileType:file.type,file_url:fileUrl,added_at:new Date().toISOString(),audit_version:20,...extracted}]);
         added++;
       }catch(e){ showToast(`Could not read invoice "${file.name}": ${e.message}`,"err"); }
     }
     setLoading(false); setLoadMsg(""); if(added){showToast(`${added} invoice${added>1?"s":""} scanned ✓`);setTab("invoices");}
-  }
-
-  async function storedFile(record,fallbackName) {
-    const url=record?.file_url||record?.originalFile;
-    if(!url) throw new Error("original file is not available");
-    const response=await fetch(url);
-    if(!response.ok) throw new Error(`stored file returned HTTP ${response.status}`);
-    const blob=await response.blob();
-    return new File([blob],record.filename||fallbackName,{type:record.fileType||blob.type||"application/pdf"});
-  }
-
-  async function rescanHistoricalCharges() {
-    if(auditRescanning) return;
-    const ticketSources=[...new Map(tickets.filter(t=>t.file_url||t.originalFile).map(t=>[t.file_url||t.originalFile,t])).values()];
-    const invoiceSources=invoices.filter(inv=>inv.file_url||inv.originalFile);
-    if(!ticketSources.length||!invoiceSources.length){
-      showToast("Historical audit needs stored ticket and invoice files.","err");
-      return;
-    }
-    if(!window.confirm(`Re-read ${ticketSources.length} ticket file${ticketSources.length===1?"":"s"} and ${invoiceSources.length} invoice${invoiceSources.length===1?"":"s"} to check admixtures and extra charges? Existing locations, notes and coding will be preserved.`)) return;
-    setAuditRescanning(true); setLoading(true);
-    try{
-      const chargesByTicket=new Map();
-      for(let index=0;index<ticketSources.length;index++){
-        const source=ticketSources[index];
-        setLoadMsg(`Historical audit: ticket file ${index+1} of ${ticketSources.length}…`);
-        const file=await storedFile(source,`ticket-${index+1}.pdf`);
-        const extracted=await extractTicket(file);
-        extracted.forEach(row=>{
-          const key=ticketNumberKey(row.ticket_number);
-          if(key) chargesByTicket.set(key,Array.isArray(row.charge_items)?row.charge_items:[]);
-        });
-      }
-      const refreshedInvoices=[];
-      for(let index=0;index<invoiceSources.length;index++){
-        const original=invoiceSources[index];
-        setLoadMsg(`Historical audit: invoice ${index+1} of ${invoiceSources.length}…`);
-        const file=await storedFile(original,`invoice-${index+1}.pdf`);
-        const extracted=await extractInvoice(file);
-        refreshedInvoices.push({...original,...extracted,id:original.id,filename:original.filename,fileType:original.fileType,file_url:original.file_url,originalFile:original.originalFile,added_at:original.added_at,charge_audit_scanned_at:new Date().toISOString()});
-      }
-      const nextTickets=tickets.map(ticket=>{
-        const key=ticketNumberKey(ticket.ticket_number);
-        return chargesByTicket.has(key)?{...ticket,charge_items:chargesByTicket.get(key),charge_audit_scanned_at:new Date().toISOString()}:ticket;
-      });
-      const refreshedById=new Map(refreshedInvoices.map(invoice=>[invoice.id,invoice]));
-      const nextInvoices=invoices.map(invoice=>refreshedById.get(invoice.id)||invoice);
-      setTickets(nextTickets); setInvoices(nextInvoices);
-      const saved=await storageSet("concrete-data",{tickets:nextTickets,invoices:nextInvoices,tests,deletedRecords});
-      if(!saved) throw new Error("the updated audit data could not be saved");
-      showToast("Historical invoice audit complete ✓");
-    }catch(error){
-      showToast(`Historical audit stopped: ${error.message}`,"err");
-    }finally{
-      setAuditRescanning(false); setLoading(false); setLoadMsg("");
-    }
   }
 
   const totalPoured=tickets.reduce((s,t)=>s+(parseFloat(t.volume_m3)||0),0);
@@ -2604,7 +2554,7 @@ Return ONLY valid JSON, no markdown:
     const calculatedChecks=invoiceCalculatedChecks(invoice);
     const contractRateChecks=invoiceContractRateChecks(invoice,liveOceanContractRates);
     const hasIssues=m.unmatched.length>0||m.volumeOverbilled||chargeAudit.issues.length>0||calculatedChecks.some(check=>check.mismatch)||contractRateChecks.some(check=>check.mismatch);
-    const hasWarnings=chargeAudit.warnings.length>0;
+    const hasWarnings=false;
     return(<div style={{position:"fixed",inset:0,background:"#000c",zIndex:200,display:"flex",alignItems:"center",justifyContent:"center"}} onClick={e=>e.target===e.currentTarget&&onClose()}>
       <div style={{background:C.card,border:`1px solid ${C.border}`,borderRadius:16,padding:28,width:"94%",maxWidth:580,maxHeight:"90vh",overflowY:"auto"}}>
         <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:20}}>
@@ -2623,11 +2573,10 @@ Return ONLY valid JSON, no markdown:
           <div style={{color:C.muted,fontSize:11,fontWeight:700,textTransform:"uppercase",letterSpacing:1,marginBottom:10}}>Admixture & Extra-Charge Audit</div>
           {chargeAudit.comparisons.map(row=>{
             const potential=row.quantityMismatch&&row.difference>0&&row.unitPrice?row.difference*row.unitPrice:null;
-            const rowColor=row.mismatch?C.red:row.needsSupport?C.yellow:C.green;
-            return <div key={row.key} style={{background:row.mismatch?"#450a0a":row.needsSupport?"#451a03":C.bg,border:`1px solid ${rowColor}`,borderRadius:9,padding:"11px 14px",marginBottom:8}}>
-              <div style={{display:"flex",justifyContent:"space-between",gap:10,flexWrap:"wrap"}}><b>{row.label}</b><Badge color={rowColor}>{row.mismatch?"⚠ Mismatch":row.needsSupport?"Support not on ticket":"✓ Match"}</Badge></div>
+            const rowColor=row.mismatch?C.red:C.green;
+            return <div key={row.key} style={{background:row.mismatch?"#450a0a":C.bg,border:`1px solid ${rowColor}`,borderRadius:9,padding:"11px 14px",marginBottom:8}}>
+              <div style={{display:"flex",justifyContent:"space-between",gap:10,flexWrap:"wrap"}}><b>{row.label}</b><Badge color={rowColor}>{row.mismatch?"⚠ Possible overcharge":"✓ Match"}</Badge></div>
               <div style={{display:"flex",gap:16,flexWrap:"wrap",fontSize:12,color:C.sub,marginTop:6}}>{(row.hasTicketQuantity||row.hasInvoiceQuantity)&&<><span>Tickets: <b style={{color:C.text}}>{row.hasTicketQuantity?`${fmt(row.ticketQuantity)} ${row.unit}`:"not shown"}</b></span><span>Invoice: <b style={{color:C.text}}>{row.hasInvoiceQuantity?`${fmt(row.invoiceQuantity)} ${row.unit}`:"not shown"}</b></span>{row.hasTicketQuantity&&row.hasInvoiceQuantity&&<span>Difference: <b style={{color:row.quantityMismatch?C.red:C.green}}>{row.difference>0?"+":""}{fmt(row.difference)} {row.unit}</b></span>}</>}{row.ticketRate!=null&&row.invoiceRate!=null&&<span>Rate: <b style={{color:row.rateMismatch?C.red:C.green}}>{money(row.ticketRate)} ticket / {money(row.invoiceRate)} invoice</b></span>}{row.ticketAmount>0&&row.invoiceAmount>0&&<span>Amount: <b style={{color:row.amountMismatch?C.red:C.green}}>{money(row.ticketAmount)} ticket / {money(row.invoiceAmount)} invoice</b></span>}{potential!=null&&<span>Potential excess: <b style={{color:C.red}}>{money(potential)}</b></span>}</div>
-              {row.unsupportedInvoiceCharge&&<div style={{color:"#fde68a",fontSize:11,marginTop:6}}>This charge was not shown on the linked delivery tickets, so the app cannot verify it from ticket data. This is not counted as a mismatch.</div>}
             </div>;
           })}
         </div>}
@@ -2981,7 +2930,6 @@ Screenshot attached: Yes / No`}</pre>
                   <input value={invoiceSearch} onChange={e=>setInvoiceSearch(e.target.value)} placeholder="Search date, invoice #, supplier…" style={{width:280,maxWidth:"70vw",background:C.card,border:`1px solid ${C.border}`,borderRadius:9,padding:"9px 34px 9px 34px",color:C.text,fontSize:13,boxSizing:"border-box"}}/>
                   {invoiceSearch&&<button onClick={()=>setInvoiceSearch("")} title="Clear search" style={{position:"absolute",right:9,top:"50%",transform:"translateY(-50%)",background:"transparent",border:"none",color:C.muted,cursor:"pointer",fontSize:16,padding:2}}>×</button>}
                 </div>
-                <button disabled={auditRescanning||loading} onClick={rescanHistoricalCharges} style={{background:C.blue,color:"#fff",border:"none",borderRadius:9,padding:"9px 18px",fontWeight:700,cursor:auditRescanning||loading?"not-allowed":"pointer",fontSize:13,opacity:(auditRescanning||loading)?0.65:1}}>{auditRescanning?"Auditing…":"↻ Audit Previous Invoices"}</button>
                 <button onClick={()=>invFileRef.current.click()} style={{background:C.purple,color:"#fff",border:"none",borderRadius:9,padding:"9px 18px",fontWeight:700,cursor:"pointer",fontSize:13}}>+ Scan Invoice</button>
               </div>
               <input ref={invFileRef} type="file" multiple accept="image/*,application/pdf" style={{display:"none"}} onChange={e=>handleInvoiceFiles(e.target.files)}/>
@@ -2993,7 +2941,7 @@ Screenshot attached: Yes / No`}</pre>
             </div>
             {invoices.length===0?<div style={{color:C.muted,textAlign:"center",padding:"60px 0"}}>No invoices yet.</div>
             :filteredInvoices.length===0?<div style={{color:C.muted,textAlign:"center",padding:"60px 0"}}>No invoices match “{invoiceSearch}”.</div>
-            :filteredInvoices.map(inv=>{ const m=matchInvoiceToTickets(inv,tickets); const chargeAudit=invoiceChargeAudit(inv,m.ticketsOnInvoice); const calculatedIssues=invoiceCalculatedChecks(inv).filter(check=>check.mismatch); const rateIssues=invoiceContractRateChecks(inv,liveOceanContractRates).filter(check=>check.mismatch); const hasIssues=m.unmatched.length>0||m.volumeOverbilled||chargeAudit.issues.length>0||calculatedIssues.length>0||rateIssues.length>0; const hasWarnings=chargeAudit.warnings.length>0;
+            :filteredInvoices.map(inv=>{ const m=matchInvoiceToTickets(inv,tickets); const chargeAudit=invoiceChargeAudit(inv,m.ticketsOnInvoice); const calculatedIssues=invoiceCalculatedChecks(inv).filter(check=>check.mismatch); const rateIssues=invoiceContractRateChecks(inv,liveOceanContractRates).filter(check=>check.mismatch); const hasIssues=m.unmatched.length>0||m.volumeOverbilled||chargeAudit.issues.length>0||calculatedIssues.length>0||rateIssues.length>0; const hasWarnings=false;
               return(<div key={inv.id} onClick={()=>setSelectedInvoice(inv)} style={{background:C.card,border:`1px solid ${hasIssues?C.red+"66":C.border}`,borderRadius:12,padding:"16px 20px",marginBottom:12,cursor:"pointer"}}>
                 <div style={{display:"flex",justifyContent:"space-between",alignItems:"flex-start",marginBottom:10,flexWrap:"wrap",gap:8}}>
                   <div><span style={{fontWeight:800,fontSize:15}}>Invoice {inv.invoice_number||"—"}</span><span style={{color:C.muted,fontSize:12,marginLeft:10}}>{inv.invoice_date}</span></div>
@@ -3008,7 +2956,6 @@ Screenshot attached: Yes / No`}</pre>
                   {m.unmatched.length>0&&<span style={{color:C.red}}>⚠ {m.unmatched.length} not found</span>}
                   {m.volumeOverbilled&&<span style={{color:C.red}}>⚠ Possible volume overbilling</span>}
                   {chargeAudit.issues.length>0&&<span style={{color:C.red}}>⚠ {chargeAudit.issues.length} charge mismatch{chargeAudit.issues.length===1?"":"es"}</span>}
-                  {chargeAudit.warnings.length>0&&<span style={{color:C.yellow}}>△ {chargeAudit.warnings.length} charge{chargeAudit.warnings.length===1?"":"s"} not verifiable from tickets</span>}
                   {calculatedIssues.length>0&&<span style={{color:C.red}}>⚠ calculated fee mismatch</span>}
                   {rateIssues.length>0&&<span style={{color:C.red}}>⚠ {rateIssues.length} contract-rate issue{rateIssues.length===1?"":"s"}</span>}
                   {chargeAudit.comparisons.length>0&&chargeAudit.issues.length===0&&<span style={{color:C.green}}>✓ extra charges checked</span>}
