@@ -8,7 +8,7 @@ const C = {
   yellow: "#EAB308", red: "#EF4444", purple: "#A855F7",
   muted: "#6B7280", text: "#F9FAFB", sub: "#9CA3AF", teal: "#14B8A6",
 };
-const APP_VERSION = "19.15";
+const APP_VERSION = "20.0";
 
 // ─── SUPABASE STORAGE HELPERS ────────────────────────────────────────────────
 // Calls server-side API routes which talk to Supabase.
@@ -244,6 +244,9 @@ const TOTAL_SCOPE_M3 = SCOPE.reduce((s,r) => s + r.m3, 0);
 // planning dollars intact by using the quoted 35 MPa rate as a clearly labelled
 // proxy until a 40 MPa unit rate is supplied; quantities remain classified at 40.
 const OCEAN_BASE_RATES = { 20:205.90, 25:214.80, 35:247.20, 40:247.20 };
+// Rates confirmed by Ocean quotation C25-029R2. The 40 MPa value above remains
+// a forecasting proxy only and must never be presented as a contract-rate pass.
+const OCEAN_CONTRACT_BASE_RATES = { 20:205.90, 25:214.80, 35:247.20 };
 const OCEAN_ESTIMATE_REFERENCE_M3 = 9800.93;
 const OCEAN_ESTIMATE_ADDITIVES = 346900;
 const OCEAN_ESTIMATE_PUMPING = 133577;
@@ -275,6 +278,138 @@ function invoiceBaseConcreteBeforeHst(invoice) {
 function oceanBaseRateForMpa(value) {
   const strength = parseMpaNum(value);
   return OCEAN_BASE_RATES[strength] || null;
+}
+
+// ─── V20 TICKET-TO-INVOICE CHARGE AUDIT ────────────────────────────────────
+function normalizedChargeType(description) {
+  const text=String(description||"").toLowerCase().replace(/[^a-z0-9]+/g," ").trim();
+  if(!text) return null;
+  if(/hst|gst|tax|invoice total|total sale|subtotal|amount due|environmental recovery|recovery fee/.test(text)) return null;
+  if(/set retarder|retarder|retardant/.test(text)) return {key:"set_retarder",label:"Set retarder"};
+  if(/water reducer|water reducing|hrwr|high range/.test(text)) return {key:"water_reducer",label:"Water reducer"};
+  if(/superplastic|plasticizer|plasticiser/.test(text)) return {key:"plasticizer",label:"Plasticizer"};
+  if(/accelerator|accelerating|accel\b/.test(text)) return {key:"accelerator",label:"Accelerator"};
+  if(/micro.*fibre|fiber|fibre/.test(text)) return {key:"fibre",label:"Fibre"};
+  if(/hot water|heated water|winter heat|winter service|heat charge/.test(text)) return {key:"winter_heat",label:"Winter heat / hot water"};
+  if(/ice|chilled water|cooling/.test(text)) return {key:"cooling",label:"Cooling / ice"};
+  if(/air entrain|air entrainment/.test(text)) return {key:"air_entrainment",label:"Air entrainment"};
+  if(/calcium|chloride/.test(text)) return {key:"calcium",label:"Calcium / chloride additive"};
+  if(/corrosion inhibitor/.test(text)) return {key:"corrosion_inhibitor",label:"Corrosion inhibitor"};
+  if(/shrinkage reduc/.test(text)) return {key:"shrinkage_reducer",label:"Shrinkage reducer"};
+  if(/waterproof|integral waterproof/.test(text)) return {key:"waterproofing",label:"Integral waterproofing"};
+  if(/colour|color|pigment/.test(text)) return {key:"colour",label:"Colour / pigment"};
+  if(/pump|pumping|line pump|boom pump/.test(text)) return {key:"pumping",label:"Pumping"};
+  if(/wait|standby|waiting time/.test(text)) return {key:"waiting_time",label:"Waiting / standby time"};
+  if(/small load|minimum load|short load/.test(text)) return {key:"small_load",label:"Small-load charge"};
+  if(/saturday|sunday|weekend|after hours|overtime/.test(text)) return {key:"after_hours",label:"After-hours / weekend charge"};
+  if(/fuel|energy surcharge/.test(text)) return {key:"fuel_surcharge",label:"Fuel / energy surcharge"};
+  if(/delivery|freight|haul/.test(text)) return {key:"delivery",label:"Delivery / freight"};
+  const mpa=text.match(/(\d+)\s*mpa/);
+  if(mpa) return {key:`concrete_${mpa[1]}_mpa`,label:`${mpa[1]} MPa concrete`};
+  // Unknown billable rows are still audited. Exact normalized wording keeps
+  // unrelated charges from being combined while surfacing invoice-only items.
+  const generic=text.replace(/\b\d+(?:\.\d+)?\b/g," ").replace(/\s+/g," ").trim();
+  return generic?{key:`other_${generic.replace(/\s+/g,"_")}`,label:String(description||"Other charge").trim()}:null;
+}
+
+function auditLineItems(lines) {
+  const totals={};
+  (lines||[]).forEach(line=>{
+    const type=normalizedChargeType(line?.description);
+    if(!type) return;
+    const quantity=parseFloat(line?.quantity);
+    const unitPrice=parseFloat(line?.unit_price);
+    const amount=parseFloat(line?.amount);
+    if(!totals[type.key]) totals[type.key]={...type,quantity:0,amount:0,unit:String(line?.unit||"").trim(),unitPrices:[],hasQuantity:false,hasAmount:false,lines:[]};
+    if(Number.isFinite(quantity)){totals[type.key].quantity+=quantity;totals[type.key].hasQuantity=true;}
+    if(Number.isFinite(unitPrice)) totals[type.key].unitPrices.push(unitPrice);
+    if(Number.isFinite(amount)){totals[type.key].amount+=amount;totals[type.key].hasAmount=true;}
+    if(!totals[type.key].unit&&line?.unit) totals[type.key].unit=String(line.unit).trim();
+    totals[type.key].lines.push(line);
+  });
+  return totals;
+}
+
+function invoiceChargeAudit(invoice,matchedTickets) {
+  const invoiceTotals=auditLineItems(invoice?.line_items);
+  const ticketTotals=auditLineItems((matchedTickets||[]).flatMap(ticket=>ticket?.charge_items||[]));
+  const keys=new Set([...Object.keys(invoiceTotals),...Object.keys(ticketTotals)]);
+  const comparisons=[...keys].map(key=>{
+    const empty={key,label:key,quantity:0,amount:0,unit:"",unitPrices:[],hasQuantity:false,hasAmount:false,lines:[]};
+    const inv=invoiceTotals[key]||{...empty,label:ticketTotals[key]?.label||key};
+    const tkt=ticketTotals[key]||{...empty,label:inv.label};
+    const difference=inv.quantity-tkt.quantity;
+    const tolerance=Math.max(0.05,Math.abs(tkt.quantity)*0.005);
+    const invoiceRate=inv.unitPrices.length?inv.unitPrices[0]:null;
+    const ticketRate=tkt.unitPrices.length?tkt.unitPrices[0]:null;
+    const quantityMismatch=inv.hasQuantity&&tkt.hasQuantity&&Math.abs(difference)>tolerance;
+    const rateMismatch=invoiceRate!=null&&ticketRate!=null&&Math.abs(invoiceRate-ticketRate)>0.01;
+    const amountMismatch=inv.hasAmount&&tkt.hasAmount&&Math.abs(inv.amount-tkt.amount)>0.02;
+    const unsupportedInvoiceCharge=inv.lines.length>0&&tkt.lines.length===0;
+    return {key,label:inv.label,invoiceQuantity:inv.quantity,ticketQuantity:tkt.quantity,difference,unit:inv.unit||tkt.unit||"",unitPrice:invoiceRate,invoiceRate,ticketRate,invoiceAmount:inv.amount,ticketAmount:tkt.amount,hasInvoiceQuantity:inv.hasQuantity,hasTicketQuantity:tkt.hasQuantity,hasTicketData:tkt.lines.length>0,unsupportedInvoiceCharge,quantityMismatch,rateMismatch,amountMismatch,mismatch:unsupportedInvoiceCharge||quantityMismatch||rateMismatch||amountMismatch};
+  });
+  return {comparisons,issues:comparisons.filter(row=>row.mismatch)};
+}
+
+function invoiceCalculatedChecks(invoice) {
+  const lines=invoice?.line_items||[];
+  const checks=[];
+  lines.forEach(line=>{
+    const description=String(line?.description||"");
+    if(!/environmental recovery|recovery fee/i.test(description)) return;
+    const pctMatch=description.match(/(\d+(?:\.\d+)?)\s*%/);
+    const rate=pctMatch?parseFloat(pctMatch[1])/100:(parseFloat(line?.unit_price)>0&&parseFloat(line.unit_price)<1?parseFloat(line.unit_price):null);
+    const billed=parseFloat(line?.amount);
+    if(rate==null||!Number.isFinite(billed)) return;
+    const base=lines.reduce((sum,other)=>{
+      const text=String(other?.description||"").toLowerCase();
+      if(other===line||/hst|gst|tax|invoice total|total sale|subtotal|amount due/.test(text)) return sum;
+      return sum+(parseFloat(other?.amount)||0);
+    },0);
+    const expected=base*rate;
+    checks.push({label:description||"Environmental recovery fee",billed,expected,difference:billed-expected,mismatch:Math.abs(billed-expected)>0.02});
+  });
+  return checks;
+}
+
+function invoiceContractRateChecks(invoice,contractRates=OCEAN_CONTRACT_BASE_RATES) {
+  if(!String(invoice?.supplier||"").toLowerCase().includes("ocean")) return [];
+  return (invoice?.line_items||[]).flatMap(line=>{
+    const description=String(line?.description||"");
+    const strengthMatch=description.match(/(\d+)\s*mpa/i);
+    if(!strengthMatch||!/plain|concrete|mix/i.test(description)) return [];
+    const strength=parseInt(strengthMatch[1]);
+    const contractRate=contractRates[strength];
+    const quantity=parseFloat(line?.quantity);
+    const printedRate=parseFloat(line?.unit_price);
+    const amount=parseFloat(line?.amount);
+    const billedRate=Number.isFinite(printedRate)?printedRate:(Number.isFinite(quantity)&&quantity!==0&&Number.isFinite(amount)?amount/quantity:null);
+    if(contractRate==null){
+      return [{label:`${strength} MPa concrete`,strength,contractRate:null,billedRate,quantity,amount,expectedAmount:null,difference:null,missingContractRate:true,mismatch:true}];
+    }
+    const expectedAmount=Number.isFinite(quantity)?quantity*contractRate:null;
+    const difference=Number.isFinite(amount)&&expectedAmount!=null?amount-expectedAmount:null;
+    const rateMismatch=billedRate!=null&&Math.abs(billedRate-contractRate)>0.01;
+    const amountMismatch=difference!=null&&Math.abs(difference)>0.02;
+    return [{label:`${strength} MPa concrete`,strength,contractRate,billedRate,quantity,amount,expectedAmount,difference,missingContractRate:false,rateMismatch,amountMismatch,mismatch:rateMismatch||amountMismatch}];
+  });
+}
+
+function observedOceanRate(invoices,strength) {
+  const candidates=[];
+  (invoices||[]).forEach(invoice=>{
+    if(!String(invoice?.supplier||"").toLowerCase().includes("ocean")) return;
+    (invoice?.line_items||[]).forEach(line=>{
+      const description=String(line?.description||"");
+      const match=description.match(/(\d+)\s*mpa/i);
+      if(!match||parseInt(match[1])!==strength||!/plain|concrete|mix/i.test(description)) return;
+      const quantity=parseFloat(line?.quantity),amount=parseFloat(line?.amount),printed=parseFloat(line?.unit_price);
+      const rate=Number.isFinite(printed)?printed:(Number.isFinite(quantity)&&quantity!==0&&Number.isFinite(amount)?amount/quantity:null);
+      if(rate!=null&&rate>0) candidates.push({rate,date:String(invoice.invoice_date||"9999-99-99"),invoice_number:invoice.invoice_number||"—"});
+    });
+  });
+  candidates.sort((a,b)=>a.date.localeCompare(b.date)||String(a.invoice_number).localeCompare(String(b.invoice_number)));
+  return candidates[0]||null;
 }
 
 // ─── PUMP BUDGET ──────────────────────────────────────────────────────────────
@@ -1715,6 +1850,7 @@ function ConcreteModule({ onBack }) {
   const [deletedRecords, setDeletedRecords] = useState([]);
   const [deletedOpen, setDeletedOpen] = useState(false);
   const [feedbackOpen, setFeedbackOpen] = useState(false);
+  const [auditRescanning, setAuditRescanning] = useState(false);
   const skipInitialSaveRef = useRef(true);
   const fileRef    = useRef();
   const invFileRef = useRef();
@@ -1863,8 +1999,10 @@ and item "Pad footings"; "MUD SLAB" means area "Mud Slabs" and item "Slabs".
    - Use the description of work to select area/item. "Mud slab" should be area "Mud Slabs" and item "Slabs".
    If no pumping information exists on this record, return null for all pumping fields.
 
+6. charge_items: Extract EVERY separately printed charge or product row on the concrete ticket, including the base concrete row and extras such as set retarder, water reducer, accelerator, fibre, air entrainment, hot water, winter heat, colour and other admixtures. Keep the printed description. For each row return quantity, printed unit, unit price and amount when shown. Do not invent a price or amount. Do not include headings or totals.
+
 Return ONLY a valid JSON array (even if only one ticket). No markdown, no explanation:
-[{"date":"YYYY-MM-DD","ticket_number":"ticket number or pumping Slip No.","supplier":"supplier name","mix_design":"MPa strength and mix code, or null for pumping slip","volume_m3":number or null,"volume_yd3":number or null,"pump_volume_m3":number or null,"pump_cost":number or null,"pump_hours_worked":number or null,"pump_travel_hours":number or null,"pump_hours_charged":number or null,"pump_category":"one exact pumping budget category or null","area":"best match from area list or null","item":"best match from element list or null","invoice_number":"string or null","driver":"driver or pump operator","truck_number":"truck or pump unit number","notes":"string or null"}]`;
+[{"date":"YYYY-MM-DD","ticket_number":"ticket number or pumping Slip No.","supplier":"supplier name","mix_design":"MPa strength and mix code, or null for pumping slip","volume_m3":number or null,"volume_yd3":number or null,"pump_volume_m3":number or null,"pump_cost":number or null,"pump_hours_worked":number or null,"pump_travel_hours":number or null,"pump_hours_charged":number or null,"pump_category":"one exact pumping budget category or null","area":"best match from area list or null","item":"best match from element list or null","invoice_number":"string or null","driver":"driver or pump operator","truck_number":"truck or pump unit number","charge_items":[{"description":"exact printed description","quantity":number or null,"unit":"printed unit or null","unit_price":number or null,"amount":number or null}],"notes":"string or null"}]`;
     // Multi-page ticket PDFs can contain many records. A 4,000-token response
     // limit can cut the JSON array off mid-record, which makes it impossible to
     // parse even though Claude read the PDF successfully.
@@ -1884,10 +2022,10 @@ Return ONLY a valid JSON array (even if only one ticket). No markdown, no explan
     const b64 = await toB64(file);
     const isPDF = file.type==="application/pdf";
     const block = isPDF ? {type:"document",source:{type:"base64",media_type:"application/pdf",data:b64}} : {type:"image",source:{type:"base64",media_type:file.type,data:b64}};
-    const prompt = `You are a construction accounts assistant. Extract ALL information from this concrete supplier invoice.
+    const prompt = `You are a construction accounts assistant. Extract ALL information from this concrete supplier invoice. Preserve EVERY invoice line separately, including concrete mixes, set retarder, water reducer, accelerator, fibres, heat, pumping, environmental fees, taxes and credits. Read quantities exactly as printed; do not infer or recalculate them.
 Return ONLY valid JSON (no markdown):
 {"invoice_number":"string","invoice_date":"YYYY-MM-DD","supplier":"name","total_amount":number or null,"currency":"CAD/USD/AUD","ticket_numbers":["array"],"total_volume_m3":number or null,"total_volume_yd3":number or null,"line_items":[{"description":"string","quantity":number or null,"unit":"string","unit_price":number or null,"amount":number or null}],"notes":"string or null"}`;
-    const res = await fetch("/api/claude",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({model:"claude-sonnet-4-6",max_tokens:1500,messages:[{role:"user",content:[block,{type:"text",text:prompt}]}]})});
+    const res = await fetch("/api/claude",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({model:"claude-sonnet-4-6",max_tokens:4000,messages:[{role:"user",content:[block,{type:"text",text:prompt}]}]})});
     const data = await res.json();
     if(data.error) throw new Error("API error: "+(data.error.message||JSON.stringify(data.error)));
     const text = data.content?.map(b=>b.text||"").join("")||"";
@@ -2116,6 +2254,62 @@ Return ONLY valid JSON, no markdown:
     setLoading(false); setLoadMsg(""); if(added){showToast(`${added} invoice${added>1?"s":""} scanned ✓`);setTab("invoices");}
   }
 
+  async function storedFile(record,fallbackName) {
+    const url=record?.file_url||record?.originalFile;
+    if(!url) throw new Error("original file is not available");
+    const response=await fetch(url);
+    if(!response.ok) throw new Error(`stored file returned HTTP ${response.status}`);
+    const blob=await response.blob();
+    return new File([blob],record.filename||fallbackName,{type:record.fileType||blob.type||"application/pdf"});
+  }
+
+  async function rescanHistoricalCharges() {
+    if(auditRescanning) return;
+    const ticketSources=[...new Map(tickets.filter(t=>t.file_url||t.originalFile).map(t=>[t.file_url||t.originalFile,t])).values()];
+    const invoiceSources=invoices.filter(inv=>inv.file_url||inv.originalFile);
+    if(!ticketSources.length||!invoiceSources.length){
+      showToast("Historical audit needs stored ticket and invoice files.","err");
+      return;
+    }
+    if(!window.confirm(`Re-read ${ticketSources.length} ticket file${ticketSources.length===1?"":"s"} and ${invoiceSources.length} invoice${invoiceSources.length===1?"":"s"} to check admixtures and extra charges? Existing locations, notes and coding will be preserved.`)) return;
+    setAuditRescanning(true); setLoading(true);
+    try{
+      const chargesByTicket=new Map();
+      for(let index=0;index<ticketSources.length;index++){
+        const source=ticketSources[index];
+        setLoadMsg(`Historical audit: ticket file ${index+1} of ${ticketSources.length}…`);
+        const file=await storedFile(source,`ticket-${index+1}.pdf`);
+        const extracted=await extractTicket(file);
+        extracted.forEach(row=>{
+          const key=ticketNumberKey(row.ticket_number);
+          if(key) chargesByTicket.set(key,Array.isArray(row.charge_items)?row.charge_items:[]);
+        });
+      }
+      const refreshedInvoices=[];
+      for(let index=0;index<invoiceSources.length;index++){
+        const original=invoiceSources[index];
+        setLoadMsg(`Historical audit: invoice ${index+1} of ${invoiceSources.length}…`);
+        const file=await storedFile(original,`invoice-${index+1}.pdf`);
+        const extracted=await extractInvoice(file);
+        refreshedInvoices.push({...original,...extracted,id:original.id,filename:original.filename,fileType:original.fileType,file_url:original.file_url,originalFile:original.originalFile,added_at:original.added_at,charge_audit_scanned_at:new Date().toISOString()});
+      }
+      const nextTickets=tickets.map(ticket=>{
+        const key=ticketNumberKey(ticket.ticket_number);
+        return chargesByTicket.has(key)?{...ticket,charge_items:chargesByTicket.get(key),charge_audit_scanned_at:new Date().toISOString()}:ticket;
+      });
+      const refreshedById=new Map(refreshedInvoices.map(invoice=>[invoice.id,invoice]));
+      const nextInvoices=invoices.map(invoice=>refreshedById.get(invoice.id)||invoice);
+      setTickets(nextTickets); setInvoices(nextInvoices);
+      const saved=await storageSet("concrete-data",{tickets:nextTickets,invoices:nextInvoices,tests,deletedRecords});
+      if(!saved) throw new Error("the updated audit data could not be saved");
+      showToast("Historical invoice audit complete ✓");
+    }catch(error){
+      showToast(`Historical audit stopped: ${error.message}`,"err");
+    }finally{
+      setAuditRescanning(false); setLoading(false); setLoadMsg("");
+    }
+  }
+
   const totalPoured=tickets.reduce((s,t)=>s+(parseFloat(t.volume_m3)||0),0);
   const totalYd3=tickets.reduce((s,t)=>s+(parseFloat(t.volume_yd3)||0),0);
   const totalPumpM3   = tickets.reduce((s,t) => s + (parseFloat(t.pump_volume_m3)||0), 0);
@@ -2177,7 +2371,12 @@ Return ONLY valid JSON, no markdown:
   const overageAreas=areaProgress.filter(r=>r.overage>0.01);
   const codedPoured=scopeProgress.reduce((s,r)=>s+r.poured,0);
   const pct=(codedPoured/TOTAL_SCOPE_M3)*100;
-  const invoicesWithIssues=invoices.filter(inv=>{ const m=matchInvoiceToTickets(inv,tickets); return m.unmatched.length>0||m.volumeMatch===false; }).length;
+  // Ocean did not quote a separate 40 MPa rate. Once the first valid 40 MPa
+  // invoice is uploaded, use its unit rate consistently for audit + forecast.
+  const observed40Rate=observedOceanRate(invoices,40);
+  const liveOceanContractRates={...OCEAN_CONTRACT_BASE_RATES,...(observed40Rate?{40:observed40Rate.rate}:{})};
+  const liveOceanForecastRates={...OCEAN_BASE_RATES,...(observed40Rate?{40:observed40Rate.rate}:{})};
+  const invoicesWithIssues=invoices.filter(inv=>{ const m=matchInvoiceToTickets(inv,tickets); const audit=invoiceChargeAudit(inv,m.ticketsOnInvoice); const calculated=invoiceCalculatedChecks(inv); const rates=invoiceContractRateChecks(inv,liveOceanContractRates); return m.unmatched.length>0||m.volumeMatch===false||audit.issues.length>0||calculated.some(check=>check.mismatch)||rates.some(check=>check.mismatch); }).length;
   const matchedInvoiceCount=Math.max(0,invoices.length-invoicesWithIssues);
   const totalInvoiced=invoices.reduce((s,inv)=>s+(parseFloat(inv.total_amount)||0),0);
   const invoicedBeforeHst=invoices.reduce((s,inv)=>s+invoiceAmountBeforeHst(inv),0);
@@ -2187,12 +2386,12 @@ Return ONLY valid JSON, no markdown:
   SCOPE.forEach(row=>{ const strength=parseMpaNum(row.mpa); if(strength) scopeByStrength[strength]=(scopeByStrength[strength]||0)+row.m3; });
   const pouredByStrength={};
   tickets.forEach(ticket=>{ const strength=parseMpaNum(ticket.mix_design); if(strength) pouredByStrength[strength]=(pouredByStrength[strength]||0)+(parseFloat(ticket.volume_m3)||0); });
-  const originalBaseEstimate=Object.entries(scopeByStrength).reduce((sum,[strength,volume])=>sum+(OCEAN_BASE_RATES[strength]||0)*volume,0);
+  const originalBaseEstimate=Object.entries(scopeByStrength).reduce((sum,[strength,volume])=>sum+(liveOceanForecastRates[strength]||0)*volume,0);
   const originalForecastAllowances=TOTAL_SCOPE_M3*OCEAN_ALLOWANCE_PER_M3;
   const originalForecast=originalBaseEstimate+originalForecastAllowances;
   const remainingBaseEstimate=Object.entries(scopeByStrength).reduce((sum,[strength,scopeVolume])=>{
     const remainingVolume=Math.max(0,scopeVolume-(pouredByStrength[strength]||0));
-    return sum+remainingVolume*(OCEAN_BASE_RATES[strength]||0);
+    return sum+remainingVolume*(liveOceanForecastRates[strength]||0);
   },0);
   // Additives/pumping are deliberately not spread across remaining volume.
   // Early pours can consume waterproofing, cooling and pumping unevenly. Draw
@@ -2392,7 +2591,10 @@ Return ONLY valid JSON, no markdown:
 
   function InvoiceModal({invoice,onClose}){
     const m=matchInvoiceToTickets(invoice,tickets);
-    const hasIssues=m.unmatched.length>0||m.volumeMatch===false;
+    const chargeAudit=invoiceChargeAudit(invoice,m.ticketsOnInvoice);
+    const calculatedChecks=invoiceCalculatedChecks(invoice);
+    const contractRateChecks=invoiceContractRateChecks(invoice,liveOceanContractRates);
+    const hasIssues=m.unmatched.length>0||m.volumeMatch===false||chargeAudit.issues.length>0||calculatedChecks.some(check=>check.mismatch)||contractRateChecks.some(check=>check.mismatch);
     return(<div style={{position:"fixed",inset:0,background:"#000c",zIndex:200,display:"flex",alignItems:"center",justifyContent:"center"}} onClick={e=>e.target===e.currentTarget&&onClose()}>
       <div style={{background:C.card,border:`1px solid ${C.border}`,borderRadius:16,padding:28,width:"94%",maxWidth:580,maxHeight:"90vh",overflowY:"auto"}}>
         <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:20}}>
@@ -2407,6 +2609,19 @@ Return ONLY valid JSON, no markdown:
         {m.volumeMatch===false&&<div style={{background:"#450a0a",border:`1px solid ${C.red}`,borderRadius:10,padding:"12px 16px",marginBottom:14,color:"#fca5a5",fontSize:13}}>⚠ Volume mismatch — invoice shows {fmt(m.invoiceVolume)} m³ but matched tickets total {fmt(m.ticketVolume)} m³</div>}
         {m.usesConsolidatedBatch&&<div style={{background:"#082f49",border:`1px solid ${C.blue}`,borderRadius:10,padding:"12px 16px",marginBottom:14,color:"#bae6fd",fontSize:13}}>✓ Ocean consolidated invoice — reconciled against all {m.matched.length} concrete delivery tickets dated {invoice.invoice_date}. Ocean does not print every delivery ticket number on its invoice.</div>}
         {m.unmatched.length>0&&<div style={{background:"#451a03",border:`1px solid ${C.yellow}`,borderRadius:10,padding:"12px 16px",marginBottom:14,color:"#fde68a",fontSize:13}}>⚠ {m.unmatched.length} ticket{m.unmatched.length>1?"s":""} on invoice not in system: <b>{m.unmatched.join(", ")}</b></div>}
+        {chargeAudit.comparisons.length>0&&<div style={{marginBottom:16}}>
+          <div style={{color:C.muted,fontSize:11,fontWeight:700,textTransform:"uppercase",letterSpacing:1,marginBottom:10}}>Admixture & Extra-Charge Audit</div>
+          {chargeAudit.comparisons.map(row=>{
+            const potential=row.mismatch&&row.difference>0&&row.unitPrice?row.difference*row.unitPrice:null;
+            return <div key={row.key} style={{background:row.mismatch?"#450a0a":C.bg,border:`1px solid ${row.mismatch?C.red:C.green+"44"}`,borderRadius:9,padding:"11px 14px",marginBottom:8}}>
+              <div style={{display:"flex",justifyContent:"space-between",gap:10,flexWrap:"wrap"}}><b>{row.label}</b><Badge color={row.mismatch?C.red:C.green}>{row.mismatch?"⚠ Mismatch":"✓ Match"}</Badge></div>
+              <div style={{display:"flex",gap:16,flexWrap:"wrap",fontSize:12,color:C.sub,marginTop:6}}>{(row.hasTicketQuantity||row.hasInvoiceQuantity)&&<><span>Tickets: <b style={{color:C.text}}>{row.hasTicketQuantity?`${fmt(row.ticketQuantity)} ${row.unit}`:"not shown"}</b></span><span>Invoice: <b style={{color:C.text}}>{row.hasInvoiceQuantity?`${fmt(row.invoiceQuantity)} ${row.unit}`:"not shown"}</b></span>{row.hasTicketQuantity&&row.hasInvoiceQuantity&&<span>Difference: <b style={{color:row.quantityMismatch?C.red:C.green}}>{row.difference>0?"+":""}{fmt(row.difference)} {row.unit}</b></span>}</>}{row.ticketRate!=null&&row.invoiceRate!=null&&<span>Rate: <b style={{color:row.rateMismatch?C.red:C.green}}>{money(row.ticketRate)} ticket / {money(row.invoiceRate)} invoice</b></span>}{row.ticketAmount>0&&row.invoiceAmount>0&&<span>Amount: <b style={{color:row.amountMismatch?C.red:C.green}}>{money(row.ticketAmount)} ticket / {money(row.invoiceAmount)} invoice</b></span>}{potential!=null&&<span>Potential excess: <b style={{color:C.red}}>{money(potential)}</b></span>}</div>
+              {row.unsupportedInvoiceCharge&&<div style={{color:"#fca5a5",fontSize:11,marginTop:6}}>This invoice charge was not found on any linked delivery ticket — review supporting backup.</div>}
+            </div>;
+          })}
+        </div>}
+        {calculatedChecks.length>0&&<div style={{marginBottom:16}}><div style={{color:C.muted,fontSize:11,fontWeight:700,textTransform:"uppercase",letterSpacing:1,marginBottom:10}}>Calculated Fee Check</div>{calculatedChecks.map((check,index)=><div key={`${check.label}-${index}`} style={{background:check.mismatch?"#450a0a":C.bg,border:`1px solid ${check.mismatch?C.red:C.green+"44"}`,borderRadius:9,padding:"11px 14px",marginBottom:8}}><div style={{display:"flex",justifyContent:"space-between",gap:10,flexWrap:"wrap"}}><b>{check.label}</b><Badge color={check.mismatch?C.red:C.green}>{check.mismatch?"⚠ Math mismatch":"✓ Math checks"}</Badge></div><div style={{display:"flex",gap:16,flexWrap:"wrap",fontSize:12,color:C.sub,marginTop:6}}><span>Expected: <b style={{color:C.text}}>{money(check.expected)}</b></span><span>Billed: <b style={{color:C.text}}>{money(check.billed)}</b></span><span>Difference: <b style={{color:check.mismatch?C.red:C.green}}>{money(check.difference)}</b></span></div></div>)}</div>}
+        {contractRateChecks.length>0&&<div style={{marginBottom:16}}><div style={{color:C.muted,fontSize:11,fontWeight:700,textTransform:"uppercase",letterSpacing:1,marginBottom:10}}>Ocean Contract-Rate Audit</div>{contractRateChecks.map((check,index)=><div key={`${check.label}-${index}`} style={{background:check.mismatch?"#450a0a":C.bg,border:`1px solid ${check.mismatch?C.red:C.green+"44"}`,borderRadius:9,padding:"11px 14px",marginBottom:8}}><div style={{display:"flex",justifyContent:"space-between",gap:10,flexWrap:"wrap"}}><b>{check.label}</b><Badge color={check.mismatch?C.red:C.green}>{check.missingContractRate?"⚠ Rate not configured":check.mismatch?"⚠ Contract mismatch":"✓ Contract rate"}</Badge></div>{check.missingContractRate?<div style={{color:"#fca5a5",fontSize:11,marginTop:6}}>The app only has a planning proxy for this strength. Confirm the contractual rate before approving the invoice.</div>:<div style={{display:"flex",gap:16,flexWrap:"wrap",fontSize:12,color:C.sub,marginTop:6}}><span>Contract: <b style={{color:C.text}}>{money(check.contractRate)}/m³</b></span><span>Invoice: <b style={{color:check.rateMismatch?C.red:C.text}}>{check.billedRate==null?"not shown":`${money(check.billedRate)}/m³`}</b></span>{check.expectedAmount!=null&&<span>Expected amount: <b style={{color:C.text}}>{money(check.expectedAmount)}</b></span>}{check.amount!=null&&<span>Billed amount: <b style={{color:check.amountMismatch?C.red:C.text}}>{money(check.amount)}</b></span>}{check.difference!=null&&Math.abs(check.difference)>0.02&&<span>Difference: <b style={{color:C.red}}>{money(check.difference)}</b></span>}</div>}</div>)}</div>}
         {m.matched.length>0&&<div style={{marginBottom:16}}>
           <div style={{color:C.muted,fontSize:11,fontWeight:700,textTransform:"uppercase",letterSpacing:1,marginBottom:10}}>Matched Tickets ({m.matched.length})</div>
           {m.matched.map(({ticket:t})=>{ const mm=checkMpaMismatch(t); return(<div key={t.id} style={{background:C.bg,borderRadius:9,padding:"10px 14px",marginBottom:8,border:`1px solid ${mm?C.red+"44":"transparent"}`}}><div style={{display:"flex",justifyContent:"space-between",alignItems:"center",flexWrap:"wrap",gap:6}}><div><span style={{fontWeight:700}}>#{t.ticket_number}</span><span style={{color:C.muted,fontSize:12,marginLeft:8}}>{t.date}</span>{t.area&&<span style={{color:C.sub,fontSize:12,marginLeft:8}}>📍 {t.area}{t.item?` — ${t.item}`:""}</span>}</div><div style={{display:"flex",gap:6,flexWrap:"wrap"}}>{t.mix_design&&<Badge color={mm?C.red:C.green}>{t.mix_design}</Badge>}{t.volume_m3&&<Badge color={C.accent}>{parseFloat(t.volume_m3).toFixed(2)} m³</Badge>}{mm&&<Badge color={C.red}>⚠ MPa</Badge>}</div></div></div>); })}
@@ -2755,6 +2970,7 @@ Screenshot attached: Yes / No`}</pre>
                   <input value={invoiceSearch} onChange={e=>setInvoiceSearch(e.target.value)} placeholder="Search date, invoice #, supplier…" style={{width:280,maxWidth:"70vw",background:C.card,border:`1px solid ${C.border}`,borderRadius:9,padding:"9px 34px 9px 34px",color:C.text,fontSize:13,boxSizing:"border-box"}}/>
                   {invoiceSearch&&<button onClick={()=>setInvoiceSearch("")} title="Clear search" style={{position:"absolute",right:9,top:"50%",transform:"translateY(-50%)",background:"transparent",border:"none",color:C.muted,cursor:"pointer",fontSize:16,padding:2}}>×</button>}
                 </div>
+                <button disabled={auditRescanning||loading} onClick={rescanHistoricalCharges} style={{background:C.blue,color:"#fff",border:"none",borderRadius:9,padding:"9px 18px",fontWeight:700,cursor:auditRescanning||loading?"not-allowed":"pointer",fontSize:13,opacity:(auditRescanning||loading)?0.65:1}}>{auditRescanning?"Auditing…":"↻ Audit Previous Invoices"}</button>
                 <button onClick={()=>invFileRef.current.click()} style={{background:C.purple,color:"#fff",border:"none",borderRadius:9,padding:"9px 18px",fontWeight:700,cursor:"pointer",fontSize:13}}>+ Scan Invoice</button>
               </div>
               <input ref={invFileRef} type="file" multiple accept="image/*,application/pdf" style={{display:"none"}} onChange={e=>handleInvoiceFiles(e.target.files)}/>
@@ -2766,7 +2982,7 @@ Screenshot attached: Yes / No`}</pre>
             </div>
             {invoices.length===0?<div style={{color:C.muted,textAlign:"center",padding:"60px 0"}}>No invoices yet.</div>
             :filteredInvoices.length===0?<div style={{color:C.muted,textAlign:"center",padding:"60px 0"}}>No invoices match “{invoiceSearch}”.</div>
-            :filteredInvoices.map(inv=>{ const m=matchInvoiceToTickets(inv,tickets); const hasIssues=m.unmatched.length>0||m.volumeMatch===false;
+            :filteredInvoices.map(inv=>{ const m=matchInvoiceToTickets(inv,tickets); const chargeAudit=invoiceChargeAudit(inv,m.ticketsOnInvoice); const calculatedIssues=invoiceCalculatedChecks(inv).filter(check=>check.mismatch); const rateIssues=invoiceContractRateChecks(inv,liveOceanContractRates).filter(check=>check.mismatch); const hasIssues=m.unmatched.length>0||m.volumeMatch===false||chargeAudit.issues.length>0||calculatedIssues.length>0||rateIssues.length>0;
               return(<div key={inv.id} onClick={()=>setSelectedInvoice(inv)} style={{background:C.card,border:`1px solid ${hasIssues?C.red+"66":C.border}`,borderRadius:12,padding:"16px 20px",marginBottom:12,cursor:"pointer"}}>
                 <div style={{display:"flex",justifyContent:"space-between",alignItems:"flex-start",marginBottom:10,flexWrap:"wrap",gap:8}}>
                   <div><span style={{fontWeight:800,fontSize:15}}>Invoice {inv.invoice_number||"—"}</span><span style={{color:C.muted,fontSize:12,marginLeft:10}}>{inv.invoice_date}</span></div>
@@ -2780,6 +2996,10 @@ Screenshot attached: Yes / No`}</pre>
                   <span style={{color:m.matched.length>0?C.green:C.muted}}>✓ {m.matched.length} matched</span>
                   {m.unmatched.length>0&&<span style={{color:C.red}}>⚠ {m.unmatched.length} not found</span>}
                   {m.volumeMatch===false&&<span style={{color:C.red}}>⚠ Volume mismatch</span>}
+                  {chargeAudit.issues.length>0&&<span style={{color:C.red}}>⚠ {chargeAudit.issues.length} charge mismatch{chargeAudit.issues.length===1?"":"es"}</span>}
+                  {calculatedIssues.length>0&&<span style={{color:C.red}}>⚠ calculated fee mismatch</span>}
+                  {rateIssues.length>0&&<span style={{color:C.red}}>⚠ {rateIssues.length} contract-rate issue{rateIssues.length===1?"":"s"}</span>}
+                  {chargeAudit.comparisons.length>0&&chargeAudit.issues.length===0&&<span style={{color:C.green}}>✓ extra charges checked</span>}
                 </div>
               </div>);
             })}
@@ -3031,7 +3251,7 @@ Screenshot attached: Yes / No`}</pre>
                 </div>
                 <div style={{fontWeight:700,marginBottom:10}}>Forecast basis</div>
                 <div style={{display:"grid",gridTemplateColumns:"repeat(auto-fit,minmax(180px,1fr))",gap:10,fontSize:12}}>
-                  {[['20 MPa','$205.90/m³'],['25 MPa','$214.80/m³'],['35 MPa','$247.20/m³'],['40 MPa','Using $247.20/m³ proxy'],['Original allowance basis',`$${OCEAN_ALLOWANCE_PER_M3.toFixed(2)}/m³`]].map(([label,value])=><div key={label} style={{background:C.bg,borderRadius:9,padding:"10px 13px"}}><div style={{color:C.muted}}>{label}</div><div style={{fontWeight:800,marginTop:3}}>{value}</div></div>)}
+                  {[['20 MPa','$205.90/m³'],['25 MPa','$214.80/m³'],['35 MPa','$247.20/m³'],['40 MPa',observed40Rate?`${money(observed40Rate.rate)}/m³ · from invoice ${observed40Rate.invoice_number}`:'Using $247.20/m³ temporary proxy'],['Original allowance basis',`$${OCEAN_ALLOWANCE_PER_M3.toFixed(2)}/m³`]].map(([label,value])=><div key={label} style={{background:C.bg,borderRadius:9,padding:"10px 13px"}}><div style={{color:C.muted}}>{label}</div><div style={{fontWeight:800,marginTop:3}}>{value}</div></div>)}
                 </div>
                 <div style={{color:C.muted,fontSize:11,marginTop:10}}>Actual invoices replace estimated spending as they are uploaded. Base concrete remaining is priced at Ocean's quoted rates. Actual additives, environmental charges, heating/cooling and pumping draw down the original allowance pool so early high-cost pours are not projected a second time.</div>
               </div>
