@@ -286,7 +286,10 @@ function normalizedChargeType(description) {
   if(!text) return null;
   if(/hst|gst|tax|invoice total|total sale|subtotal|amount due|environmental recovery|recovery fee/.test(text)) return null;
   if(/set retarder|retarder|retardant/.test(text)) return {key:"set_retarder",label:"Set retarder"};
-  if(/water reducer|water reducing|hrwr|high range/.test(text)) return {key:"water_reducer",label:"Water reducer"};
+  // Ocean water reducer is billed on invoices but is not printed on delivery
+  // tickets, so there is no ticket-side quantity to reconcile. Keep it in the
+  // invoice totals/fee math but exclude it from the ticket audit.
+  if(/water reducer|water reducing|hrwr|high range/.test(text)) return null;
   if(/superplastic|plasticizer|plasticiser/.test(text)) return {key:"plasticizer",label:"Plasticizer"};
   if(/accelerator|accelerating|accel\b/.test(text)) return {key:"accelerator",label:"Accelerator"};
   if(/micro.*fibre|fiber|fibre/.test(text)) return {key:"fibre",label:"Fibre"};
@@ -346,9 +349,9 @@ function invoiceChargeAudit(invoice,matchedTickets) {
     const rateMismatch=invoiceRate!=null&&ticketRate!=null&&Math.abs(invoiceRate-ticketRate)>0.01;
     const amountMismatch=inv.hasAmount&&tkt.hasAmount&&Math.abs(inv.amount-tkt.amount)>0.02;
     const unsupportedInvoiceCharge=inv.lines.length>0&&tkt.lines.length===0;
-    return {key,label:inv.label,invoiceQuantity:inv.quantity,ticketQuantity:tkt.quantity,difference,unit:inv.unit||tkt.unit||"",unitPrice:invoiceRate,invoiceRate,ticketRate,invoiceAmount:inv.amount,ticketAmount:tkt.amount,hasInvoiceQuantity:inv.hasQuantity,hasTicketQuantity:tkt.hasQuantity,hasTicketData:tkt.lines.length>0,unsupportedInvoiceCharge,quantityMismatch,rateMismatch,amountMismatch,mismatch:unsupportedInvoiceCharge||quantityMismatch||rateMismatch||amountMismatch};
+    return {key,label:inv.label,invoiceQuantity:inv.quantity,ticketQuantity:tkt.quantity,difference,unit:inv.unit||tkt.unit||"",unitPrice:invoiceRate,invoiceRate,ticketRate,invoiceAmount:inv.amount,ticketAmount:tkt.amount,hasInvoiceQuantity:inv.hasQuantity,hasTicketQuantity:tkt.hasQuantity,hasTicketData:tkt.lines.length>0,unsupportedInvoiceCharge,quantityMismatch,rateMismatch,amountMismatch,mismatch:quantityMismatch||rateMismatch||amountMismatch,needsSupport:unsupportedInvoiceCharge};
   });
-  return {comparisons,issues:comparisons.filter(row=>row.mismatch)};
+  return {comparisons,issues:comparisons.filter(row=>row.mismatch),warnings:comparisons.filter(row=>row.needsSupport)};
 }
 
 function invoiceCalculatedChecks(invoice) {
@@ -2595,11 +2598,12 @@ Return ONLY valid JSON, no markdown:
     const calculatedChecks=invoiceCalculatedChecks(invoice);
     const contractRateChecks=invoiceContractRateChecks(invoice,liveOceanContractRates);
     const hasIssues=m.unmatched.length>0||m.volumeMatch===false||chargeAudit.issues.length>0||calculatedChecks.some(check=>check.mismatch)||contractRateChecks.some(check=>check.mismatch);
+    const hasWarnings=chargeAudit.warnings.length>0;
     return(<div style={{position:"fixed",inset:0,background:"#000c",zIndex:200,display:"flex",alignItems:"center",justifyContent:"center"}} onClick={e=>e.target===e.currentTarget&&onClose()}>
       <div style={{background:C.card,border:`1px solid ${C.border}`,borderRadius:16,padding:28,width:"94%",maxWidth:580,maxHeight:"90vh",overflowY:"auto"}}>
         <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:20}}>
           <div><div style={{fontWeight:800,fontSize:18}}>🧾 Invoice {invoice.invoice_number||"—"}</div><div style={{color:C.muted,fontSize:13}}>{invoice.supplier} · {invoice.invoice_date}</div></div>
-          <Badge color={hasIssues?C.red:C.green}>{hasIssues?"⚠ Review":"✓ OK"}</Badge>
+          <Badge color={hasIssues?C.red:hasWarnings?C.yellow:C.green}>{hasIssues?"⚠ Review":hasWarnings?"Support Check":"✓ OK"}</Badge>
         </div>
         <div style={{display:"flex",gap:12,marginBottom:20,flexWrap:"wrap"}}>
           {invoice.total_amount>0&&<div style={{background:C.bg,borderRadius:10,padding:"12px 18px",flex:1}}><div style={{color:C.muted,fontSize:11,fontWeight:700,textTransform:"uppercase",letterSpacing:1}}>Total</div><div style={{color:C.green,fontWeight:800,fontSize:20,fontFamily:"monospace"}}>{invoice.currency||""} {invoice.total_amount?.toLocaleString()}</div></div>}
@@ -2612,11 +2616,12 @@ Return ONLY valid JSON, no markdown:
         {chargeAudit.comparisons.length>0&&<div style={{marginBottom:16}}>
           <div style={{color:C.muted,fontSize:11,fontWeight:700,textTransform:"uppercase",letterSpacing:1,marginBottom:10}}>Admixture & Extra-Charge Audit</div>
           {chargeAudit.comparisons.map(row=>{
-            const potential=row.mismatch&&row.difference>0&&row.unitPrice?row.difference*row.unitPrice:null;
-            return <div key={row.key} style={{background:row.mismatch?"#450a0a":C.bg,border:`1px solid ${row.mismatch?C.red:C.green+"44"}`,borderRadius:9,padding:"11px 14px",marginBottom:8}}>
-              <div style={{display:"flex",justifyContent:"space-between",gap:10,flexWrap:"wrap"}}><b>{row.label}</b><Badge color={row.mismatch?C.red:C.green}>{row.mismatch?"⚠ Mismatch":"✓ Match"}</Badge></div>
+            const potential=row.quantityMismatch&&row.difference>0&&row.unitPrice?row.difference*row.unitPrice:null;
+            const rowColor=row.mismatch?C.red:row.needsSupport?C.yellow:C.green;
+            return <div key={row.key} style={{background:row.mismatch?"#450a0a":row.needsSupport?"#451a03":C.bg,border:`1px solid ${rowColor}`,borderRadius:9,padding:"11px 14px",marginBottom:8}}>
+              <div style={{display:"flex",justifyContent:"space-between",gap:10,flexWrap:"wrap"}}><b>{row.label}</b><Badge color={rowColor}>{row.mismatch?"⚠ Mismatch":row.needsSupport?"Support not on ticket":"✓ Match"}</Badge></div>
               <div style={{display:"flex",gap:16,flexWrap:"wrap",fontSize:12,color:C.sub,marginTop:6}}>{(row.hasTicketQuantity||row.hasInvoiceQuantity)&&<><span>Tickets: <b style={{color:C.text}}>{row.hasTicketQuantity?`${fmt(row.ticketQuantity)} ${row.unit}`:"not shown"}</b></span><span>Invoice: <b style={{color:C.text}}>{row.hasInvoiceQuantity?`${fmt(row.invoiceQuantity)} ${row.unit}`:"not shown"}</b></span>{row.hasTicketQuantity&&row.hasInvoiceQuantity&&<span>Difference: <b style={{color:row.quantityMismatch?C.red:C.green}}>{row.difference>0?"+":""}{fmt(row.difference)} {row.unit}</b></span>}</>}{row.ticketRate!=null&&row.invoiceRate!=null&&<span>Rate: <b style={{color:row.rateMismatch?C.red:C.green}}>{money(row.ticketRate)} ticket / {money(row.invoiceRate)} invoice</b></span>}{row.ticketAmount>0&&row.invoiceAmount>0&&<span>Amount: <b style={{color:row.amountMismatch?C.red:C.green}}>{money(row.ticketAmount)} ticket / {money(row.invoiceAmount)} invoice</b></span>}{potential!=null&&<span>Potential excess: <b style={{color:C.red}}>{money(potential)}</b></span>}</div>
-              {row.unsupportedInvoiceCharge&&<div style={{color:"#fca5a5",fontSize:11,marginTop:6}}>This invoice charge was not found on any linked delivery ticket — review supporting backup.</div>}
+              {row.unsupportedInvoiceCharge&&<div style={{color:"#fde68a",fontSize:11,marginTop:6}}>This charge was not shown on the linked delivery tickets, so the app cannot verify it from ticket data. This is not counted as a mismatch.</div>}
             </div>;
           })}
         </div>}
@@ -2982,11 +2987,11 @@ Screenshot attached: Yes / No`}</pre>
             </div>
             {invoices.length===0?<div style={{color:C.muted,textAlign:"center",padding:"60px 0"}}>No invoices yet.</div>
             :filteredInvoices.length===0?<div style={{color:C.muted,textAlign:"center",padding:"60px 0"}}>No invoices match “{invoiceSearch}”.</div>
-            :filteredInvoices.map(inv=>{ const m=matchInvoiceToTickets(inv,tickets); const chargeAudit=invoiceChargeAudit(inv,m.ticketsOnInvoice); const calculatedIssues=invoiceCalculatedChecks(inv).filter(check=>check.mismatch); const rateIssues=invoiceContractRateChecks(inv,liveOceanContractRates).filter(check=>check.mismatch); const hasIssues=m.unmatched.length>0||m.volumeMatch===false||chargeAudit.issues.length>0||calculatedIssues.length>0||rateIssues.length>0;
+            :filteredInvoices.map(inv=>{ const m=matchInvoiceToTickets(inv,tickets); const chargeAudit=invoiceChargeAudit(inv,m.ticketsOnInvoice); const calculatedIssues=invoiceCalculatedChecks(inv).filter(check=>check.mismatch); const rateIssues=invoiceContractRateChecks(inv,liveOceanContractRates).filter(check=>check.mismatch); const hasIssues=m.unmatched.length>0||m.volumeMatch===false||chargeAudit.issues.length>0||calculatedIssues.length>0||rateIssues.length>0; const hasWarnings=chargeAudit.warnings.length>0;
               return(<div key={inv.id} onClick={()=>setSelectedInvoice(inv)} style={{background:C.card,border:`1px solid ${hasIssues?C.red+"66":C.border}`,borderRadius:12,padding:"16px 20px",marginBottom:12,cursor:"pointer"}}>
                 <div style={{display:"flex",justifyContent:"space-between",alignItems:"flex-start",marginBottom:10,flexWrap:"wrap",gap:8}}>
                   <div><span style={{fontWeight:800,fontSize:15}}>Invoice {inv.invoice_number||"—"}</span><span style={{color:C.muted,fontSize:12,marginLeft:10}}>{inv.invoice_date}</span></div>
-                  <div style={{display:"flex",gap:7,flexWrap:"wrap",alignItems:"center"}}>{inv.total_amount>0&&<Badge color={C.green}>{inv.currency||""} {inv.total_amount?.toLocaleString()}</Badge>}<Badge color={hasIssues?C.red:C.green}>{hasIssues?"⚠ Review":"✓ Matched"}</Badge>
+                  <div style={{display:"flex",gap:7,flexWrap:"wrap",alignItems:"center"}}>{inv.total_amount>0&&<Badge color={C.green}>{inv.currency||""} {inv.total_amount?.toLocaleString()}</Badge>}<Badge color={hasIssues?C.red:hasWarnings?C.yellow:C.green}>{hasIssues?"⚠ Review":hasWarnings?"Support Check":"✓ Matched"}</Badge>
                     {(inv.file_url||inv.originalFile)&&<button onClick={e=>{ e.stopPropagation(); const src=inv.file_url||inv.originalFile; const isImg=/^data:image|\.(jpg|jpeg|png|gif|webp|heic)/i.test(src); const w=window.open(); w.document.write(isImg?`<html><body style="margin:0;background:#000;display:flex;align-items:center;justify-content:center;min-height:100vh"><img src="${src}" style="max-width:100%;max-height:100vh;object-fit:contain"></body></html>`:`<iframe src="${src}" width="100%" height="100%" style="border:none;position:fixed;top:0;left:0"></iframe>`); }} style={{background:"transparent",border:`1px solid ${C.blue}44`,color:C.blue,borderRadius:6,padding:"3px 9px",fontSize:12,fontWeight:700,cursor:"pointer"}}>📄 View</button>}
                     <button onClick={e=>{ e.stopPropagation(); if(window.confirm(`Delete invoice ${inv.invoice_number||"this invoice"}? You can undo this from Recently Deleted.`)) deleteInvoice(inv); }} style={{background:"transparent",border:`1px solid ${C.red}44`,color:C.red,borderRadius:6,padding:"3px 9px",fontSize:12,fontWeight:700,cursor:"pointer"}}>🗑 Delete</button>
                   </div>
@@ -2997,6 +3002,7 @@ Screenshot attached: Yes / No`}</pre>
                   {m.unmatched.length>0&&<span style={{color:C.red}}>⚠ {m.unmatched.length} not found</span>}
                   {m.volumeMatch===false&&<span style={{color:C.red}}>⚠ Volume mismatch</span>}
                   {chargeAudit.issues.length>0&&<span style={{color:C.red}}>⚠ {chargeAudit.issues.length} charge mismatch{chargeAudit.issues.length===1?"":"es"}</span>}
+                  {chargeAudit.warnings.length>0&&<span style={{color:C.yellow}}>△ {chargeAudit.warnings.length} charge{chargeAudit.warnings.length===1?"":"s"} not verifiable from tickets</span>}
                   {calculatedIssues.length>0&&<span style={{color:C.red}}>⚠ calculated fee mismatch</span>}
                   {rateIssues.length>0&&<span style={{color:C.red}}>⚠ {rateIssues.length} contract-rate issue{rateIssues.length===1?"":"s"}</span>}
                   {chargeAudit.comparisons.length>0&&chargeAudit.issues.length===0&&<span style={{color:C.green}}>✓ extra charges checked</span>}
