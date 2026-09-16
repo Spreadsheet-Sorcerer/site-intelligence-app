@@ -315,7 +315,7 @@ function normalizedChargeType(description) {
   return generic?{key:`other_${generic.replace(/\s+/g,"_")}`,label:String(description||"Other charge").trim()}:null;
 }
 
-function auditLineItems(lines) {
+function auditLineItems(lines,{ticketSide=false}={}) {
   const totals={};
   (lines||[]).forEach(line=>{
     const type=normalizedChargeType(line?.description);
@@ -324,7 +324,16 @@ function auditLineItems(lines) {
     const unitPrice=parseFloat(line?.unit_price);
     const amount=parseFloat(line?.amount);
     if(!totals[type.key]) totals[type.key]={...type,quantity:0,amount:0,unit:String(line?.unit||"").trim(),unitPrices:[],hasQuantity:false,hasAmount:false,lines:[]};
-    if(Number.isFinite(quantity)){totals[type.key].quantity+=quantity;totals[type.key].hasQuantity=true;}
+    if(Number.isFinite(quantity)){
+      // Ocean bills set retarder in metre-hours: 1-hour retarder uses the
+      // delivered metres once; 2-hour retarder uses them twice, etc. Invoice
+      // quantities are already converted, so apply the multiplier only to
+      // delivery-ticket rows.
+      const hourMatch=String(line?.description||"").match(/(\d+(?:\.\d+)?)\s*(?:hour|hr)\b/i);
+      const billingMultiplier=ticketSide&&type.key==="set_retarder"&&hourMatch?parseFloat(hourMatch[1]):1;
+      totals[type.key].quantity+=quantity*(Number.isFinite(billingMultiplier)&&billingMultiplier>0?billingMultiplier:1);
+      totals[type.key].hasQuantity=true;
+    }
     if(Number.isFinite(unitPrice)) totals[type.key].unitPrices.push(unitPrice);
     if(Number.isFinite(amount)){totals[type.key].amount+=amount;totals[type.key].hasAmount=true;}
     if(!totals[type.key].unit&&line?.unit) totals[type.key].unit=String(line.unit).trim();
@@ -337,7 +346,7 @@ function invoiceChargeAudit(invoice,matchedTickets) {
   const currentAudit=Number(invoice?.audit_version)>=20&&(matchedTickets||[]).length>0&&(matchedTickets||[]).every(ticket=>Number(ticket?.audit_version)>=20);
   if(!currentAudit) return {comparisons:[],issues:[],warnings:[]};
   const invoiceTotals=auditLineItems(invoice?.line_items);
-  const ticketTotals=auditLineItems((matchedTickets||[]).flatMap(ticket=>ticket?.charge_items||[]));
+  const ticketTotals=auditLineItems((matchedTickets||[]).flatMap(ticket=>ticket?.charge_items||[]),{ticketSide:true});
   const keys=new Set([...Object.keys(invoiceTotals),...Object.keys(ticketTotals)]);
   const comparisons=[...keys].map(key=>{
     const empty={key,label:key,quantity:0,amount:0,unit:"",unitPrices:[],hasQuantity:false,hasAmount:false,lines:[]};
