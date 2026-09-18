@@ -8,7 +8,7 @@ const C = {
   yellow: "#EAB308", red: "#EF4444", purple: "#A855F7",
   muted: "#6B7280", text: "#F9FAFB", sub: "#9CA3AF", teal: "#14B8A6",
 };
-const APP_VERSION = "20.10";
+const APP_VERSION = "20.11";
 
 // ─── SUPABASE STORAGE HELPERS ────────────────────────────────────────────────
 // Calls server-side API routes which talk to Supabase.
@@ -732,6 +732,18 @@ function concreteBreakDisplayState(test,result,overallStatus) {
   if(Number.isFinite(specified)&&strength>=specified) return {label:"PASS",color:C.green};
   if(overallStatus?.level==="extended_pending") return {label:"LOW — FOLLOW-UP PENDING",color:C.yellow};
   return {label:"LOW",color:C.red};
+}
+
+function nextPendingConcreteTest(test) {
+  const pending=(test?.results||[]).filter(result=>{
+    const strength=parseFloat(result?.strength_mpa);
+    return !Number.isFinite(strength)||result?.result==="pending";
+  });
+  return pending.sort((a,b)=>{
+    const dateCompare=String(a?.break_date||"9999-12-31").localeCompare(String(b?.break_date||"9999-12-31"));
+    if(dateCompare!==0) return dateCompare;
+    return (parseFloat(a?.age_days)||999)-(parseFloat(b?.age_days)||999);
+  })[0]||null;
 }
 
 // ─── EXPIRY HELPERS ────────────────────────────────────────────────────────────
@@ -1978,6 +1990,7 @@ function ConcreteModule({ onBack }) {
   const [reviewQueue, setReviewQueue] = useState([]); // tickets pending area/element confirmation
   const [tests, setTests] = useState([]);
   const [testSearch, setTestSearch] = useState("");
+  const [expandedTests, setExpandedTests] = useState({});
   const [storageReady, setStorageReady] = useState(false);
   const [saveStatus, setSaveStatus] = useState("loading");
   const [ticketSearch, setTicketSearch] = useState("");
@@ -3236,7 +3249,7 @@ Screenshot attached: Yes / No`}</pre>
                     const parts = String(value).split("-").map(Number);
                     const d = parts.length===3 ? new Date(parts[0], parts[1]-1, parts[2]) : new Date(value);
                     if (Number.isNaN(d.getTime())) return value;
-                    return d.toLocaleDateString("en-CA", { year:"numeric", month:"long", day:"numeric" });
+                    return d.toLocaleDateString("en-CA", { year:"numeric", month:"short", day:"numeric" });
                   };
 
                   const search = testSearch.trim().toLowerCase();
@@ -3255,74 +3268,67 @@ Screenshot attached: Yes / No`}</pre>
                     </div>
                   );
 
-                  const groupedTests = Object.values(visibleTests.reduce((groups, test) => {
-                    const date = test.date_sampled || "";
-                    const area = test.test_location || test.pour_area || "Location Not Assigned";
-                    const element = test.test_location ? "" : (test.pour_element || "");
-                    const key = `${date}|||${area}|||${element}`;
-                    if (!groups[key]) groups[key] = { date, area, element, tests:[] };
-                    groups[key].tests.push(test);
-                    return groups;
-                  }, {})).sort((a,b) => {
-                    const dateCompare = String(b.date||"").localeCompare(String(a.date||""));
-                    if (dateCompare !== 0) return dateCompare;
-                    const areaCompare = a.area.localeCompare(b.area);
-                    if (areaCompare !== 0) return areaCompare;
-                    return a.element.localeCompare(b.element);
+                  const sortedTests=[...visibleTests].sort((a,b)=>{
+                    const dateCompare=String(b.date_cast||b.date_sampled||"").localeCompare(String(a.date_cast||a.date_sampled||""));
+                    if(dateCompare!==0) return dateCompare;
+                    const aLocation=a.test_location||[a.pour_area,a.pour_element].filter(Boolean).join(" — ")||"";
+                    const bLocation=b.test_location||[b.pour_area,b.pour_element].filter(Boolean).join(" — ")||"";
+                    return aLocation.localeCompare(bLocation);
                   });
 
-                  return groupedTests.map(group => (
-                    <div key={`${group.date}|||${group.area}|||${group.element}`} style={{marginBottom:24}}>
-                      <div style={{background:C.card2,border:`1px solid ${C.border}`,borderRadius:12,padding:"12px 16px",marginBottom:10,display:"flex",justifyContent:"space-between",alignItems:"center",gap:10,flexWrap:"wrap"}}>
-                        <div style={{fontWeight:800,fontSize:15,color:C.text}}>
-                          {formatTestDate(group.date)} — {group.area}{group.element?` — ${group.element}`:""}
-                        </div>
-                        <Badge color={C.blue}>{group.tests.length} report{group.tests.length!==1?"s":""}</Badge>
-                      </div>
-
-                      {group.tests.map(test => {
-                        const status=concreteTestStatus(test);
-                        return (
-                          <div key={test.id} style={{background:C.card,border:`1px solid ${status.color+"66"}`,borderRadius:14,padding:"18px 22px",marginBottom:10}}>
-                            <div style={{display:"flex",justifyContent:"space-between",alignItems:"flex-start",flexWrap:"wrap",gap:10,marginBottom:14}}>
-                              <div>
-                                <div style={{fontWeight:800,fontSize:15}}>Report #{test.report_number||"—"}</div>
-                                <div style={{color:C.muted,fontSize:12,marginTop:3}}>
-                                  {test.lab_name||"Lab unknown"}
-                                  {test.ticket_number&&<span> · Ticket #{test.ticket_number}</span>}
-                                </div>
-                                <div style={{color:C.sub,fontSize:12,marginTop:4}}>📍 {test.test_location || [test.pour_area,test.pour_element].filter(Boolean).join(" — ") || "Location not assigned"}</div>
-                              </div>
-                              <div style={{display:"flex",gap:7,flexWrap:"wrap",alignItems:"center"}}>
-                                {test.mix_design&&<Badge color={C.accent}>{test.mix_design}</Badge>}
-                                <Badge color={status.color}>{status.level==="pass"?"✓":status.level==="fail"?"⚠":"⏳"} {status.label}</Badge>
-                                {test.file_url&&<button onClick={()=>window.open(test.file_url,"_blank")} style={{background:"transparent",border:`1px solid ${C.blue}44`,color:C.blue,borderRadius:6,padding:"3px 9px",fontSize:12,fontWeight:700,cursor:"pointer"}}>📄 View</button>}
-                                <button onClick={()=>editTestLocation(test)} title="Edit the descriptive location only; test results remain locked" style={{background:"transparent",border:`1px solid ${C.accent}44`,color:C.accent,borderRadius:6,padding:"3px 9px",fontSize:12,fontWeight:700,cursor:"pointer"}}>✎ Edit Label</button>
-                                <button onClick={()=>setTests(prev=>prev.filter(x=>x.id!==test.id))} style={{background:"transparent",border:`1px solid ${C.red}44`,color:C.red,borderRadius:6,padding:"3px 9px",fontSize:12,fontWeight:700,cursor:"pointer"}}>✕</button>
-                              </div>
-                            </div>
-                            <div style={{display:"flex",gap:10,flexWrap:"wrap",marginBottom:12}}>
-                              {test.slump_mm!=null&&<div style={{background:C.bg,borderRadius:8,padding:"8px 14px",fontSize:12}}><span style={{color:C.muted}}>Slump </span><span style={{fontWeight:700}}>{test.slump_mm} mm</span></div>}
-                              {test.air_content_pct!=null&&<div style={{background:C.bg,borderRadius:8,padding:"8px 14px",fontSize:12}}><span style={{color:C.muted}}>Air </span><span style={{fontWeight:700}}>{test.air_content_pct}%</span></div>}
-                              {test.specified_mpa!=null&&<div style={{background:C.bg,borderRadius:8,padding:"8px 14px",fontSize:12}}><span style={{color:C.muted}}>Spec </span><span style={{fontWeight:700}}>{test.specified_mpa} MPa</span></div>}
-                              {Number.isFinite(status.average)&&<div style={{background:C.bg,borderRadius:8,padding:"8px 14px",fontSize:12}}><span style={{color:C.muted}}>{status.age}-day average </span><span style={{fontWeight:700,color:status.color}}>{status.average.toFixed(1)} MPa</span></div>}
-                            </div>
-                            <div style={{display:"flex",gap:8,flexWrap:"wrap"}}>
-                              {(test.results||[]).map((r,i)=>{ const breakState=concreteBreakDisplayState(test,r,status); return (
-                                <div key={i} style={{background:breakState.color+"18",border:`1px solid ${breakState.color+"55"}`,borderRadius:10,padding:"10px 16px",minWidth:90,textAlign:"center"}}>
-                                  <div style={{color:C.muted,fontSize:11,fontWeight:700}}>{r.age_days} DAY</div>
-                                  <div style={{fontWeight:800,fontSize:18,color:breakState.color,margin:"4px 0"}}>{r.strength_mpa!=null?`${r.strength_mpa}`:"—"}<span style={{fontSize:11,fontWeight:400}}> MPa</span></div>
-                                  <div style={{fontSize:11,color:breakState.color,fontWeight:700}}>{breakState.label}</div>
-                                  {r.break_date&&<div style={{fontSize:10,color:C.muted,marginTop:3}}>{r.break_date}</div>}
-                                </div>
-                              );})}
-                            </div>
-                            {test.notes&&<div style={{marginTop:12,color:C.muted,fontSize:12,borderTop:`1px solid ${C.border}`,paddingTop:10}}>📝 {test.notes}</div>}
-                          </div>
-                        );
-                      })}
+                  return <div>
+                    <div style={{display:"grid",gridTemplateColumns:"110px minmax(0,1.35fr) minmax(0,1.15fr) minmax(0,1fr) 22px",gap:10,padding:"0 14px 8px",color:C.muted,fontSize:10,fontWeight:800,letterSpacing:.7,textTransform:"uppercase"}}>
+                      <span>Cast / Cure Date</span><span>Location</span><span>Status</span><span>Next Test</span><span></span>
                     </div>
-                  ));
+                    {sortedTests.map(test=>{
+                      const status=concreteTestStatus(test);
+                      const registerStatus=status.level==="pass"
+                        ? {label:"Up to strength",color:C.green,icon:"✓"}
+                        : status.level==="fail"
+                          ? {label:"Below strength",color:C.red,icon:"⚠"}
+                          : {label:"Awaiting testing",color:C.yellow,icon:"⏳"};
+                      const nextTest=nextPendingConcreteTest(test);
+                      const isOpen=!!expandedTests[test.id];
+                      const location=test.test_location||[test.pour_area,test.pour_element].filter(Boolean).join(" — ")||"Location not assigned";
+                      const castDate=test.date_cast||test.date_sampled||"";
+                      const nextTestText=nextTest?.break_date
+                        ? `${formatTestDate(nextTest.break_date)}${nextTest.age_days?` · ${nextTest.age_days}-day`:""}`
+                        : nextTest?.age_days
+                          ? `${nextTest.age_days}-day test pending`
+                          : (status.level==="pass"||status.level==="fail")?"Testing complete":"Awaiting test date";
+                      return <div key={test.id} style={{background:C.card,border:`1px solid ${isOpen?status.color+"77":C.border}`,borderRadius:12,marginBottom:9,overflow:"hidden"}}>
+                        <button type="button" onClick={()=>setExpandedTests(current=>({...current,[test.id]:!current[test.id]}))} style={{width:"100%",display:"grid",gridTemplateColumns:"110px minmax(0,1.35fr) minmax(0,1.15fr) minmax(0,1fr) 22px",gap:10,alignItems:"center",background:"transparent",border:"none",padding:"14px",color:C.text,textAlign:"left",cursor:"pointer",fontFamily:"inherit"}}>
+                          <div><div style={{fontWeight:800,fontSize:13}}>{formatTestDate(castDate)}</div><div style={{color:C.muted,fontSize:10,marginTop:2}}>Report #{test.report_number||"—"}</div></div>
+                          <div style={{fontWeight:750,fontSize:13}}>{location}</div>
+                          <div style={{minWidth:0}}><Badge color={registerStatus.color}>{registerStatus.icon} {registerStatus.label}</Badge></div>
+                          <div style={{fontSize:12,color:nextTest?C.yellow:C.muted,fontWeight:nextTest?700:500}}>{nextTestText}</div>
+                          <div style={{fontSize:18,color:C.muted,textAlign:"center",transform:isOpen?"rotate(180deg)":"none",transition:"transform .15s"}}>⌄</div>
+                        </button>
+
+                        {isOpen&&<div style={{borderTop:`1px solid ${C.border}`,padding:"16px 18px 18px"}}>
+                          <div style={{display:"flex",justifyContent:"space-between",alignItems:"flex-start",flexWrap:"wrap",gap:10,marginBottom:14}}>
+                            <div><div style={{fontWeight:800,fontSize:15}}>Report #{test.report_number||"—"}</div><div style={{color:C.muted,fontSize:12,marginTop:3}}>{test.lab_name||"Lab unknown"}{test.ticket_number&&<span> · Ticket #{test.ticket_number}</span>}</div></div>
+                            <div style={{display:"flex",gap:7,flexWrap:"wrap",alignItems:"center"}}>
+                              {test.mix_design&&<Badge color={C.accent}>{test.mix_design}</Badge>}
+                              {test.file_url&&<button onClick={()=>window.open(test.file_url,"_blank")} style={{background:"transparent",border:`1px solid ${C.blue}44`,color:C.blue,borderRadius:6,padding:"3px 9px",fontSize:12,fontWeight:700,cursor:"pointer"}}>📄 View</button>}
+                              <button onClick={()=>editTestLocation(test)} title="Edit the descriptive location only; test results remain locked" style={{background:"transparent",border:`1px solid ${C.accent}44`,color:C.accent,borderRadius:6,padding:"3px 9px",fontSize:12,fontWeight:700,cursor:"pointer"}}>✎ Edit Label</button>
+                              <button onClick={()=>setTests(prev=>prev.filter(x=>x.id!==test.id))} style={{background:"transparent",border:`1px solid ${C.red}44`,color:C.red,borderRadius:6,padding:"3px 9px",fontSize:12,fontWeight:700,cursor:"pointer"}}>✕</button>
+                            </div>
+                          </div>
+                          <div style={{display:"flex",gap:10,flexWrap:"wrap",marginBottom:12}}>
+                            {test.slump_mm!=null&&<div style={{background:C.bg,borderRadius:8,padding:"8px 14px",fontSize:12}}><span style={{color:C.muted}}>Slump </span><span style={{fontWeight:700}}>{test.slump_mm} mm</span></div>}
+                            {test.air_content_pct!=null&&<div style={{background:C.bg,borderRadius:8,padding:"8px 14px",fontSize:12}}><span style={{color:C.muted}}>Air </span><span style={{fontWeight:700}}>{test.air_content_pct}%</span></div>}
+                            {test.specified_mpa!=null&&<div style={{background:C.bg,borderRadius:8,padding:"8px 14px",fontSize:12}}><span style={{color:C.muted}}>Spec </span><span style={{fontWeight:700}}>{test.specified_mpa} MPa</span></div>}
+                            {Number.isFinite(status.average)&&<div style={{background:C.bg,borderRadius:8,padding:"8px 14px",fontSize:12}}><span style={{color:C.muted}}>{status.age}-day average </span><span style={{fontWeight:700,color:status.color}}>{status.average.toFixed(1)} MPa</span></div>}
+                          </div>
+                          <div style={{display:"flex",gap:8,flexWrap:"wrap"}}>
+                            {(test.results||[]).map((result,index)=>{ const breakState=concreteBreakDisplayState(test,result,status); return <div key={index} style={{background:breakState.color+"18",border:`1px solid ${breakState.color+"55"}`,borderRadius:10,padding:"10px 16px",minWidth:90,textAlign:"center"}}><div style={{color:C.muted,fontSize:11,fontWeight:700}}>{result.age_days} DAY</div><div style={{fontWeight:800,fontSize:18,color:breakState.color,margin:"4px 0"}}>{result.strength_mpa!=null?`${result.strength_mpa}`:"—"}<span style={{fontSize:11,fontWeight:400}}> MPa</span></div><div style={{fontSize:11,color:breakState.color,fontWeight:700}}>{breakState.label}</div>{result.break_date&&<div style={{fontSize:10,color:C.muted,marginTop:3}}>{result.break_date}</div>}</div>;})}
+                          </div>
+                          {test.notes&&<div style={{marginTop:12,color:C.muted,fontSize:12,borderTop:`1px solid ${C.border}`,paddingTop:10}}>📝 {test.notes}</div>}
+                        </div>}
+                      </div>;
+                    })}
+                  </div>;
                 })()
             }
           </div>
