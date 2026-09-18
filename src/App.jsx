@@ -8,7 +8,7 @@ const C = {
   yellow: "#EAB308", red: "#EF4444", purple: "#A855F7",
   muted: "#6B7280", text: "#F9FAFB", sub: "#9CA3AF", teal: "#14B8A6",
 };
-const APP_VERSION = "20.7";
+const APP_VERSION = "20.8";
 
 // ─── SUPABASE STORAGE HELPERS ────────────────────────────────────────────────
 // Calls server-side API routes which talk to Supabase.
@@ -273,6 +273,28 @@ function invoiceBaseConcreteBeforeHst(invoice) {
     const isBaseMaterial = /(\d+)\s*mpa.*plain|grout.*plain|plain.*grout/.test(description);
     return sum + (isBaseMaterial ? (parseFloat(line?.amount)||0) : 0);
   },0);
+}
+
+// Supplier invoices do not always print a separate total-volume field. OCR can
+// therefore invent or mis-add that value by counting an admixture row. Derive
+// the authoritative delivered volume from only the base concrete/grout rows.
+// Fall back to the extracted header value for invoice formats without itemized
+// base-material lines.
+function invoiceBaseMaterialVolumeM3(invoice) {
+  return (invoice?.line_items || []).reduce((sum,line) => {
+    const description = String(line?.description || "").toLowerCase();
+    const unit = String(line?.unit || "").toLowerCase().replace(/³/g,"3");
+    const quantity = parseFloat(line?.quantity) || 0;
+    const hasStrength = /\b\d+(?:\.\d+)?\s*mpa\b/.test(description);
+    const isBaseMaterial = hasStrength && /\b(?:plain|grout|concrete|mix)\b/.test(description);
+    const isCubicMetres = !unit || /\bm\s*3\b|cubic\s*met/.test(unit);
+    return sum + (isBaseMaterial && isCubicMetres ? quantity : 0);
+  },0);
+}
+
+function resolvedInvoiceVolumeM3(invoice) {
+  const calculated = invoiceBaseMaterialVolumeM3(invoice);
+  return calculated > 0 ? calculated : (parseFloat(invoice?.total_volume_m3) || 0);
 }
 
 function oceanBaseRateForMpa(value) {
@@ -2084,7 +2106,8 @@ Return ONLY a valid JSON array (even if only one ticket). No markdown, no explan
     const b64 = await toB64(file);
     const isPDF = file.type==="application/pdf";
     const block = isPDF ? {type:"document",source:{type:"base64",media_type:"application/pdf",data:b64}} : {type:"image",source:{type:"base64",media_type:file.type,data:b64}};
-    const prompt = `You are a construction accounts assistant. Extract ALL information from this concrete supplier invoice. Preserve EVERY invoice line separately, including concrete mixes, set retarder, water reducer, accelerator, fibres, heat, pumping, environmental fees, taxes and credits. Read quantities exactly as printed; do not infer or recalculate them.
+    const prompt = `You are a construction accounts assistant. Extract ALL information from this concrete supplier invoice. Preserve EVERY invoice line separately, including concrete mixes, grout, set retarder, water reducer, accelerator, fibres, heat, pumping, environmental fees, taxes and credits. Read quantities exactly as printed.
+For total_volume_m3, sum ONLY the quantities of the base concrete and grout material rows. Do not count admixture, waterproofing, environmental-fee, pumping, or other extra-charge quantities as additional delivered volume. For example, 1.00 m³ grout + 7.65 m³ concrete + 38.25 m³ concrete equals 46.90 m³ total volume.
 Return ONLY valid JSON (no markdown):
 {"invoice_number":"string","invoice_date":"YYYY-MM-DD","supplier":"name","total_amount":number or null,"currency":"CAD/USD/AUD","ticket_numbers":["array"],"total_volume_m3":number or null,"total_volume_yd3":number or null,"line_items":[{"description":"string","quantity":number or null,"unit":"string","unit_price":number or null,"amount":number or null}],"notes":"string or null"}`;
     const res = await fetch("/api/claude",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({model:"claude-sonnet-4-6",max_tokens:4000,messages:[{role:"user",content:[block,{type:"text",text:prompt}]}]})});
@@ -2140,7 +2163,7 @@ Return ONLY valid JSON (no markdown):
     const supplierText=String(invoice.supplier||"").toLowerCase();
     const isOcean=supplierText.includes("ocean");
     const invoiceDate=String(invoice.invoice_date||"");
-    const invoiceVolume=parseFloat(invoice.total_volume_m3)||0;
+    const invoiceVolume=resolvedInvoiceVolumeM3(invoice);
     // Ocean invoices show the first/reference ticket for each pour rather than
     // every delivery docket. When the complete same-day Ocean batch reconciles
     // to the invoice total, use that batch. Exact ticket matching remains the
@@ -2621,7 +2644,7 @@ Return ONLY valid JSON, no markdown:
         </div>
         <div style={{display:"flex",gap:12,marginBottom:20,flexWrap:"wrap"}}>
           {invoice.total_amount>0&&<div style={{background:C.bg,borderRadius:10,padding:"12px 18px",flex:1}}><div style={{color:C.muted,fontSize:11,fontWeight:700,textTransform:"uppercase",letterSpacing:1}}>Total</div><div style={{color:C.green,fontWeight:800,fontSize:20,fontFamily:"monospace"}}>{invoice.currency||""} {invoice.total_amount?.toLocaleString()}</div></div>}
-          {invoice.total_volume_m3>0&&<div style={{background:C.bg,borderRadius:10,padding:"12px 18px",flex:1}}><div style={{color:C.muted,fontSize:11,fontWeight:700,textTransform:"uppercase",letterSpacing:1}}>Invoice Volume</div><div style={{color:C.accent,fontWeight:800,fontSize:20,fontFamily:"monospace"}}>{fmt(invoice.total_volume_m3)} m³</div></div>}
+          {m.invoiceVolume>0&&<div style={{background:C.bg,borderRadius:10,padding:"12px 18px",flex:1}}><div style={{color:C.muted,fontSize:11,fontWeight:700,textTransform:"uppercase",letterSpacing:1}}>Invoice Volume</div><div style={{color:C.accent,fontWeight:800,fontSize:20,fontFamily:"monospace"}}>{fmt(m.invoiceVolume)} m³</div></div>}
           {m.ticketVolume>0&&<div style={{background:C.bg,borderRadius:10,padding:"12px 18px",flex:1}}><div style={{color:C.muted,fontSize:11,fontWeight:700,textTransform:"uppercase",letterSpacing:1}}>Ticket Volume</div><div style={{color:m.volumeOverbilled?C.red:C.green,fontWeight:800,fontSize:20,fontFamily:"monospace"}}>{fmt(m.ticketVolume)} m³</div></div>}
         </div>
         {m.volumeOverbilled&&<div style={{background:"#450a0a",border:`1px solid ${C.red}`,borderRadius:10,padding:"12px 16px",marginBottom:14,color:"#fca5a5",fontSize:13}}>⚠ Possible volume overbilling — invoice shows {fmt(m.invoiceVolume)} m³ but matched tickets support {fmt(m.ticketVolume)} m³</div>}
