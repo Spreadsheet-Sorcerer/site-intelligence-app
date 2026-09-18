@@ -8,7 +8,7 @@ const C = {
   yellow: "#EAB308", red: "#EF4444", purple: "#A855F7",
   muted: "#6B7280", text: "#F9FAFB", sub: "#9CA3AF", teal: "#14B8A6",
 };
-const APP_VERSION = "20.9";
+const APP_VERSION = "20.10";
 
 // ─── SUPABASE STORAGE HELPERS ────────────────────────────────────────────────
 // Calls server-side API routes which talk to Supabase.
@@ -676,6 +676,62 @@ function normalizeTicketDate(value, fileName) {
 }
 function ticketNumberKey(value) {
   return String(value || "").trim().replace(/\s+/g, "").toLowerCase();
+}
+
+// Determine the report-level status from tested cylinder averages rather than
+// trusting an OCR-generated pass/fail flag on every row. Early-age cylinders
+// are informational. A low 28-day average remains pending when the report has
+// a scheduled later-age cylinder, and becomes final only after that follow-up.
+function concreteTestStatus(test) {
+  const specified = parseFloat(test?.specified_mpa);
+  const results = (test?.results || []).map(result=>({
+    ...result,
+    age:parseFloat(result?.age_days),
+    strength:parseFloat(result?.strength_mpa),
+  }));
+  const tested = results.filter(result=>Number.isFinite(result.age)&&Number.isFinite(result.strength));
+  const pending = results.filter(result=>Number.isFinite(result.age)&&(!Number.isFinite(result.strength)||result.result==="pending"));
+  const averageAtAge = age => {
+    const values=tested.filter(result=>result.age===age).map(result=>result.strength);
+    return values.length?values.reduce((sum,value)=>sum+value,0)/values.length:null;
+  };
+  const status = (level,label,age=null,average=null) => ({
+    level,label,age,average,
+    color:level==="pass"?C.green:level==="fail"?C.red:C.yellow,
+  });
+
+  if(!Number.isFinite(specified)) return status("pending","Review required");
+
+  const laterTestedAges=[...new Set(tested.filter(result=>result.age>28).map(result=>result.age))].sort((a,b)=>b-a);
+  if(laterTestedAges.length){
+    const age=laterTestedAges[0];
+    const average=averageAtAge(age);
+    return average>=specified
+      ? status("pass",`${age}-day pass`,age,average)
+      : status("fail",`${age}-day low`,age,average);
+  }
+
+  const average28=averageAtAge(28);
+  if(average28!=null){
+    if(average28>=specified) return status("pass","28-day pass",28,average28);
+    const nextAge=[...new Set(pending.filter(result=>result.age>28).map(result=>result.age))].sort((a,b)=>a-b)[0];
+    return nextAge
+      ? status("extended_pending",`28-day low — ${nextAge}-day test pending`,28,average28)
+      : status("fail","28-day low — follow-up required",28,average28);
+  }
+
+  return status("pending","28-day test pending");
+}
+
+function concreteBreakDisplayState(test,result,overallStatus) {
+  const strength=parseFloat(result?.strength_mpa);
+  const age=parseFloat(result?.age_days);
+  const specified=parseFloat(test?.specified_mpa);
+  if(!Number.isFinite(strength)) return {label:"PENDING",color:C.muted};
+  if(Number.isFinite(age)&&age<28) return {label:"EARLY AGE",color:C.blue};
+  if(Number.isFinite(specified)&&strength>=specified) return {label:"PASS",color:C.green};
+  if(overallStatus?.level==="extended_pending") return {label:"LOW — FOLLOW-UP PENDING",color:C.yellow};
+  return {label:"LOW",color:C.red};
 }
 
 // ─── EXPIRY HELPERS ────────────────────────────────────────────────────────────
@@ -3225,11 +3281,9 @@ Screenshot attached: Yes / No`}</pre>
                       </div>
 
                       {group.tests.map(test => {
-                        const allPass = test.results?.every(r=>r.result==="pass"||r.result==="pending");
-                        const anyFail = test.results?.some(r=>r.result==="fail");
-                        const latestBreak = test.results?.filter(r=>r.strength_mpa).sort((a,b)=>b.age_days-a.age_days)[0];
+                        const status=concreteTestStatus(test);
                         return (
-                          <div key={test.id} style={{background:C.card,border:`1px solid ${anyFail?C.red+"66":allPass?C.green+"33":C.border}`,borderRadius:14,padding:"18px 22px",marginBottom:10}}>
+                          <div key={test.id} style={{background:C.card,border:`1px solid ${status.color+"66"}`,borderRadius:14,padding:"18px 22px",marginBottom:10}}>
                             <div style={{display:"flex",justifyContent:"space-between",alignItems:"flex-start",flexWrap:"wrap",gap:10,marginBottom:14}}>
                               <div>
                                 <div style={{fontWeight:800,fontSize:15}}>Report #{test.report_number||"—"}</div>
@@ -3241,7 +3295,7 @@ Screenshot attached: Yes / No`}</pre>
                               </div>
                               <div style={{display:"flex",gap:7,flexWrap:"wrap",alignItems:"center"}}>
                                 {test.mix_design&&<Badge color={C.accent}>{test.mix_design}</Badge>}
-                                {anyFail?<Badge color={C.red}>⚠ FAIL</Badge>:allPass&&test.results?.some(r=>r.result==="pass")?<Badge color={C.green}>✓ PASS</Badge>:<Badge color={C.yellow}>⏳ Pending</Badge>}
+                                <Badge color={status.color}>{status.level==="pass"?"✓":status.level==="fail"?"⚠":"⏳"} {status.label}</Badge>
                                 {test.file_url&&<button onClick={()=>window.open(test.file_url,"_blank")} style={{background:"transparent",border:`1px solid ${C.blue}44`,color:C.blue,borderRadius:6,padding:"3px 9px",fontSize:12,fontWeight:700,cursor:"pointer"}}>📄 View</button>}
                                 <button onClick={()=>editTestLocation(test)} title="Edit the descriptive location only; test results remain locked" style={{background:"transparent",border:`1px solid ${C.accent}44`,color:C.accent,borderRadius:6,padding:"3px 9px",fontSize:12,fontWeight:700,cursor:"pointer"}}>✎ Edit Label</button>
                                 <button onClick={()=>setTests(prev=>prev.filter(x=>x.id!==test.id))} style={{background:"transparent",border:`1px solid ${C.red}44`,color:C.red,borderRadius:6,padding:"3px 9px",fontSize:12,fontWeight:700,cursor:"pointer"}}>✕</button>
@@ -3251,17 +3305,17 @@ Screenshot attached: Yes / No`}</pre>
                               {test.slump_mm!=null&&<div style={{background:C.bg,borderRadius:8,padding:"8px 14px",fontSize:12}}><span style={{color:C.muted}}>Slump </span><span style={{fontWeight:700}}>{test.slump_mm} mm</span></div>}
                               {test.air_content_pct!=null&&<div style={{background:C.bg,borderRadius:8,padding:"8px 14px",fontSize:12}}><span style={{color:C.muted}}>Air </span><span style={{fontWeight:700}}>{test.air_content_pct}%</span></div>}
                               {test.specified_mpa!=null&&<div style={{background:C.bg,borderRadius:8,padding:"8px 14px",fontSize:12}}><span style={{color:C.muted}}>Spec </span><span style={{fontWeight:700}}>{test.specified_mpa} MPa</span></div>}
-                              {latestBreak&&<div style={{background:C.bg,borderRadius:8,padding:"8px 14px",fontSize:12}}><span style={{color:C.muted}}>Latest ({latestBreak.age_days}d) </span><span style={{fontWeight:700,color:latestBreak.result==="fail"?C.red:C.green}}>{latestBreak.strength_mpa} MPa</span></div>}
+                              {Number.isFinite(status.average)&&<div style={{background:C.bg,borderRadius:8,padding:"8px 14px",fontSize:12}}><span style={{color:C.muted}}>{status.age}-day average </span><span style={{fontWeight:700,color:status.color}}>{status.average.toFixed(1)} MPa</span></div>}
                             </div>
                             <div style={{display:"flex",gap:8,flexWrap:"wrap"}}>
-                              {(test.results||[]).map((r,i)=>(
-                                <div key={i} style={{background:r.result==="fail"?C.red+"22":r.result==="pass"?C.green+"22":C.bg,border:`1px solid ${r.result==="fail"?C.red+"66":r.result==="pass"?C.green+"44":C.border}`,borderRadius:10,padding:"10px 16px",minWidth:90,textAlign:"center"}}>
+                              {(test.results||[]).map((r,i)=>{ const breakState=concreteBreakDisplayState(test,r,status); return (
+                                <div key={i} style={{background:breakState.color+"18",border:`1px solid ${breakState.color+"55"}`,borderRadius:10,padding:"10px 16px",minWidth:90,textAlign:"center"}}>
                                   <div style={{color:C.muted,fontSize:11,fontWeight:700}}>{r.age_days} DAY</div>
-                                  <div style={{fontWeight:800,fontSize:18,color:r.result==="fail"?C.red:r.result==="pass"?C.green:C.muted,margin:"4px 0"}}>{r.strength_mpa!=null?`${r.strength_mpa}`:"—"}<span style={{fontSize:11,fontWeight:400}}> MPa</span></div>
-                                  <div style={{fontSize:11,color:r.result==="fail"?C.red:r.result==="pass"?C.green:C.muted,fontWeight:700}}>{r.result==="pending"?"PENDING":r.result?.toUpperCase()}</div>
+                                  <div style={{fontWeight:800,fontSize:18,color:breakState.color,margin:"4px 0"}}>{r.strength_mpa!=null?`${r.strength_mpa}`:"—"}<span style={{fontSize:11,fontWeight:400}}> MPa</span></div>
+                                  <div style={{fontSize:11,color:breakState.color,fontWeight:700}}>{breakState.label}</div>
                                   {r.break_date&&<div style={{fontSize:10,color:C.muted,marginTop:3}}>{r.break_date}</div>}
                                 </div>
-                              ))}
+                              );})}
                             </div>
                             {test.notes&&<div style={{marginTop:12,color:C.muted,fontSize:12,borderTop:`1px solid ${C.border}`,paddingTop:10}}>📝 {test.notes}</div>}
                           </div>
