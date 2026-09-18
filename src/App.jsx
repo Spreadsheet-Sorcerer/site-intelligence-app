@@ -8,7 +8,7 @@ const C = {
   yellow: "#EAB308", red: "#EF4444", purple: "#A855F7",
   muted: "#6B7280", text: "#F9FAFB", sub: "#9CA3AF", teal: "#14B8A6",
 };
-const APP_VERSION = "20.8";
+const APP_VERSION = "20.9";
 
 // ─── SUPABASE STORAGE HELPERS ────────────────────────────────────────────────
 // Calls server-side API routes which talk to Supabase.
@@ -312,7 +312,10 @@ function normalizedChargeType(description) {
   // tickets, so there is no ticket-side quantity to reconcile. Keep it in the
   // invoice totals/fee math but exclude it from the ticket audit.
   if(/water reducer|water reducing|hrwr|high range/.test(text)) return null;
-  if(/superplastic|plasticizer|plasticiser/.test(text)) return {key:"plasticizer",label:"Plasticizer"};
+  // Ocean delivery tickets sometimes shorten superplasticizer to a slump
+  // instruction such as "SUPER 7 / 175 MM". Treat that supplier wording as
+  // the same charge so the ticket total reconciles to the invoice wording.
+  if(/superplastic|plasticizer|plasticiser|\bsuper\s*\d|\bsuper\b.*\b(?:slump|mm)\b/.test(text)) return {key:"plasticizer",label:"Plasticizer"};
   if(/accelerator|accelerating|accel\b/.test(text)) return {key:"accelerator",label:"Accelerator"};
   if(/micro.*fibre|fiber|fibre/.test(text)) return {key:"fibre",label:"Fibre"};
   if(/hot water|heated water|winter heat|winter service|heat charge/.test(text)) return {key:"winter_heat",label:"Winter heat / hot water"};
@@ -2083,7 +2086,7 @@ location.
    - Use the description of work to select area/item. "Mud slab" should be area "Mud Slabs" and item "Slabs".
    If no pumping information exists on this record, return null for all pumping fields.
 
-6. charge_items: Extract EVERY separately printed charge or product row on the concrete ticket, including the base concrete row and extras such as set retarder, water reducer, accelerator, fibre, air entrainment, hot water, winter heat, colour and other admixtures. Keep the printed description. For each row return quantity, printed unit, unit price and amount when shown. Do not invent a price or amount. Do not include headings or totals.
+6. charge_items: Extract EVERY separately printed charge or product row on the concrete ticket, including the base concrete row and extras such as set retarder, water reducer, accelerator, fibre, air entrainment, hot water, winter heat, colour and other admixtures. Keep the printed description. Ocean wording such as "SUPER 7 / 175 MM" is a superplasticizer charge row and must be included. For each row return quantity, printed unit, unit price and amount when shown. Do not invent a price or amount. Do not include headings or totals.
 
 Return ONLY a valid JSON array (even if only one ticket). No markdown, no explanation:
 [{"date":"YYYY-MM-DD","ticket_number":"ticket number or pumping Slip No.","supplier":"supplier name","ticket_use":"structural|pump_priming_grout|misc_non_structural","mix_design":"MPa strength and mix code, or null for pumping slip","volume_m3":number or null,"volume_yd3":number or null,"pump_volume_m3":number or null,"pump_cost":number or null,"pump_hours_worked":number or null,"pump_travel_hours":number or null,"pump_hours_charged":number or null,"pump_category":"one exact pumping budget category or null","area":"best match from area list or null","item":"best match from element list or null","invoice_number":"string or null","driver":"driver or pump operator","truck_number":"truck or pump unit number","charge_items":[{"description":"exact printed description","quantity":number or null,"unit":"printed unit or null","unit_price":number or null,"amount":number or null}],"notes":"string or null"}]`;
