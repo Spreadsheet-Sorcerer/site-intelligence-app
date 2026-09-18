@@ -8,7 +8,7 @@ const C = {
   yellow: "#EAB308", red: "#EF4444", purple: "#A855F7",
   muted: "#6B7280", text: "#F9FAFB", sub: "#9CA3AF", teal: "#14B8A6",
 };
-const APP_VERSION = "20.0";
+const APP_VERSION = "20.7";
 
 // ─── SUPABASE STORAGE HELPERS ────────────────────────────────────────────────
 // Calls server-side API routes which talk to Supabase.
@@ -448,6 +448,31 @@ const PUMP_CATEGORIES = PUMP_BUDGET.map(r => r.category);
 const TOTAL_PUMP_BUDGET_M3 = PUMP_BUDGET.reduce((s,r) => s + r.volume_m3, 0);
 const TOTAL_PUMP_BUDGET_HOURS = PUMP_BUDGET.reduce((s,r) => s + r.hours, 0);
 const M3_TO_YD3 = 1.30795;
+const TICKET_USES = [
+  { value:"structural", label:"Structural Concrete" },
+  { value:"pump_priming_grout", label:"Pump / Priming Grout" },
+  { value:"misc_non_structural", label:"Miscellaneous / Non-Structural" },
+];
+const TICKET_USE_VALUES = new Set(TICKET_USES.map(option=>option.value));
+
+function ticketUse(ticket) {
+  return TICKET_USE_VALUES.has(ticket?.ticket_use) ? ticket.ticket_use : "structural";
+}
+function ticketUseLabel(ticket) {
+  return TICKET_USES.find(option=>option.value===ticketUse(ticket))?.label || "Structural Concrete";
+}
+function isStructuralTicket(ticket) {
+  return ticketUse(ticket) === "structural";
+}
+function inferredTicketUse(ticket) {
+  const text = [
+    ticket?.mix_design,
+    ticket?.notes,
+    ...(ticket?.charge_items || []).map(line=>line?.description),
+  ].filter(Boolean).join(" ").toLowerCase();
+  if (/\bgrout\b/.test(text) && ticket?.ticket_use !== "misc_non_structural") return "pump_priming_grout";
+  return TICKET_USE_VALUES.has(ticket?.ticket_use) ? ticket.ticket_use : "structural";
+}
 // Files are base64 encoded before being sent through the serverless API, which
 // adds roughly 33% to their size. Keep raw files below 3 MB to stay safely
 // under the request-body limit.
@@ -482,6 +507,7 @@ function parseMpaNum(str) {
   return isNaN(n) ? null : n;
 }
 function checkMpaMismatch(ticket) {
+  if (!isStructuralTicket(ticket)) return null;
   if (!ticket.area || !ticket.item || !ticket.mix_design) return null;
   const key = `${ticket.area}|||${ticket.item}`;
   const specStr = MPA_SPEC[key];
@@ -500,6 +526,10 @@ function validItemsForArea(area) {
 }
 function ticketCodingIssue(ticket) {
   if (!(parseFloat(ticket.volume_m3)>0)) return null;
+  if (!isStructuralTicket(ticket)) {
+    if (!parseMpaNum(ticket.mix_design)) return "mix design / MPa";
+    return null;
+  }
   if (!ticket.area) return "area";
   if (!ticket.item) return "element";
   if (!MPA_SPEC[`${ticket.area}|||${ticket.item}`]) return "valid area/element combination";
@@ -1863,7 +1893,7 @@ function ConcreteModule({ onBack }) {
   const [selectedInvoice, setSelectedInvoice] = useState(null);
   const [selectedTicket,  setSelectedTicket]  = useState(null);
   const [ratePerM3, setRatePerM3] = useState("");
-  const [manual, setManual] = useState({ date:"",ticket_number:"",supplier:"",mix_design:"",volume_m3:"",volume_yd3:"",area:"",item:"",invoice_number:"",notes:"" });
+  const [manual, setManual] = useState({ date:"",ticket_number:"",supplier:"",ticket_use:"structural",mix_design:"",volume_m3:"",volume_yd3:"",area:"",item:"",invoice_number:"",notes:"" });
   const [reviewQueue, setReviewQueue] = useState([]); // tickets pending area/element confirmation
   const [tests, setTests] = useState([]);
   const [testSearch, setTestSearch] = useState("");
@@ -2010,6 +2040,15 @@ CRITICAL FIELD EXTRACTION RULES — read carefully:
 names a project location. In particular, "CRANE BASE" means area "Crane Base"
 and item "Pad footings"; "MUD SLAB" means area "Mud Slabs" and item "Slabs".
 
+4B. ticket_use: choose exactly one of "structural", "pump_priming_grout", or
+"misc_non_structural". Use "pump_priming_grout" when the delivered product is
+described as grout (for example "45 MPa Grout Plain") and appears to be pump
+priming/line grout rather than a structural concrete placement. Use
+"misc_non_structural" for other delivered material that is not part of the
+structural concrete takeoff. Otherwise use "structural". For either
+non-structural choice, return null for area and item; do not invent a building
+location.
+
 5. pumping: Look for a line item labelled "Pumping", "Pump", or "Pompage" on a delivery ticket AND look for a separate yellow or white "EXTRA WORK ORDERS / HOURLY EQUIPMENT RENTALS" form where TYPE OF EQUIPMENT says Pump. A pumping form is a valid record even though it has no concrete mix design. Extract:
    - pump_volume_m3: the volume pumped in m³ (e.g. 8.00)
    - pump_cost: the dollar amount charged for pumping (e.g. 450.00, as a number without $ sign)
@@ -2025,7 +2064,7 @@ and item "Pad footings"; "MUD SLAB" means area "Mud Slabs" and item "Slabs".
 6. charge_items: Extract EVERY separately printed charge or product row on the concrete ticket, including the base concrete row and extras such as set retarder, water reducer, accelerator, fibre, air entrainment, hot water, winter heat, colour and other admixtures. Keep the printed description. For each row return quantity, printed unit, unit price and amount when shown. Do not invent a price or amount. Do not include headings or totals.
 
 Return ONLY a valid JSON array (even if only one ticket). No markdown, no explanation:
-[{"date":"YYYY-MM-DD","ticket_number":"ticket number or pumping Slip No.","supplier":"supplier name","mix_design":"MPa strength and mix code, or null for pumping slip","volume_m3":number or null,"volume_yd3":number or null,"pump_volume_m3":number or null,"pump_cost":number or null,"pump_hours_worked":number or null,"pump_travel_hours":number or null,"pump_hours_charged":number or null,"pump_category":"one exact pumping budget category or null","area":"best match from area list or null","item":"best match from element list or null","invoice_number":"string or null","driver":"driver or pump operator","truck_number":"truck or pump unit number","charge_items":[{"description":"exact printed description","quantity":number or null,"unit":"printed unit or null","unit_price":number or null,"amount":number or null}],"notes":"string or null"}]`;
+[{"date":"YYYY-MM-DD","ticket_number":"ticket number or pumping Slip No.","supplier":"supplier name","ticket_use":"structural|pump_priming_grout|misc_non_structural","mix_design":"MPa strength and mix code, or null for pumping slip","volume_m3":number or null,"volume_yd3":number or null,"pump_volume_m3":number or null,"pump_cost":number or null,"pump_hours_worked":number or null,"pump_travel_hours":number or null,"pump_hours_charged":number or null,"pump_category":"one exact pumping budget category or null","area":"best match from area list or null","item":"best match from element list or null","invoice_number":"string or null","driver":"driver or pump operator","truck_number":"truck or pump unit number","charge_items":[{"description":"exact printed description","quantity":number or null,"unit":"printed unit or null","unit_price":number or null,"amount":number or null}],"notes":"string or null"}]`;
     // Multi-page ticket PDFs can contain many records. A 4,000-token response
     // limit can cut the JSON array off mid-record, which makes it impossible to
     // parse even though Claude read the PDF successfully.
@@ -2243,13 +2282,14 @@ Return ONLY valid JSON, no markdown:
           if(isDuplicate){ duplicateNumbers.push(extracted.ticket_number); continue; }
           if(extracted.volume_m3&&!extracted.volume_yd3) extracted.volume_yd3=+(extracted.volume_m3*M3_TO_YD3).toFixed(3);
           if(extracted.volume_yd3&&!extracted.volume_m3) extracted.volume_m3=+(extracted.volume_yd3/M3_TO_YD3).toFixed(3);
+          extracted.ticket_use=inferredTicketUse(extracted);
           // Pass growing pending array so each ticket in batch accounts for previous ones
           const allSoFar = [...tickets, ...pending];
-          const suggestion = suggestLocation(extracted.mix_design, allSoFar);
+          const suggestion = isStructuralTicket(extracted) ? suggestLocation(extracted.mix_design, allSoFar) : {area:"",item:""};
           const printedArea = AREAS.find(area=>area.toLowerCase()===String(extracted.area||"").trim().toLowerCase()) || "";
           const printedItem = ITEMS.find(item=>item.toLowerCase()===String(extracted.item||"").trim().toLowerCase()) || "";
-          extracted.area = printedArea || suggestion.area || "";
-          extracted.item = printedItem || suggestion.item || "";
+          extracted.area = isStructuralTicket(extracted) ? (printedArea || suggestion.area || "") : "";
+          extracted.item = isStructuralTicket(extracted) ? (printedItem || suggestion.item || "") : "";
           pending.push({id:Date.now()+Math.random(),filename:file.name,fileType:file.type,file_url:fileUrl,added_at:new Date().toISOString(),audit_version:20,...extracted,_suggested:!printedArea&&!!(suggestion.area)});
         }
       }catch(e){ showToast(`Could not read "${file.name}": ${e.message}`,"err"); }
@@ -2278,8 +2318,11 @@ Return ONLY valid JSON, no markdown:
     setLoading(false); setLoadMsg(""); if(added){showToast(`${added} invoice${added>1?"s":""} scanned ✓`);setTab("invoices");}
   }
 
-  const totalPoured=tickets.reduce((s,t)=>s+(parseFloat(t.volume_m3)||0),0);
-  const totalYd3=tickets.reduce((s,t)=>s+(parseFloat(t.volume_yd3)||0),0);
+  const structuralTickets=tickets.filter(isStructuralTicket);
+  const ancillaryTickets=tickets.filter(t=>!isStructuralTicket(t));
+  const totalPoured=structuralTickets.reduce((s,t)=>s+(parseFloat(t.volume_m3)||0),0);
+  const totalYd3=structuralTickets.reduce((s,t)=>s+(parseFloat(t.volume_yd3)||0),0);
+  const ancillaryVolume=ancillaryTickets.reduce((s,t)=>s+(parseFloat(t.volume_m3)||0),0);
   const totalPumpM3   = tickets.reduce((s,t) => s + (parseFloat(t.pump_volume_m3)||0), 0);
   // Invoice hourly rows are authoritative once received. Pump slips fill the
   // gap for dates that have not yet been invoiced, so hours are never counted
@@ -2317,9 +2360,9 @@ Return ONLY valid JSON, no markdown:
   const pumpRemaining = Math.max(0, TOTAL_PUMP_BUDGET_M3 - totalPumpM3);
   const pumpHoursRemaining = Math.max(0, TOTAL_PUMP_BUDGET_HOURS - totalPumpHours);
   const pumpPct       = TOTAL_PUMP_BUDGET_M3 > 0 ? Math.min(100,(totalPumpM3/TOTAL_PUMP_BUDGET_M3)*100) : 0;
-  const mpaMismatches=tickets.filter(t=>checkMpaMismatch(t));
+  const mpaMismatches=structuralTickets.filter(t=>checkMpaMismatch(t));
   const pouredMap={};
-  tickets.forEach(t=>{
+  structuralTickets.forEach(t=>{
     // Special drawing-based labels retain their own MPa validation while their
     // volume rolls into the corresponding base scope allowance.
     const scopeItem=t.item===SHEAR_WALL_ITEM?"Wall":t.item===INTEGRAL_COLUMN_ITEM?"Columns":(t.item||"");
@@ -2353,7 +2396,7 @@ Return ONLY valid JSON, no markdown:
   const scopeByStrength={};
   SCOPE.forEach(row=>{ const strength=parseMpaNum(row.mpa); if(strength) scopeByStrength[strength]=(scopeByStrength[strength]||0)+row.m3; });
   const pouredByStrength={};
-  tickets.forEach(ticket=>{ const strength=parseMpaNum(ticket.mix_design); if(strength) pouredByStrength[strength]=(pouredByStrength[strength]||0)+(parseFloat(ticket.volume_m3)||0); });
+  structuralTickets.forEach(ticket=>{ const strength=parseMpaNum(ticket.mix_design); if(strength) pouredByStrength[strength]=(pouredByStrength[strength]||0)+(parseFloat(ticket.volume_m3)||0); });
   const originalBaseEstimate=Object.entries(scopeByStrength).reduce((sum,[strength,volume])=>sum+(liveOceanForecastRates[strength]||0)*volume,0);
   const originalForecastAllowances=TOTAL_SCOPE_M3*OCEAN_ALLOWANCE_PER_M3;
   const originalForecast=originalBaseEstimate+originalForecastAllowances;
@@ -2397,7 +2440,7 @@ Return ONLY valid JSON, no markdown:
   const ticketNeedle=ticketSearch.trim().toLowerCase();
   const invoiceNeedle=invoiceSearch.trim().toLowerCase();
   const filteredTickets=ticketNeedle?tickets.filter(t=>[
-    searchableDate(t.date),t.ticket_number,t.supplier,t.mix_design,t.area,t.item,t.invoice_number,t.driver,t.truck_number
+    searchableDate(t.date),t.ticket_number,t.supplier,ticketUseLabel(t),t.mix_design,t.area,t.item,t.invoice_number,t.driver,t.truck_number
   ].some(value=>String(value||"").toLowerCase().includes(ticketNeedle))):tickets;
   const filteredInvoices=invoiceNeedle?invoices.filter(inv=>[
     searchableDate(inv.invoice_date),inv.invoice_number,inv.supplier,inv.total_amount,
@@ -2427,10 +2470,10 @@ Return ONLY valid JSON, no markdown:
         });
       });
       const exportInvoiceNumber=matchedInvoice?.invoice_number||t.invoice_number||"";
-      return {"#":i+1,"Date":toExcelDate(t.date),"Ticket #":t.ticket_number||"","Supplier":t.supplier||"","Mix Design (Ticket)":t.mix_design||"","Spec MPa":t.area&&t.item?(MPA_SPEC[`${t.area}|||${t.item}`]||""):"","MPa Status":mismatch?`⚠ MISMATCH (spec: ${mismatch.specMpa})`:t.mix_design?"✓ OK":"—","Area":t.area||"","Element":t.item||"","Volume (m³)":parseFloat(t.volume_m3)||"","Volume (yd³)":parseFloat(t.volume_yd3)||"","Pumped (m³)":parseFloat(t.pump_volume_m3)||"","Pump Hours Charged":parseFloat(t.pump_hours_charged)||"","Invoice #":exportInvoiceNumber,"Driver / Operator":t.driver||"","Truck / Unit #":t.truck_number||"","Notes":t.notes||""};
+      return {"#":i+1,"Date":toExcelDate(t.date),"Ticket #":t.ticket_number||"","Supplier":t.supplier||"","Ticket Use":ticketUseLabel(t),"Counts Toward Structural Progress":isStructuralTicket(t)?"Yes":"No","Mix Design (Ticket)":t.mix_design||"","Spec MPa":t.area&&t.item?(MPA_SPEC[`${t.area}|||${t.item}`]||""):"","MPa Status":!isStructuralTicket(t)?"Not applicable":mismatch?`⚠ MISMATCH (spec: ${mismatch.specMpa})`:t.mix_design?"✓ OK":"—","Area":t.area||"","Element":t.item||"","Volume (m³)":parseFloat(t.volume_m3)||"","Volume (yd³)":parseFloat(t.volume_yd3)||"","Pumped (m³)":parseFloat(t.pump_volume_m3)||"","Pump Hours Charged":parseFloat(t.pump_hours_charged)||"","Invoice #":exportInvoiceNumber,"Driver / Operator":t.driver||"","Truck / Unit #":t.truck_number||"","Notes":t.notes||""};
     });
     const ws1=XLSX.utils.json_to_sheet(ticketRows,{cellDates:true,dateNF:"yyyy-mm-dd"});
-    ws1["!cols"]=[4,12,16,22,18,16,20,14,14,14,14,14,14,12,22].map(w=>({wch:w}));
+    ws1["!cols"]=[4,12,16,22,26,18,18,16,20,14,14,14,14,14,14,12,22].map(w=>({wch:w}));
     if(ws1["!ref"]) ws1["!autofilter"]={ref:ws1["!ref"]};
     XLSX.utils.book_append_sheet(wb,ws1,"Ticket Log");
     const ws2=XLSX.utils.json_to_sheet(scopeProgress.map(r=>({"Area":r.area,"Element":r.item,"Spec MPa":r.mpa||"","Scope (m³)":r.m3,"Poured (m³)":r.poured||"","Remaining (m³)":r.remaining||"","Overage (m³)":r.overage||"","Variance (m³)":+(r.poured-r.m3).toFixed(2),"% Complete":r.m3>0?((r.poured/r.m3)*100).toFixed(1)+"%":"0%"})));
@@ -2474,13 +2517,14 @@ Return ONLY valid JSON, no markdown:
       showToast(`Duplicate ticket blocked: ${manual.ticket_number} is already saved.`,"err");
       return;
     }
-    let m={...manual};
+    let m={...manual,ticket_use:inferredTicketUse(manual)};
+    if(!isStructuralTicket(m)){m.area="";m.item="";}
     if(m.volume_m3&&!m.volume_yd3) m.volume_yd3=+(parseFloat(m.volume_m3)*M3_TO_YD3).toFixed(3);
     if(m.volume_yd3&&!m.volume_m3) m.volume_m3=+(parseFloat(m.volume_yd3)/M3_TO_YD3).toFixed(3);
     const ticket={id:Date.now(),filename:"Manual entry",added_at:new Date().toISOString(),...m};
     setTickets(prev=>[...prev,ticket]);
     const mismatch=checkMpaMismatch(ticket);
-    setManual({date:"",ticket_number:"",supplier:"",mix_design:"",volume_m3:"",volume_yd3:"",area:"",item:"",invoice_number:"",notes:""});
+    setManual({date:"",ticket_number:"",supplier:"",ticket_use:"structural",mix_design:"",volume_m3:"",volume_yd3:"",area:"",item:"",invoice_number:"",notes:""});
     setManualOpen(false);
     if(mismatch) showToast(`Ticket added — ⚠ MPa mismatch! Ticket: ${mismatch.ticketMpa}, Spec: ${mismatch.specMpa}`,"err");
     else showToast("Ticket added ✓");
@@ -2497,7 +2541,9 @@ Return ONLY valid JSON, no markdown:
     const duplicate=newNumberKey&&latestTickets.some(t=>t.id!==original.id&&ticketNumberKey(t.ticket_number)===newNumberKey);
     if(duplicate){showToast(`Ticket number ${draft.ticket_number} is already in the log.`,"err");return false;}
     const volumeM3=parseFloat(draft.volume_m3)||0;
-    const updated={...original,...draft,volume_m3:volumeM3||null,volume_yd3:volumeM3?+(volumeM3*M3_TO_YD3).toFixed(3):null,modified_at:new Date().toISOString()};
+    const normalizedDraft={...draft,ticket_use:inferredTicketUse(draft)};
+    if(!isStructuralTicket(normalizedDraft)){normalizedDraft.area="";normalizedDraft.item="";}
+    const updated={...original,...normalizedDraft,volume_m3:volumeM3||null,volume_yd3:volumeM3?+(volumeM3*M3_TO_YD3).toFixed(3):null,modified_at:new Date().toISOString()};
     const exists=latestTickets.some(t=>t.id===original.id);
     if(!exists){showToast("This ticket changed on another device. Refresh and try again.","err");return false;}
     setTickets(latestTickets.map(t=>t.id===original.id?updated:t));
@@ -2527,14 +2573,16 @@ Return ONLY valid JSON, no markdown:
         {editing?<div style={{marginBottom:16}}>
           <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:10}}>{editField("Ticket #","ticket_number")}{editField("Date","date","date")}</div>
           {editField("Supplier","supplier")}
+          <div style={{marginBottom:11}}><label style={{display:"block",color:C.muted,fontSize:10,fontWeight:700,textTransform:"uppercase",letterSpacing:1,marginBottom:4}}>Ticket Use</label><select value={ticketUse(draft)} onChange={e=>setDraft(d=>({...d,ticket_use:e.target.value,...(e.target.value!=="structural"?{area:"",item:""}:{})}))} style={editFieldStyle}>{TICKET_USES.map(option=><option key={option.value} value={option.value}>{option.label}</option>)}</select></div>
           <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:10}}>{editField("Volume (m³)","volume_m3","number")}{editField("Ticket Mix / MPa","mix_design")}</div>
-          <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:10}}>
+          {isStructuralTicket(draft)&&<div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:10}}>
             <div style={{marginBottom:11}}><label style={{display:"block",color:C.muted,fontSize:10,fontWeight:700,textTransform:"uppercase",letterSpacing:1,marginBottom:4}}>Area</label><select value={draft.area||""} onChange={e=>setDraft(d=>({...d,area:e.target.value,item:""}))} style={editFieldStyle}><option value="">— select area —</option>{AREAS.map(a=><option key={a} value={a}>{a}</option>)}</select></div>
             <div style={{marginBottom:11}}><label style={{display:"block",color:C.muted,fontSize:10,fontWeight:700,textTransform:"uppercase",letterSpacing:1,marginBottom:4}}>Element</label><select value={draft.item||""} onChange={e=>setDraft(d=>({...d,item:e.target.value}))} style={editFieldStyle}><option value="">— select element —</option>{ITEMS.map(it=><option key={it} value={it}>{it}</option>)}</select></div>
-          </div>
+          </div>}
           {editField("Invoice #","invoice_number")}
           <div style={{marginBottom:11}}><label style={{display:"block",color:C.muted,fontSize:10,fontWeight:700,textTransform:"uppercase",letterSpacing:1,marginBottom:4}}>Notes</label><textarea value={draft.notes||""} onChange={e=>setDraft(d=>({...d,notes:e.target.value}))} rows={3} style={{...editFieldStyle,resize:"vertical"}}/></div>
           {specMpa&&<div style={{background:mismatch?"#450a0a":"#052e16",border:`1px solid ${mismatch?C.red:C.green}55`,borderRadius:8,padding:"9px 12px",fontSize:13,color:mismatch?"#fca5a5":"#86efac"}}>Specified mix for {draft.area} — {draft.item}: <b>{specMpa}</b></div>}
+          {!isStructuralTicket(draft)&&<div style={{background:C.teal+"12",border:`1px solid ${C.teal}55`,borderRadius:8,padding:"9px 12px",fontSize:13,color:"#99f6e4"}}>This material remains available for invoice reconciliation but is excluded from structural progress.</div>}
         </div>:<>
         <div style={{display:"flex",gap:10,flexWrap:"wrap",marginBottom:16}}>
           {ticket.volume_m3&&<div style={{background:C.bg,borderRadius:10,padding:"12px 16px",flex:1}}><div style={{color:C.muted,fontSize:11,fontWeight:700,textTransform:"uppercase"}}>Volume</div><div style={{color:C.accent,fontWeight:800,fontSize:20,fontFamily:"monospace"}}>{parseFloat(ticket.volume_m3).toFixed(2)} m³</div></div>}
@@ -2544,6 +2592,7 @@ Return ONLY valid JSON, no markdown:
           {specMpa&&<div style={{background:C.bg,borderRadius:10,padding:"12px 16px",flex:1}}><div style={{color:C.muted,fontSize:11,fontWeight:700,textTransform:"uppercase"}}>Spec MPa</div><div style={{color:C.green,fontWeight:800,fontSize:16}}>{specMpa}</div></div>}
         </div>
         <div style={{background:C.bg,borderRadius:10,padding:"14px 16px",marginBottom:16,fontSize:13}}>
+          <div style={{marginBottom:6}}><span style={{color:C.muted}}>Ticket use: </span><b>{ticketUseLabel(ticket)}</b></div>
           {ticket.area&&<div style={{marginBottom:6}}><span style={{color:C.muted}}>Location: </span><b>{ticket.area}{ticket.item?` — ${ticket.item}`:""}</b></div>}
           {ticket.supplier&&<div style={{marginBottom:6}}><span style={{color:C.muted}}>Supplier: </span><b>{ticket.supplier}</b></div>}
           {ticket.invoice_number&&<div style={{marginBottom:6}}><span style={{color:C.muted}}>Invoice #: </span><b>{ticket.invoice_number}</b></div>}
@@ -2682,7 +2731,7 @@ Screenshot attached: Yes / No`}</pre>
         {tab==="dashboard"&&(
           <div>
             <div style={{display:"flex",gap:14,flexWrap:"wrap",marginBottom:26}}>
-              <Stat label="Total Poured"   value={`${fmt(totalPoured)} m³`}  sub={`${fmt(totalYd3)} yd³`}             color={C.accent}/>
+              <Stat label="Structural Poured" value={`${fmt(totalPoured)} m³`} sub={`${fmt(totalYd3)} yd³${ancillaryVolume>0?` · ${fmt(ancillaryVolume)} m³ ancillary excluded`:""}`} color={C.accent}/>
               <Stat label="Remaining"      value={`${fmt(remaining)} m³`}    sub={`${fmt(remaining*M3_TO_YD3)} yd³`}  color={remaining>0?C.yellow:C.green}/>
               <Stat label="Overage"        value={`${fmt(totalOverage)} m³`} sub={overageAreas.length?`${overageAreas.length} area${overageAreas.length>1?"s":""} over scope`:"none recorded"} color={totalOverage>0?C.red:C.green}/>
               <Stat label="Tickets"        value={tickets.length}             sub="dockets scanned"                    color={C.blue}/>
@@ -2785,15 +2834,24 @@ Screenshot attached: Yes / No`}</pre>
                         </div>
 
                         <div style={{display:"flex",gap:10,flexWrap:"wrap",alignItems:"flex-end"}}>
+                          <div style={{flex:1,minWidth:210}}>
+                            <label style={{display:"block",color:C.muted,fontSize:10,fontWeight:700,letterSpacing:1,textTransform:"uppercase",marginBottom:4}}>Ticket Use *</label>
+                            <select value={ticketUse(t)} onChange={e=>{
+                              const val=e.target.value;
+                              setReviewQueue(q=>q.map((x,j)=>j===i?{...x,ticket_use:val,...(val!=="structural"?{area:"",item:"",_suggested:false}:{})}:x));
+                            }} style={{width:"100%",background:C.bg,border:`1px solid ${isStructuralTicket(t)?C.blue:C.teal}`,borderRadius:8,padding:"9px 12px",color:C.text,fontSize:14,boxSizing:"border-box"}}>
+                              {TICKET_USES.map(option=><option key={option.value} value={option.value}>{option.label}</option>)}
+                            </select>
+                          </div>
                           <div style={{flex:1,minWidth:160}}>
                             <label style={{display:"block",color:C.muted,fontSize:10,fontWeight:700,letterSpacing:1,textTransform:"uppercase",marginBottom:4}}>
-                              Area * {t._suggested&&t.area?<span style={{color:C.blue,fontWeight:600,fontSize:9,letterSpacing:.5}}> 🤖 suggested</span>:null}
+                              Area {isStructuralTicket(t)?"*":"— not required"} {t._suggested&&t.area?<span style={{color:C.blue,fontWeight:600,fontSize:9,letterSpacing:.5}}> 🤖 suggested</span>:null}
                             </label>
-                            <select value={t.area||""} onChange={e=>{
+                            <select disabled={!isStructuralTicket(t)} value={t.area||""} onChange={e=>{
                               const val=e.target.value;
                               setReviewQueue(q=>q.map((x,j)=>j===i?{...x,area:val,item:"",_suggested:false}:x));
-                            }} style={{width:"100%",background:C.bg,border:`1px solid ${t.area?C.blue:C.yellow}`,borderRadius:8,padding:"9px 12px",color:C.text,fontSize:14,boxSizing:"border-box"}}>
-                              <option value="">— select area —</option>
+                            }} style={{width:"100%",background:C.bg,border:`1px solid ${!isStructuralTicket(t)?C.border:t.area?C.blue:C.yellow}`,borderRadius:8,padding:"9px 12px",color:C.text,fontSize:14,boxSizing:"border-box",opacity:isStructuralTicket(t)?1:.55}}>
+                              <option value="">{isStructuralTicket(t)?"— select area —":"— ancillary material —"}</option>
                               {AREAS.map(a=><option key={a} value={a}>{a}</option>)}
                             </select>
                           </div>
@@ -2806,20 +2864,20 @@ Screenshot attached: Yes / No`}</pre>
                           </div>}
                           <div style={{flex:1,minWidth:160}}>
                             <label style={{display:"block",color:C.muted,fontSize:10,fontWeight:700,letterSpacing:1,textTransform:"uppercase",marginBottom:4}}>
-                              Element * {t._suggested&&t.item?<span style={{color:C.blue,fontWeight:600,fontSize:9,letterSpacing:.5}}> 🤖 suggested</span>:null}
+                              Element {isStructuralTicket(t)?"*":"— not required"} {t._suggested&&t.item?<span style={{color:C.blue,fontWeight:600,fontSize:9,letterSpacing:.5}}> 🤖 suggested</span>:null}
                             </label>
-                            <select value={t.item||""} onChange={e=>{
+                            <select disabled={!isStructuralTicket(t)} value={t.item||""} onChange={e=>{
                               const val=e.target.value;
                               setReviewQueue(q=>q.map((x,j)=>j===i?{...x,item:val,_suggested:false}:x));
-                            }} style={{width:"100%",background:C.bg,border:`1px solid ${t.item?C.blue:C.yellow}`,borderRadius:8,padding:"9px 12px",color:C.text,fontSize:14,boxSizing:"border-box"}}>
-                              <option value="">— select element —</option>
+                            }} style={{width:"100%",background:C.bg,border:`1px solid ${!isStructuralTicket(t)?C.border:t.item?C.blue:C.yellow}`,borderRadius:8,padding:"9px 12px",color:C.text,fontSize:14,boxSizing:"border-box",opacity:isStructuralTicket(t)?1:.55}}>
+                              <option value="">{isStructuralTicket(t)?"— select element —":"— ancillary material —"}</option>
                               {ITEMS.map(it=><option key={it} value={it}>{it}</option>)}
                             </select>
                           </div>
                           <div style={{minWidth:160}}>
                             <label style={{display:"block",color:C.muted,fontSize:10,fontWeight:700,letterSpacing:1,textTransform:"uppercase",marginBottom:4}}>Spec MPa</label>
                             <div style={{background:C.bg,border:`1px solid ${mismatch?C.red:specMpa?C.blue+"66":C.border}`,borderRadius:8,padding:"9px 12px",fontSize:14,fontWeight:700,color:mismatch?C.red:specMpa?C.blue:C.muted,minHeight:38,boxSizing:"border-box"}}>
-                              {specMpa||"— select area & element —"}
+                              {!isStructuralTicket(t)?"Not applicable":specMpa||"— select area & element —"}
                             </div>
                           </div>
                           {parseFloat(t.volume_m3)>0&&<div style={{flex:1,minWidth:180}}>
@@ -2836,6 +2894,11 @@ Screenshot attached: Yes / No`}</pre>
                         {specMpa&&!mismatch&&(
                           <div style={{marginTop:10,background:"#052e16",border:`1px solid ${C.green}44`,borderRadius:8,padding:"9px 14px",fontSize:13,color:"#86efac",fontWeight:600}}>
                             ✓ Ticket strength meets or exceeds spec
+                          </div>
+                        )}
+                        {!isStructuralTicket(t)&&(
+                          <div style={{marginTop:10,background:C.teal+"12",border:`1px solid ${C.teal}55`,borderRadius:8,padding:"9px 14px",fontSize:13,color:"#99f6e4",fontWeight:600}}>
+                            Kept for ticket history and invoice reconciliation · excluded from structural progress and remaining quantities
                           </div>
                         )}
                       </div>
@@ -2872,7 +2935,8 @@ Screenshot attached: Yes / No`}</pre>
                 grouped[key].push(t);
               });
               return Object.entries(grouped).map(([date, dayTickets])=>{
-                const dayVol = dayTickets.reduce((s,t)=>s+(parseFloat(t.volume_m3)||0),0);
+                const dayVol = dayTickets.filter(isStructuralTicket).reduce((s,t)=>s+(parseFloat(t.volume_m3)||0),0);
+                const dayAncillaryVol = dayTickets.filter(t=>!isStructuralTicket(t)).reduce((s,t)=>s+(parseFloat(t.volume_m3)||0),0);
                 const dayMismatches = dayTickets.filter(t=>checkMpaMismatch(t)).length;
                 const hasPump = dayTickets.some(t=>parseFloat(t.pump_volume_m3)>0);
                 const pumpVol = dayTickets.reduce((s,t)=>s+(parseFloat(t.pump_volume_m3)||0),0);
@@ -2894,7 +2958,8 @@ Screenshot attached: Yes / No`}</pre>
                       </div>
                       <div style={{display:"flex",gap:8,flexWrap:"wrap",alignItems:"center"}}>
                         <Badge color={C.accent}>{dayTickets.length} ticket{dayTickets.length>1?"s":""}</Badge>
-                        <Badge color={C.blue}>{dayVol.toFixed(2)} m³</Badge>
+                        <Badge color={C.blue}>{dayVol.toFixed(2)} m³ structural</Badge>
+                        {dayAncillaryVol>0&&<Badge color={C.teal}>{dayAncillaryVol.toFixed(2)} m³ ancillary</Badge>}
                         {hasPump&&<Badge color={C.teal}>💧 {pumpVol.toFixed(2)} m³ pumped</Badge>}
                       </div>
                     </div>
@@ -2906,6 +2971,7 @@ Screenshot attached: Yes / No`}</pre>
                         <div style={{display:"flex",justifyContent:"space-between",alignItems:"flex-start",marginBottom:8,flexWrap:"wrap",gap:8}}>
                           <div><span style={{fontWeight:800,fontSize:15}}>{t.ticket_number||"No ticket #"}</span></div>
                           <div style={{display:"flex",gap:7,flexWrap:"wrap",alignItems:"center"}}>
+                            {!isStructuralTicket(t)&&<Badge color={C.teal}>{ticketUseLabel(t)}</Badge>}
                             {t.volume_m3&&<Badge color={C.accent}>{parseFloat(t.volume_m3).toFixed(2)} m³</Badge>}
                             {t.mix_design&&<Badge color={mismatch?C.red:C.green}>{t.mix_design}{mismatch?" ⚠":""}</Badge>}
                             {specMpa&&!mismatch&&<Badge color={C.muted}>spec: {specMpa}</Badge>}
@@ -2916,6 +2982,7 @@ Screenshot attached: Yes / No`}</pre>
                         </div>
                         <div style={{display:"flex",gap:16,flexWrap:"wrap",fontSize:13,color:C.sub}}>
                           {t.supplier&&<span>🏭 {t.supplier}</span>}
+                          {!isStructuralTicket(t)&&<span style={{color:C.teal}}>↳ Excluded from structural progress</span>}
                           {t.area&&<span>📍 {t.area}{t.item?` — ${t.item}`:""}</span>}
                           {t.invoice_number&&<span>🧾 Inv: {t.invoice_number}</span>}
                         </div>
@@ -3250,7 +3317,7 @@ Screenshot attached: Yes / No`}</pre>
             if (!mpaSummary[key]) mpaSummary[key] = { mpa: key, color: num>=35?C.purple:num>=32?C.blue:C.accent, scopeM3: 0, pouredM3: 0, tickets: [] };
             mpaSummary[key].scopeM3 += r.m3;
           });
-          tickets.forEach(t => {
+          structuralTickets.forEach(t => {
             if (!t.mix_design || !t.volume_m3) return;
             const num = parseMpaNum(t.mix_design);
             if (!num) return;
@@ -3398,7 +3465,11 @@ Screenshot attached: Yes / No`}</pre>
         <div style={{position:"fixed",inset:0,background:"#000b",zIndex:100,display:"flex",alignItems:"center",justifyContent:"center"}} onClick={e=>e.target===e.currentTarget&&setManualOpen(false)}>
           <div style={{background:C.card,border:`1px solid ${C.border}`,borderRadius:16,padding:30,width:"92%",maxWidth:500,maxHeight:"90vh",overflowY:"auto"}}>
             <div style={{fontWeight:800,fontSize:18,marginBottom:20}}>✏️ Add Ticket Manually</div>
-            {INPUT("date","Date","date")}{INPUT("ticket_number","Ticket / Docket #")}{INPUT("supplier","Supplier")}{INPUT("mix_design","Mix Design / Strength (e.g. 35 MPa)")}{INPUT("volume_m3","Volume (m³)","number")}{INPUT("volume_yd3","Volume (yd³)","number")}{INPUT("area","Area","text",AREAS)}{INPUT("item","Element Type","text",ITEMS)}{INPUT("invoice_number","Invoice #")}{INPUT("notes","Notes")}
+            {INPUT("date","Date","date")}{INPUT("ticket_number","Ticket / Docket #")}{INPUT("supplier","Supplier")}
+            <div style={{marginBottom:12}}><label style={{display:"block",color:C.muted,fontSize:10,fontWeight:700,letterSpacing:1,textTransform:"uppercase",marginBottom:4}}>Ticket Use</label><select value={manual.ticket_use||"structural"} onChange={e=>setManual(m=>({...m,ticket_use:e.target.value,...(e.target.value!=="structural"?{area:"",item:""}:{})}))} style={{width:"100%",background:C.bg,border:`1px solid ${C.border}`,borderRadius:8,padding:"9px 12px",color:C.text,fontSize:14,boxSizing:"border-box"}}>{TICKET_USES.map(option=><option key={option.value} value={option.value}>{option.label}</option>)}</select></div>
+            {INPUT("mix_design","Mix Design / Strength (e.g. 35 MPa)")}{INPUT("volume_m3","Volume (m³)","number")}{INPUT("volume_yd3","Volume (yd³)","number")}
+            {isStructuralTicket(manual)&&<>{INPUT("area","Area","text",AREAS)}{INPUT("item","Element Type","text",ITEMS)}</>}{INPUT("invoice_number","Invoice #")}{INPUT("notes","Notes")}
+            {!isStructuralTicket(manual)&&<div style={{background:C.teal+"12",border:`1px solid ${C.teal}55`,borderRadius:8,padding:"10px 14px",marginBottom:12,fontSize:13,color:"#99f6e4"}}>This material will stay in the ticket log and invoice reconciliation, but it will not change structural poured or remaining quantities.</div>}
             {manual.area&&manual.item&&manual.mix_design&&(()=>{ const preview=checkMpaMismatch({area:manual.area,item:manual.item,mix_design:manual.mix_design}); const spec=MPA_SPEC[`${manual.area}|||${manual.item}`]; if(preview) return(<div style={{background:"#450a0a",border:`1px solid ${C.red}`,borderRadius:8,padding:"10px 14px",marginBottom:12,fontSize:13,color:"#fca5a5"}}>⚠ MPa mismatch — you entered <b>{preview.ticketMpa}</b> but this element requires <b>{preview.specMpa}</b></div>); if(spec) return(<div style={{background:"#052e16",border:`1px solid ${C.green}44`,borderRadius:8,padding:"10px 14px",marginBottom:12,fontSize:13,color:"#86efac"}}>✓ Ticket strength meets or exceeds spec ({spec})</div>); return null; })()}
             <div style={{display:"flex",gap:10,marginTop:18}}><button onClick={addManual} style={{background:C.accent,color:"#fff",border:"none",borderRadius:9,padding:"11px 0",fontWeight:800,cursor:"pointer",flex:1}}>Add Ticket</button><button onClick={()=>setManualOpen(false)} style={{background:C.bg,color:C.muted,border:`1px solid ${C.border}`,borderRadius:9,padding:"11px 18px",fontWeight:700,cursor:"pointer"}}>Cancel</button></div>
           </div>
