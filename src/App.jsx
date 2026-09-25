@@ -8,7 +8,7 @@ const C = {
   yellow: "#EAB308", red: "#EF4444", purple: "#A855F7",
   muted: "#6B7280", text: "#F9FAFB", sub: "#9CA3AF", teal: "#14B8A6",
 };
-const APP_VERSION = "20.12";
+const APP_VERSION = "20.13";
 
 // ─── SUPABASE STORAGE HELPERS ────────────────────────────────────────────────
 // Calls server-side API routes which talk to Supabase.
@@ -1991,6 +1991,9 @@ function ConcreteModule({ onBack }) {
   const [tests, setTests] = useState([]);
   const [testSearch, setTestSearch] = useState("");
   const [expandedTests, setExpandedTests] = useState({});
+  const [expandedTicketDates, setExpandedTicketDates] = useState({});
+  const [expandedInvoiceDates, setExpandedInvoiceDates] = useState({});
+  const [testDrag, setTestDrag] = useState(false);
   const [storageReady, setStorageReady] = useState(false);
   const [saveStatus, setSaveStatus] = useState("loading");
   const [ticketSearch, setTicketSearch] = useState("");
@@ -3022,47 +3025,33 @@ Screenshot attached: Yes / No`}</pre>
             {tickets.length===0?<div style={{color:C.muted,textAlign:"center",padding:"60px 0"}}>No tickets yet.</div>
             :filteredTickets.length===0?<div style={{color:C.muted,textAlign:"center",padding:"60px 0"}}>No tickets match “{ticketSearch}”.</div>
             :(()=>{
-              // Group tickets by date, sorted newest first
-              const grouped = {};
-              [...filteredTickets].sort((a,b)=>(b.date||"").localeCompare(a.date||"")).forEach(t=>{
-                const key = t.date || "No date";
-                if(!grouped[key]) grouped[key] = [];
-                grouped[key].push(t);
-              });
-              return Object.entries(grouped).map(([date, dayTickets])=>{
-                const dayVol = dayTickets.filter(isStructuralTicket).reduce((s,t)=>s+(parseFloat(t.volume_m3)||0),0);
-                const dayAncillaryVol = dayTickets.filter(t=>!isStructuralTicket(t)).reduce((s,t)=>s+(parseFloat(t.volume_m3)||0),0);
-                const dayMismatches = dayTickets.filter(t=>checkMpaMismatch(t)).length;
-                const hasPump = dayTickets.some(t=>parseFloat(t.pump_volume_m3)>0);
-                const pumpVol = dayTickets.reduce((s,t)=>s+(parseFloat(t.pump_volume_m3)||0),0);
-                // Format date nicely
-                let displayDate = date;
-                if(date !== "No date") {
-                  try {
-                    const d = new Date(date + "T12:00:00");
-                    displayDate = d.toLocaleDateString("en-CA", { weekday:"long", year:"numeric", month:"long", day:"numeric" });
-                  } catch(e) {}
-                }
-                return (
-                  <div key={date} style={{marginBottom:24}}>
-                    {/* Date group header */}
-                    <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:10,paddingBottom:8,borderBottom:`2px solid ${C.border}`,flexWrap:"wrap",gap:8}}>
-                      <div style={{display:"flex",alignItems:"center",gap:10}}>
-                        <span style={{fontWeight:800,fontSize:15,color:C.text}}>📅 {displayDate}</span>
-                        {dayMismatches>0&&<Badge color={C.red}>⚠ {dayMismatches} mismatch{dayMismatches>1?"es":""}</Badge>}
-                      </div>
-                      <div style={{display:"flex",gap:8,flexWrap:"wrap",alignItems:"center"}}>
-                        <Badge color={C.accent}>{dayTickets.length} ticket{dayTickets.length>1?"s":""}</Badge>
-                        <Badge color={C.blue}>{dayVol.toFixed(2)} m³ structural</Badge>
-                        {dayAncillaryVol>0&&<Badge color={C.teal}>{dayAncillaryVol.toFixed(2)} m³ ancillary</Badge>}
-                        {hasPump&&<Badge color={C.teal}>💧 {pumpVol.toFixed(2)} m³ pumped</Badge>}
-                      </div>
-                    </div>
-                    {/* Tickets for this date */}
+              const dateKey=value=>String(value||"").trim().slice(0,10)||"No date";
+              const formatDate=value=>{
+                if(value==="No date") return "No Date Assigned";
+                const parts=String(value).split("-").map(Number);
+                const d=parts.length===3?new Date(parts[0],parts[1]-1,parts[2]):new Date(value);
+                return Number.isNaN(d.getTime())?value:d.toLocaleDateString("en-CA",{year:"numeric",month:"short",day:"numeric"});
+              };
+              const grouped=new Map();
+              [...filteredTickets]
+                .sort((a,b)=>dateKey(b.date).localeCompare(dateKey(a.date)))
+                .forEach(ticket=>{
+                  const key=dateKey(ticket.date);
+                  if(!grouped.has(key)) grouped.set(key,[]);
+                  grouped.get(key).push(ticket);
+                });
+              return <div>{[...grouped.entries()].map(([date,dayTickets])=>{
+                const isOpen=!!expandedTicketDates[date];
+                return <div key={date} style={{background:C.card,border:`1px solid ${isOpen?C.accent+"66":C.border}`,borderRadius:12,marginBottom:9,overflow:"hidden"}}>
+                  <button type="button" onClick={()=>setExpandedTicketDates(current=>({...current,[date]:!current[date]}))} style={{width:"100%",display:"flex",justifyContent:"space-between",alignItems:"center",gap:10,background:"transparent",border:"none",padding:"14px 16px",color:C.text,textAlign:"left",cursor:"pointer",fontFamily:"inherit"}}>
+                    <span style={{fontWeight:800,fontSize:14}}>{formatDate(date)}</span>
+                    <span style={{fontSize:18,color:C.muted,transform:isOpen?"rotate(180deg)":"none",transition:"transform .15s"}}>⌄</span>
+                  </button>
+                  {isOpen&&<div style={{borderTop:`1px solid ${C.border}`,padding:"10px 14px 4px"}}>
                     {dayTickets.map(t=>{
                       const mismatch=checkMpaMismatch(t);
                       const specMpa=t.area&&t.item?MPA_SPEC[`${t.area}|||${t.item}`]:null;
-                      return(<div key={t.id} onClick={()=>setSelectedTicket(t)} style={{background:C.card,border:`1px solid ${mismatch?C.red+"88":C.border}`,borderRadius:12,padding:"15px 20px",marginBottom:10,cursor:"pointer"}}>
+                      return <div key={t.id} onClick={()=>setSelectedTicket(t)} style={{background:C.bg,border:`1px solid ${mismatch?C.red+"88":C.border}`,borderRadius:10,padding:"14px 16px",marginBottom:10,cursor:"pointer"}}>
                         <div style={{display:"flex",justifyContent:"space-between",alignItems:"flex-start",marginBottom:8,flexWrap:"wrap",gap:8}}>
                           <div><span style={{fontWeight:800,fontSize:15}}>{t.ticket_number||"No ticket #"}</span></div>
                           <div style={{display:"flex",gap:7,flexWrap:"wrap",alignItems:"center"}}>
@@ -3082,11 +3071,11 @@ Screenshot attached: Yes / No`}</pre>
                           {t.invoice_number&&<span>🧾 Inv: {t.invoice_number}</span>}
                         </div>
                         {mismatch&&<div style={{marginTop:8,background:"#450a0a",borderRadius:7,padding:"7px 12px",fontSize:12,color:"#fca5a5",fontWeight:600}}>⚠ MPa mismatch — ticket: {mismatch.ticketMpa} · spec: {mismatch.specMpa}</div>}
-                      </div>);
+                      </div>;
                     })}
-                  </div>
-                );
-              });
+                  </div>}
+                </div>;
+              })}</div>;
             })()}
           </div>
         )}
@@ -3112,27 +3101,55 @@ Screenshot attached: Yes / No`}</pre>
             </div>
             {invoices.length===0?<div style={{color:C.muted,textAlign:"center",padding:"60px 0"}}>No invoices yet.</div>
             :filteredInvoices.length===0?<div style={{color:C.muted,textAlign:"center",padding:"60px 0"}}>No invoices match “{invoiceSearch}”.</div>
-            :filteredInvoices.map(inv=>{ const m=matchInvoiceToTickets(inv,tickets); const chargeAudit=invoiceChargeAudit(inv,m.ticketsOnInvoice); const calculatedIssues=invoiceCalculatedChecks(inv).filter(check=>check.mismatch); const rateIssues=invoiceContractRateChecks(inv,liveOceanContractRates).filter(check=>check.mismatch); const hasIssues=m.unmatched.length>0||m.volumeOverbilled||chargeAudit.issues.length>0||calculatedIssues.length>0||rateIssues.length>0; const hasWarnings=false;
-              return(<div key={inv.id} onClick={()=>setSelectedInvoice(inv)} style={{background:C.card,border:`1px solid ${hasIssues?C.red+"66":C.border}`,borderRadius:12,padding:"16px 20px",marginBottom:12,cursor:"pointer"}}>
-                <div style={{display:"flex",justifyContent:"space-between",alignItems:"flex-start",marginBottom:10,flexWrap:"wrap",gap:8}}>
-                  <div><span style={{fontWeight:800,fontSize:15}}>Invoice {inv.invoice_number||"—"}</span><span style={{color:C.muted,fontSize:12,marginLeft:10}}>{inv.invoice_date}</span></div>
-                  <div style={{display:"flex",gap:7,flexWrap:"wrap",alignItems:"center"}}>{inv.total_amount>0&&<Badge color={C.green}>{inv.currency||""} {inv.total_amount?.toLocaleString()}</Badge>}<Badge color={hasIssues?C.red:hasWarnings?C.yellow:C.green}>{hasIssues?"⚠ Review":hasWarnings?"Support Check":"✓ Matched"}</Badge>
-                    {(inv.file_url||inv.originalFile)&&<button onClick={e=>{ e.stopPropagation(); const src=inv.file_url||inv.originalFile; const isImg=/^data:image|\.(jpg|jpeg|png|gif|webp|heic)/i.test(src); const w=window.open(); w.document.write(isImg?`<html><body style="margin:0;background:#000;display:flex;align-items:center;justify-content:center;min-height:100vh"><img src="${src}" style="max-width:100%;max-height:100vh;object-fit:contain"></body></html>`:`<iframe src="${src}" width="100%" height="100%" style="border:none;position:fixed;top:0;left:0"></iframe>`); }} style={{background:"transparent",border:`1px solid ${C.blue}44`,color:C.blue,borderRadius:6,padding:"3px 9px",fontSize:12,fontWeight:700,cursor:"pointer"}}>📄 View</button>}
-                    <button onClick={e=>{ e.stopPropagation(); if(window.confirm(`Delete invoice ${inv.invoice_number||"this invoice"}? You can undo this from Recently Deleted.`)) deleteInvoice(inv); }} style={{background:"transparent",border:`1px solid ${C.red}44`,color:C.red,borderRadius:6,padding:"3px 9px",fontSize:12,fontWeight:700,cursor:"pointer"}}>🗑 Delete</button>
-                  </div>
-                </div>
-                <div style={{display:"flex",gap:20,fontSize:13,color:C.sub,flexWrap:"wrap"}}>
-                  {inv.supplier&&<span>🏭 {inv.supplier}</span>}
-                  <span style={{color:m.matched.length>0?C.green:C.muted}}>✓ {m.matched.length} matched</span>
-                  {m.unmatched.length>0&&<span style={{color:C.red}}>⚠ {m.unmatched.length} not found</span>}
-                  {m.volumeOverbilled&&<span style={{color:C.red}}>⚠ Possible volume overbilling</span>}
-                  {chargeAudit.issues.length>0&&<span style={{color:C.red}}>⚠ {chargeAudit.issues.length} charge mismatch{chargeAudit.issues.length===1?"":"es"}</span>}
-                  {calculatedIssues.length>0&&<span style={{color:C.red}}>⚠ calculated fee mismatch</span>}
-                  {rateIssues.length>0&&<span style={{color:C.red}}>⚠ {rateIssues.length} contract-rate issue{rateIssues.length===1?"":"s"}</span>}
-                  {chargeAudit.comparisons.length>0&&chargeAudit.issues.length===0&&<span style={{color:C.green}}>✓ extra charges checked</span>}
-                </div>
-              </div>);
-            })}
+            :(()=>{
+              const dateKey=value=>String(value||"").trim().slice(0,10)||"No date";
+              const formatDate=value=>{
+                if(value==="No date") return "No Date Assigned";
+                const parts=String(value).split("-").map(Number);
+                const d=parts.length===3?new Date(parts[0],parts[1]-1,parts[2]):new Date(value);
+                return Number.isNaN(d.getTime())?value:d.toLocaleDateString("en-CA",{year:"numeric",month:"short",day:"numeric"});
+              };
+              const grouped=new Map();
+              [...filteredInvoices]
+                .sort((a,b)=>dateKey(b.invoice_date).localeCompare(dateKey(a.invoice_date)))
+                .forEach(invoice=>{
+                  const key=dateKey(invoice.invoice_date);
+                  if(!grouped.has(key)) grouped.set(key,[]);
+                  grouped.get(key).push(invoice);
+                });
+              return <div>{[...grouped.entries()].map(([date,dayInvoices])=>{
+                const isOpen=!!expandedInvoiceDates[date];
+                return <div key={date} style={{background:C.card,border:`1px solid ${isOpen?C.purple+"66":C.border}`,borderRadius:12,marginBottom:9,overflow:"hidden"}}>
+                  <button type="button" onClick={()=>setExpandedInvoiceDates(current=>({...current,[date]:!current[date]}))} style={{width:"100%",display:"flex",justifyContent:"space-between",alignItems:"center",gap:10,background:"transparent",border:"none",padding:"14px 16px",color:C.text,textAlign:"left",cursor:"pointer",fontFamily:"inherit"}}>
+                    <span style={{fontWeight:800,fontSize:14}}>{formatDate(date)}</span>
+                    <span style={{fontSize:18,color:C.muted,transform:isOpen?"rotate(180deg)":"none",transition:"transform .15s"}}>⌄</span>
+                  </button>
+                  {isOpen&&<div style={{borderTop:`1px solid ${C.border}`,padding:"10px 14px 4px"}}>
+                    {dayInvoices.map(inv=>{ const m=matchInvoiceToTickets(inv,tickets); const chargeAudit=invoiceChargeAudit(inv,m.ticketsOnInvoice); const calculatedIssues=invoiceCalculatedChecks(inv).filter(check=>check.mismatch); const rateIssues=invoiceContractRateChecks(inv,liveOceanContractRates).filter(check=>check.mismatch); const hasIssues=m.unmatched.length>0||m.volumeOverbilled||chargeAudit.issues.length>0||calculatedIssues.length>0||rateIssues.length>0; const hasWarnings=false;
+                      return <div key={inv.id} onClick={()=>setSelectedInvoice(inv)} style={{background:C.bg,border:`1px solid ${hasIssues?C.red+"66":C.border}`,borderRadius:10,padding:"15px 16px",marginBottom:10,cursor:"pointer"}}>
+                        <div style={{display:"flex",justifyContent:"space-between",alignItems:"flex-start",marginBottom:10,flexWrap:"wrap",gap:8}}>
+                          <div><span style={{fontWeight:800,fontSize:15}}>Invoice {inv.invoice_number||"—"}</span></div>
+                          <div style={{display:"flex",gap:7,flexWrap:"wrap",alignItems:"center"}}>{inv.total_amount>0&&<Badge color={C.green}>{inv.currency||""} {inv.total_amount?.toLocaleString()}</Badge>}<Badge color={hasIssues?C.red:hasWarnings?C.yellow:C.green}>{hasIssues?"⚠ Review":hasWarnings?"Support Check":"✓ Matched"}</Badge>
+                            {(inv.file_url||inv.originalFile)&&<button onClick={e=>{ e.stopPropagation(); const src=inv.file_url||inv.originalFile; const isImg=/^data:image|\.(jpg|jpeg|png|gif|webp|heic)/i.test(src); const w=window.open(); w.document.write(isImg?`<html><body style="margin:0;background:#000;display:flex;align-items:center;justify-content:center;min-height:100vh"><img src="${src}" style="max-width:100%;max-height:100vh;object-fit:contain"></body></html>`:`<iframe src="${src}" width="100%" height="100%" style="border:none;position:fixed;top:0;left:0"></iframe>`); }} style={{background:"transparent",border:`1px solid ${C.blue}44`,color:C.blue,borderRadius:6,padding:"3px 9px",fontSize:12,fontWeight:700,cursor:"pointer"}}>📄 View</button>}
+                            <button onClick={e=>{ e.stopPropagation(); if(window.confirm(`Delete invoice ${inv.invoice_number||"this invoice"}? You can undo this from Recently Deleted.`)) deleteInvoice(inv); }} style={{background:"transparent",border:`1px solid ${C.red}44`,color:C.red,borderRadius:6,padding:"3px 9px",fontSize:12,fontWeight:700,cursor:"pointer"}}>🗑 Delete</button>
+                          </div>
+                        </div>
+                        <div style={{display:"flex",gap:20,fontSize:13,color:C.sub,flexWrap:"wrap"}}>
+                          {inv.supplier&&<span>🏭 {inv.supplier}</span>}
+                          <span style={{color:m.matched.length>0?C.green:C.muted}}>✓ {m.matched.length} matched</span>
+                          {m.unmatched.length>0&&<span style={{color:C.red}}>⚠ {m.unmatched.length} not found</span>}
+                          {m.volumeOverbilled&&<span style={{color:C.red}}>⚠ Possible volume overbilling</span>}
+                          {chargeAudit.issues.length>0&&<span style={{color:C.red}}>⚠ {chargeAudit.issues.length} charge mismatch{chargeAudit.issues.length===1?"":"es"}</span>}
+                          {calculatedIssues.length>0&&<span style={{color:C.red}}>⚠ calculated fee mismatch</span>}
+                          {rateIssues.length>0&&<span style={{color:C.red}}>⚠ {rateIssues.length} contract-rate issue{rateIssues.length===1?"":"s"}</span>}
+                          {chargeAudit.comparisons.length>0&&chargeAudit.issues.length===0&&<span style={{color:C.green}}>✓ extra charges checked</span>}
+                        </div>
+                      </div>;
+                    })}
+                  </div>}
+                </div>;
+              })}</div>;
+            })()}
           </div>
         )}
 
@@ -3222,10 +3239,16 @@ Screenshot attached: Yes / No`}</pre>
                 <div style={{fontWeight:800,fontSize:18}}>Concrete Test Reports</div>
                 <div style={{color:C.muted,fontSize:13,marginTop:2}}>{tests.length} report{tests.length!==1?"s":""} uploaded · cylinder break results</div>
               </div>
-              <div onDragOver={e=>{e.preventDefault();}} onDrop={e=>{e.preventDefault();handleTestFiles(e.dataTransfer.files);}} onClick={()=>{ const i=document.createElement("input"); i.type="file"; i.multiple=true; i.accept="image/*,application/pdf"; i.onchange=e=>handleTestFiles(e.target.files); i.click(); }} style={{border:`2px dashed ${C.border}`,borderRadius:12,padding:"16px 24px",textAlign:"center",cursor:"pointer",background:C.card}}>
+              <div
+                onDragEnter={e=>{e.preventDefault();setTestDrag(true);}}
+                onDragOver={e=>{e.preventDefault();setTestDrag(true);}}
+                onDragLeave={e=>{e.preventDefault();if(!e.currentTarget.contains(e.relatedTarget))setTestDrag(false);}}
+                onDrop={e=>{e.preventDefault();setTestDrag(false);handleTestFiles(e.dataTransfer.files);}}
+                onClick={()=>{ const i=document.createElement("input"); i.type="file"; i.multiple=true; i.accept="image/*,application/pdf"; i.onchange=e=>handleTestFiles(e.target.files); i.click(); }}
+                style={{border:`2px dashed ${testDrag?C.blue:C.border}`,borderRadius:12,padding:"16px 24px",textAlign:"center",cursor:"pointer",background:testDrag?C.blue+"12":C.card,transition:"all .15s"}}>
                 <div style={{fontSize:22,marginBottom:4}}>🔬</div>
-                <div style={{fontWeight:700,fontSize:13}}>Upload Test Reports</div>
-                <div style={{color:C.muted,fontSize:11}}>PDF or photo · AI extracts results</div>
+                <div style={{fontWeight:700,fontSize:13}}>{testDrag?"Drop Test Reports Here":"Drag & Drop Test Reports"}</div>
+                <div style={{color:C.muted,fontSize:11}}>or click to browse · PDF or photo</div>
               </div>
             </div>
             {tests.length>0&&<div style={{marginBottom:18}}>
