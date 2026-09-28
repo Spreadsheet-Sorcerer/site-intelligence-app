@@ -8,7 +8,7 @@ const C = {
   yellow: "#EAB308", red: "#EF4444", purple: "#A855F7",
   muted: "#6B7280", text: "#F9FAFB", sub: "#9CA3AF", teal: "#14B8A6",
 };
-const APP_VERSION = "20.14";
+const APP_VERSION = "20.15";
 
 // ─── SUPABASE STORAGE HELPERS ────────────────────────────────────────────────
 // Calls server-side API routes which talk to Supabase.
@@ -3116,10 +3116,21 @@ Screenshot attached: Yes / No`}</pre>
                 });
               return <div>{[...grouped.entries()].map(([date,dayInvoices])=>{
                 const isOpen=!!expandedInvoiceDates[date];
-                return <div key={date} style={{background:C.card,border:`1px solid ${isOpen?C.purple+"66":C.border}`,borderRadius:12,marginBottom:9,overflow:"hidden"}}>
-                  <button type="button" onClick={()=>setExpandedInvoiceDates(current=>({...current,[date]:!current[date]}))} style={{width:"100%",display:"flex",justifyContent:"space-between",alignItems:"center",gap:10,background:"transparent",border:"none",padding:"14px 16px",color:C.text,textAlign:"left",cursor:"pointer",fontFamily:"inherit"}}>
-                    <span style={{fontWeight:800,fontSize:14}}>{formatDate(date)}</span>
-                    <span style={{fontSize:18,color:C.muted,transform:isOpen?"rotate(180deg)":"none",transition:"transform .15s"}}>⌄</span>
+                const invoicesNeedingReview=dayInvoices.filter(inv=>{
+                  const m=matchInvoiceToTickets(inv,tickets);
+                  const chargeAudit=invoiceChargeAudit(inv,m.ticketsOnInvoice);
+                  const calculatedIssues=invoiceCalculatedChecks(inv).filter(check=>check.mismatch);
+                  const rateIssues=invoiceContractRateChecks(inv,liveOceanContractRates).filter(check=>check.mismatch);
+                  return m.unmatched.length>0||m.volumeOverbilled||chargeAudit.issues.length>0||calculatedIssues.length>0||rateIssues.length>0;
+                });
+                const groupHasIssues=invoicesNeedingReview.length>0;
+                return <div key={date} style={{background:C.card,border:`1px solid ${groupHasIssues?C.red+"77":isOpen?C.purple+"66":C.border}`,borderRadius:12,marginBottom:9,overflow:"hidden"}}>
+                  <button type="button" onClick={()=>setExpandedInvoiceDates(current=>({...current,[date]:!current[date]}))} style={{width:"100%",display:"flex",justifyContent:"space-between",alignItems:"center",gap:10,background:groupHasIssues?C.red+"08":"transparent",border:"none",padding:"14px 16px",color:C.text,textAlign:"left",cursor:"pointer",fontFamily:"inherit"}}>
+                    <span style={{display:"flex",alignItems:"center",gap:10,flexWrap:"wrap"}}>
+                      <span style={{fontWeight:800,fontSize:14}}>{formatDate(date)}</span>
+                      {groupHasIssues&&<Badge color={C.red}>⚠ {invoicesNeedingReview.length} need review</Badge>}
+                    </span>
+                    <span style={{fontSize:18,color:groupHasIssues?C.red:C.muted,transform:isOpen?"rotate(180deg)":"none",transition:"transform .15s"}}>⌄</span>
                   </button>
                   {isOpen&&<div style={{borderTop:`1px solid ${C.border}`,padding:"10px 14px 4px"}}>
                     {dayInvoices.map(inv=>{ const m=matchInvoiceToTickets(inv,tickets); const chargeAudit=invoiceChargeAudit(inv,m.ticketsOnInvoice); const calculatedIssues=invoiceCalculatedChecks(inv).filter(check=>check.mismatch); const rateIssues=invoiceContractRateChecks(inv,liveOceanContractRates).filter(check=>check.mismatch); const hasIssues=m.unmatched.length>0||m.volumeOverbilled||chargeAudit.issues.length>0||calculatedIssues.length>0||rateIssues.length>0; const hasWarnings=false;
