@@ -8,7 +8,7 @@ const C = {
   yellow: "#EAB308", red: "#EF4444", purple: "#A855F7",
   muted: "#6B7280", text: "#F9FAFB", sub: "#9CA3AF", teal: "#14B8A6",
 };
-const APP_VERSION = "20.13";
+const APP_VERSION = "20.14";
 
 // ─── SUPABASE STORAGE HELPERS ────────────────────────────────────────────────
 // Calls server-side API routes which talk to Supabase.
@@ -240,13 +240,11 @@ const TOTAL_SCOPE_M3 = SCOPE.reduce((s,r) => s + r.m3, 0);
 // the estimator's admixture/miscellaneous and pumping total, scaled from the
 // estimate's 9,800.93 m³ pricing quantity to the app's live concrete scope.
 // No Southwest budget or internal allowance is stored or displayed here.
-// Ocean's quote does not contain a separate 40 MPa row. Keep the existing
-// planning dollars intact by using the quoted 35 MPa rate as a clearly labelled
-// proxy until a 40 MPa unit rate is supplied; quantities remain classified at 40.
-const OCEAN_BASE_RATES = { 20:205.90, 25:214.80, 35:247.20, 40:247.20 };
-// Rates confirmed by Ocean quotation C25-029R2. The 40 MPa value above remains
-// a forecasting proxy only and must never be presented as a contract-rate pass.
-const OCEAN_CONTRACT_BASE_RATES = { 20:205.90, 25:214.80, 35:247.20 };
+// Confirmed Ocean base supply rates used by both the forecast and invoice audit.
+// 40 MPa was confirmed at $271.50/m³ and should be audited as a contract rate,
+// not inferred from uploaded invoices.
+const OCEAN_BASE_RATES = { 20:205.90, 25:214.80, 35:247.20, 40:271.50 };
+const OCEAN_CONTRACT_BASE_RATES = { 20:205.90, 25:214.80, 35:247.20, 40:271.50 };
 const OCEAN_ESTIMATE_REFERENCE_M3 = 9800.93;
 const OCEAN_ESTIMATE_ADDITIVES = 346900;
 const OCEAN_ESTIMATE_PUMPING = 133577;
@@ -2480,11 +2478,10 @@ Return ONLY valid JSON, no markdown:
   const overageAreas=areaProgress.filter(r=>r.overage>0.01);
   const codedPoured=scopeProgress.reduce((s,r)=>s+r.poured,0);
   const pct=(codedPoured/TOTAL_SCOPE_M3)*100;
-  // Ocean did not quote a separate 40 MPa rate. Once the first valid 40 MPa
-  // invoice is uploaded, use its unit rate consistently for audit + forecast.
-  const observed40Rate=observedOceanRate(invoices,40);
-  const liveOceanContractRates={...OCEAN_CONTRACT_BASE_RATES,...(observed40Rate?{40:observed40Rate.rate}:{})};
-  const liveOceanForecastRates={...OCEAN_BASE_RATES,...(observed40Rate?{40:observed40Rate.rate}:{})};
+  // Use confirmed quoted rates directly. Never learn a contract rate from an
+  // invoice, because an overbilled invoice must not redefine the contract rate.
+  const liveOceanContractRates={...OCEAN_CONTRACT_BASE_RATES};
+  const liveOceanForecastRates={...OCEAN_BASE_RATES};
   const invoicesWithIssues=invoices.filter(inv=>{ const m=matchInvoiceToTickets(inv,tickets); const audit=invoiceChargeAudit(inv,m.ticketsOnInvoice); const calculated=invoiceCalculatedChecks(inv); const rates=invoiceContractRateChecks(inv,liveOceanContractRates); return m.unmatched.length>0||m.volumeOverbilled||audit.issues.length>0||calculated.some(check=>check.mismatch)||rates.some(check=>check.mismatch); }).length;
   const matchedInvoiceCount=Math.max(0,invoices.length-invoicesWithIssues);
   const totalInvoiced=invoices.reduce((s,inv)=>s+(parseFloat(inv.total_amount)||0),0);
@@ -3415,7 +3412,7 @@ Screenshot attached: Yes / No`}</pre>
                 </div>
                 <div style={{fontWeight:700,marginBottom:10}}>Forecast basis</div>
                 <div style={{display:"grid",gridTemplateColumns:"repeat(auto-fit,minmax(180px,1fr))",gap:10,fontSize:12}}>
-                  {[['20 MPa','$205.90/m³'],['25 MPa','$214.80/m³'],['35 MPa','$247.20/m³'],['40 MPa',observed40Rate?`${money(observed40Rate.rate)}/m³ · from invoice ${observed40Rate.invoice_number}`:'Using $247.20/m³ temporary proxy'],['Original allowance basis',`$${OCEAN_ALLOWANCE_PER_M3.toFixed(2)}/m³`]].map(([label,value])=><div key={label} style={{background:C.bg,borderRadius:9,padding:"10px 13px"}}><div style={{color:C.muted}}>{label}</div><div style={{fontWeight:800,marginTop:3}}>{value}</div></div>)}
+                  {[['20 MPa','$205.90/m³'],['25 MPa','$214.80/m³'],['35 MPa','$247.20/m³'],['40 MPa','$271.50/m³'],['Original allowance basis',`$${OCEAN_ALLOWANCE_PER_M3.toFixed(2)}/m³`]].map(([label,value])=><div key={label} style={{background:C.bg,borderRadius:9,padding:"10px 13px"}}><div style={{color:C.muted}}>{label}</div><div style={{fontWeight:800,marginTop:3}}>{value}</div></div>)}
                 </div>
                 <div style={{color:C.muted,fontSize:11,marginTop:10}}>Actual invoices replace estimated spending as they are uploaded. Base concrete remaining is priced at Ocean's quoted rates. Actual additives, environmental charges, heating/cooling and pumping draw down the original allowance pool so early high-cost pours are not projected a second time.</div>
               </div>
