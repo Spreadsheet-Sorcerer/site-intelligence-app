@@ -1,4 +1,4 @@
-// v20.19 — concrete testing progress aggregation fix
+// v20.20 — concrete testing progress aggregation fix
 import { useState, useRef, useEffect } from "react";
 import * as XLSX from "xlsx";
 
@@ -3541,27 +3541,37 @@ Screenshot attached: Yes / No`}</pre>
                   const groupStatus = group => {
                     const currentTests=currentConcreteTestReports(group.tests);
                     const statuses=currentTests.map(concreteTestStatus);
+                    const counts={
+                      pass:statuses.filter(item=>item.level==="pass").length,
+                      pending:statuses.filter(item=>item.level==="pending"&&!/review required/i.test(item.label||"")).length,
+                      followup:statuses.filter(item=>item.level==="extended_pending").length,
+                      fail:statuses.filter(item=>item.level==="fail").length,
+                      review:statuses.filter(item=>item.level==="pending"&&/review required/i.test(item.label||"")).length,
+                    };
                     const fail=statuses.find(item=>item.level==="fail");
-                    if(fail) return {...fail,category:"fail",currentTests};
+                    if(fail) return {...fail,category:"fail",currentTests,counts};
                     const followup=statuses.find(item=>item.level==="extended_pending");
-                    if(followup) return {...followup,category:"followup",currentTests};
+                    if(followup) return {...followup,category:"followup",currentTests,counts};
                     const review=statuses.find(item=>item.level==="pending"&&/review required/i.test(item.label||""));
-                    if(review) return {...review,category:"review",currentTests};
-                    if(statuses.length&&statuses.every(item=>item.level==="pass")) return {...statuses[0],category:"pass",currentTests};
+                    if(review) return {...review,category:"review",currentTests,counts};
+                    if(counts.pass>0&&counts.pending>0) return {level:"pending",label:"Mixed progress",category:"mixed",currentTests,counts,color:C.blue};
+                    if(statuses.length&&counts.pass===statuses.length) return {...statuses[0],category:"pass",currentTests,counts};
                     const pending=statuses.find(item=>item.level!=="pass")||statuses[0];
-                    return {...pending,category:"pending",currentTests};
+                    return {...pending,category:"pending",currentTests,counts};
                   };
 
                   const groupsWithStatus=testGroups.map(group=>{
                     const monitorStatus=groupStatus(group);
                     return {...group,currentTests:monitorStatus.currentTests||currentConcreteTestReports(group.tests),monitorStatus};
                   });
-                  const summaryCounts={
-                    pass:groupsWithStatus.filter(group=>group.monitorStatus.category==="pass").length,
-                    pending:groupsWithStatus.filter(group=>group.monitorStatus.category==="pending").length,
-                    followup:groupsWithStatus.filter(group=>group.monitorStatus.category==="followup").length,
-                    fail:groupsWithStatus.filter(group=>["fail","review"].includes(group.monitorStatus.category)).length,
-                  };
+                  const summaryCounts=groupsWithStatus.reduce((totals,group)=>{
+                    const counts=group.monitorStatus.counts||{};
+                    totals.pass+=counts.pass||0;
+                    totals.pending+=counts.pending||0;
+                    totals.followup+=counts.followup||0;
+                    totals.fail+=(counts.fail||0)+(counts.review||0);
+                    return totals;
+                  },{pass:0,pending:0,followup:0,fail:0});
                   const attentionGroups=groupsWithStatus.filter(group=>["followup","fail","review"].includes(group.monitorStatus.category));
                   const displayedGroups=testView==="attention"?attentionGroups:groupsWithStatus;
                   const followupGroups=groupsWithStatus.filter(group=>group.monitorStatus.category==="followup");
@@ -3603,7 +3613,9 @@ Screenshot attached: Yes / No`}</pre>
                             ? {label:"Review Required",color:C.red,icon:"⚠"}
                             : status.category==="followup"
                               ? {label:`${status.age||28}-Day Low — Follow-Up`,color:C.yellow,icon:"⚠"}
-                              : {label:"28-Day Pending",color:C.blue,icon:"○"};
+                              : status.category==="mixed"
+                                ? {label:`✓ ${status.counts?.pass||0} Met · ○ ${status.counts?.pending||0} Pending`,color:C.blue,icon:""}
+                                : {label:"28-Day Pending",color:C.blue,icon:"○"};
                       const nextTest=status.category==="pass"?null:(group.currentTests||group.tests).map(nextPendingConcreteTest).filter(Boolean).sort((a,b)=>{
                         if(a.break_date&&b.break_date)return String(a.break_date).localeCompare(String(b.break_date));
                         if(a.break_date)return -1;
@@ -3625,16 +3637,17 @@ Screenshot attached: Yes / No`}</pre>
                         <button type="button" onClick={()=>setExpandedTests(current=>({...current,[group.key]:!current[group.key]}))} style={{width:"100%",display:"grid",gridTemplateColumns:"110px minmax(0,1.35fr) minmax(0,1.15fr) minmax(0,1fr) 22px",gap:10,alignItems:"center",background:"transparent",border:"none",padding:"14px",color:C.text,textAlign:"left",cursor:"pointer",fontFamily:"inherit"}}>
                           <div><div style={{fontWeight:800,fontSize:13,color:status.category==="pass"?C.green:C.text}}>{formatTestDate(group.castDate)}</div><div style={{color:C.muted,fontSize:10,marginTop:2}}>{group.tests.length} report{group.tests.length!==1?"s":""}{group.currentTests&&group.currentTests.length!==group.tests.length?` · ${group.currentTests.length} current test set${group.currentTests.length!==1?"s":""}`:""}</div></div>
                           <div style={{fontWeight:750,fontSize:13}}>{group.location}</div>
-                          <div style={{minWidth:0}}><Badge color={registerStatus.color}>{registerStatus.icon} {registerStatus.label}</Badge></div>
+                          <div style={{minWidth:0}}><Badge color={registerStatus.color}>{registerStatus.icon?`${registerStatus.icon} `:""}{registerStatus.label}</Badge></div>
                           <div style={{fontSize:12,color:nextColor,fontWeight:nextTest?700:500}}>{nextTestText}</div>
                           <div style={{fontSize:18,color:C.muted,textAlign:"center",transform:isOpen?"rotate(180deg)":"none",transition:"transform .15s"}}>⌄</div>
                         </button>
 
                         {isOpen&&<div style={{borderTop:`1px solid ${C.border}`,padding:"0 18px"}}>
-                          {group.tests.map((test,reportIndex)=>{ const detailStatus=concreteTestStatus(test); return <div key={test.id||reportIndex} style={{padding:"16px 0 18px",borderTop:reportIndex?`1px solid ${C.border}`:"none"}}>
+                          {group.tests.map((test,reportIndex)=>{ const detailStatus=concreteTestStatus(test); const isCurrent=(group.currentTests||[]).includes(test); const detailBadge=!isCurrent?{label:"Historical report",color:C.muted}:detailStatus.level==="pass"?{label:"✓ Strength Met",color:C.green}:detailStatus.level==="extended_pending"?{label:"⚠ Follow-Up Required",color:C.yellow}:detailStatus.level==="fail"?{label:"⚠ Action Required",color:C.red}:/review required/i.test(detailStatus.label||"")?{label:"⚠ Review Required",color:C.red}:{label:"○ 28-Day Pending",color:C.blue}; return <div key={test.id||reportIndex} style={{padding:"16px 0 18px",borderTop:reportIndex?`1px solid ${C.border}`:"none"}}>
                           <div style={{display:"flex",justifyContent:"space-between",alignItems:"flex-start",flexWrap:"wrap",gap:10,marginBottom:14}}>
                             <div><div style={{fontWeight:800,fontSize:15}}>Report #{test.report_number||"—"}</div><div style={{color:C.muted,fontSize:12,marginTop:3}}>{test.lab_name||"Lab unknown"}{test.ticket_number&&<span> · Ticket #{test.ticket_number}</span>}</div></div>
                             <div style={{display:"flex",gap:7,flexWrap:"wrap",alignItems:"center"}}>
+                              <Badge color={detailBadge.color}>{detailBadge.label}</Badge>
                               {test.mix_design&&<Badge color={C.accent}>{test.mix_design}</Badge>}
                               {test.file_url&&<button onClick={()=>window.open(test.file_url,"_blank")} style={{background:"transparent",border:`1px solid ${C.blue}44`,color:C.blue,borderRadius:6,padding:"3px 9px",fontSize:12,fontWeight:700,cursor:"pointer"}}>📄 View</button>}
                               <button onClick={()=>editTestLocation(test)} title="Edit the descriptive location only; test results remain locked" style={{background:"transparent",border:`1px solid ${C.accent}44`,color:C.accent,borderRadius:6,padding:"3px 9px",fontSize:12,fontWeight:700,cursor:"pointer"}}>✎ Edit Label</button>
