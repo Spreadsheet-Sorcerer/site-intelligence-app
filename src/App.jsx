@@ -8,7 +8,7 @@ const C = {
   yellow: "#EAB308", red: "#EF4444", purple: "#A855F7",
   muted: "#6B7280", text: "#F9FAFB", sub: "#9CA3AF", teal: "#14B8A6",
 };
-const APP_VERSION = "20.16";
+const APP_VERSION = "20.17";
 
 // ─── SUPABASE STORAGE HELPERS ────────────────────────────────────────────────
 // Calls server-side API routes which talk to Supabase.
@@ -240,11 +240,57 @@ const TOTAL_SCOPE_M3 = SCOPE.reduce((s,r) => s + r.m3, 0);
 // the estimator's admixture/miscellaneous and pumping total, scaled from the
 // estimate's 9,800.93 m³ pricing quantity to the app's live concrete scope.
 // No Southwest budget or internal allowance is stored or displayed here.
-// Confirmed Ocean base supply rates used by both the forecast and invoice audit.
-// 40 MPa was confirmed at $271.50/m³ and should be audited as a contract rate,
-// not inferred from uploaded invoices.
+// Ocean's quote prices some strengths differently by exposure class. Forecasting
+// keeps one representative base rate per strength, while invoice auditing below
+// resolves the contractual rate from the matched ticket's project specification.
+// 40 MPa was separately confirmed at $271.50/m³.
 const OCEAN_BASE_RATES = { 20:205.90, 25:214.80, 35:247.20, 40:271.50 };
 const OCEAN_CONTRACT_BASE_RATES = { 20:205.90, 25:214.80, 35:247.20, 40:271.50 };
+const OCEAN_CONTRACT_RATES_BY_CLASS = {
+  15: { N:199.20 },
+  20: { N:205.90, "F-2":205.90 },
+  25: { "F-2":214.80 },
+  30: { N:230.40, "F-1":234.90 },
+  35: { N:247.20, "C-2":258.50, "C-1":270.40 },
+  40: { DEFAULT:271.50 },
+};
+
+function oceanPricingClass(value) {
+  const text=String(value||"").toUpperCase().replace(/\s+/g,"");
+  if(/C-?1/.test(text)) return "C-1";
+  if(/C-?2/.test(text)) return "C-2";
+  if(/F-?1/.test(text)) return "F-1";
+  if(/F-?2/.test(text)) return "F-2";
+  // The structural scope uses N-CF; Ocean's commercial quote lists that pricing
+  // under its normal (N) class. Preserve N-CF in the displayed spec, but use N
+  // for quote lookup.
+  if(/N-?CF/.test(text)||/(?:^|\/)N(?:$|\/)/.test(text)||/\bN\b/.test(String(value||"").toUpperCase())) return "N";
+  return null;
+}
+
+function oceanQuotedRate(strength, pricingClass) {
+  const table=OCEAN_CONTRACT_RATES_BY_CLASS[strength];
+  if(!table) return null;
+  if(table.DEFAULT!=null) return table.DEFAULT;
+  if(pricingClass&&table[pricingClass]!=null) return table[pricingClass];
+  const unique=[...new Set(Object.values(table))];
+  // If every quoted class for a strength has the same price, class ambiguity
+  // cannot change the invoice result and it is safe to use that common rate.
+  return unique.length===1?unique[0]:null;
+}
+
+function oceanTicketRateBasis(ticket) {
+  const structuralSpec=ticket?.area&&ticket?.item?MPA_SPEC[`${ticket.area}|||${ticket.item}`]:null;
+  const strength=parseMpaNum(structuralSpec||ticket?.mix_design);
+  const pricingClass=oceanPricingClass(structuralSpec)||oceanPricingClass(ticket?.mix_design);
+  const rate=oceanQuotedRate(strength,pricingClass);
+  return {
+    strength, pricingClass, rate, structuralSpec,
+    location:[ticket?.area,ticket?.item].filter(Boolean).join(" — ")||null,
+    quantity:parseFloat(ticket?.volume_m3)||0,
+    ticketNumber:ticket?.ticket_number||null,
+  };
+}
 const OCEAN_ESTIMATE_REFERENCE_M3 = 9800.93;
 const OCEAN_ESTIMATE_ADDITIVES = 346900;
 const OCEAN_ESTIMATE_PUMPING = 133577;
@@ -497,7 +543,7 @@ function invoiceCalculatedChecks(invoice) {
   return [{label:`Environmental Recovery Fees (${(rate*100).toFixed(2)}% total)`,billed,expected,difference,mismatch:difference>0.02}];
 }
 
-function invoiceContractRateChecks(invoice,contractRates=OCEAN_CONTRACT_BASE_RATES) {
+function invoiceContractRateChecks(invoice,matchedTickets=[],contractRates=OCEAN_CONTRACT_BASE_RATES) {
   if(Number(invoice?.audit_version)<20) return [];
   if(!String(invoice?.supplier||"").toLowerCase().includes("ocean")) return [];
   return (invoice?.line_items||[]).flatMap(line=>{
@@ -505,19 +551,58 @@ function invoiceContractRateChecks(invoice,contractRates=OCEAN_CONTRACT_BASE_RAT
     const strengthMatch=description.match(/(\d+)\s*mpa/i);
     if(!strengthMatch||!/plain|concrete|mix/i.test(description)) return [];
     const strength=parseInt(strengthMatch[1]);
-    const contractRate=contractRates[strength];
     const quantity=parseFloat(line?.quantity);
     const printedRate=parseFloat(line?.unit_price);
     const amount=parseFloat(line?.amount);
     const billedRate=Number.isFinite(printedRate)?printedRate:(Number.isFinite(quantity)&&quantity!==0&&Number.isFinite(amount)?amount/quantity:null);
-    if(contractRate==null){
-      return [{label:`${strength} MPa concrete`,strength,contractRate:null,billedRate,quantity,amount,expectedAmount:null,difference:null,missingContractRate:true,mismatch:false}];
+
+    // Resolve the quote basis from the actual matched delivery tickets. This is
+    // important for strengths such as 35 MPa where Ocean quoted different rates
+    // for N, C-2 and C-1 exposure classes.
+    const candidateTickets=(matchedTickets||[]).filter(ticket=>{
+      if(!isStructuralTicket(ticket)) return false;
+      return parseMpaNum(ticket?.mix_design)===strength;
+    });
+    const ticketBases=candidateTickets.map(oceanTicketRateBasis).filter(basis=>basis.rate!=null&&basis.quantity>0);
+    const resolvedQuantity=ticketBases.reduce((sum,basis)=>sum+basis.quantity,0);
+    const canUseTicketBasis=ticketBases.length>0&&(!Number.isFinite(quantity)||Math.abs(resolvedQuantity-quantity)<0.51);
+
+    let contractRate=null, expectedAmount=null, pricingBasis=[], rateBasisLabel="";
+    if(canUseTicketBasis){
+      expectedAmount=ticketBases.reduce((sum,basis)=>sum+basis.quantity*basis.rate,0);
+      contractRate=resolvedQuantity>0?expectedAmount/resolvedQuantity:null;
+      const grouped=new Map();
+      ticketBases.forEach(basis=>{
+        const key=`${basis.structuralSpec||`${strength} MPa`}|${basis.rate}`;
+        if(!grouped.has(key)) grouped.set(key,{spec:basis.structuralSpec||`${strength} MPa`,pricingClass:basis.pricingClass,rate:basis.rate,quantity:0,locations:new Set(),tickets:[]});
+        const row=grouped.get(key);
+        row.quantity+=basis.quantity;
+        if(basis.location) row.locations.add(basis.location);
+        if(basis.ticketNumber) row.tickets.push(basis.ticketNumber);
+      });
+      pricingBasis=[...grouped.values()].map(row=>({...row,locations:[...row.locations]}));
+      rateBasisLabel=pricingBasis.length===1
+        ? `${pricingBasis[0].spec}${pricingBasis[0].pricingClass?` → Ocean ${pricingBasis[0].pricingClass}`:""}`
+        : `Mixed project classes (${pricingBasis.map(row=>row.spec).join(", ")})`;
+    } else {
+      // Safe fallback only when the quote has one unambiguous price for the
+      // strength (or the separately confirmed 40 MPa rate). Never assume the N
+      // price for an ambiguous 35 MPa line if ticket coding is unavailable.
+      contractRate=oceanQuotedRate(strength,null);
+      if(contractRate==null&&contractRates?.[strength]!=null&&strength!==35) contractRate=contractRates[strength];
+      expectedAmount=Number.isFinite(quantity)&&contractRate!=null?quantity*contractRate:null;
+      rateBasisLabel=contractRate!=null?`${strength} MPa quoted rate`:"Exposure class could not be resolved from matched tickets";
     }
-    const expectedAmount=Number.isFinite(quantity)?quantity*contractRate:null;
+
     const difference=Number.isFinite(amount)&&expectedAmount!=null?amount-expectedAmount:null;
-    const rateMismatch=billedRate!=null&&(billedRate-contractRate)>0.01;
+    const rateMismatch=billedRate!=null&&contractRate!=null&&(billedRate-contractRate)>0.01;
     const amountMismatch=difference!=null&&difference>0.02;
-    return [{label:`${strength} MPa concrete`,strength,contractRate,billedRate,quantity,amount,expectedAmount,difference,missingContractRate:false,rateMismatch,amountMismatch,mismatch:rateMismatch||amountMismatch}];
+    const missingContractRate=contractRate==null;
+    return [{
+      label:`${strength} MPa concrete`,strength,contractRate,billedRate,quantity,amount,expectedAmount,difference,
+      missingContractRate,rateMismatch,amountMismatch,mismatch:!missingContractRate&&(rateMismatch||amountMismatch),
+      pricingBasis,rateBasisLabel,resolvedFromTickets:canUseTicketBasis,
+    }];
   });
 }
 
@@ -2567,7 +2652,7 @@ Return ONLY valid JSON, no markdown:
   // invoice, because an overbilled invoice must not redefine the contract rate.
   const liveOceanContractRates={...OCEAN_CONTRACT_BASE_RATES};
   const liveOceanForecastRates={...OCEAN_BASE_RATES};
-  const invoicesWithIssues=activeInvoices.filter(inv=>{ const m=matchInvoiceToTickets(inv,tickets); const audit=invoiceChargeAudit(inv,m.ticketsOnInvoice); const calculated=invoiceCalculatedChecks(inv); const rates=invoiceContractRateChecks(inv,liveOceanContractRates); return m.unmatched.length>0||m.volumeOverbilled||audit.issues.length>0||calculated.some(check=>check.mismatch)||rates.some(check=>check.mismatch); }).length;
+  const invoicesWithIssues=activeInvoices.filter(inv=>{ const m=matchInvoiceToTickets(inv,tickets); const audit=invoiceChargeAudit(inv,m.ticketsOnInvoice); const calculated=invoiceCalculatedChecks(inv); const rates=invoiceContractRateChecks(inv,m.ticketsOnInvoice,liveOceanContractRates); return m.unmatched.length>0||m.volumeOverbilled||audit.issues.length>0||calculated.some(check=>check.mismatch)||rates.some(check=>check.mismatch); }).length;
   const matchedInvoiceCount=Math.max(0,activeInvoices.length-invoicesWithIssues);
   const totalInvoiced=activeInvoices.reduce((s,inv)=>s+(parseFloat(inv.total_amount)||0),0);
   const invoicedBeforeHst=activeInvoices.reduce((s,inv)=>s+invoiceAmountBeforeHst(inv),0);
@@ -2790,7 +2875,7 @@ Return ONLY valid JSON, no markdown:
     const m=matchInvoiceToTickets(invoice,tickets);
     const chargeAudit=invoiceChargeAudit(invoice,m.ticketsOnInvoice);
     const calculatedChecks=invoiceCalculatedChecks(invoice);
-    const contractRateChecks=invoiceContractRateChecks(invoice,liveOceanContractRates);
+    const contractRateChecks=invoiceContractRateChecks(invoice,m.ticketsOnInvoice,liveOceanContractRates);
     const invoiceNumber=normalizeInvoiceNumber(invoice.invoice_number);
     const supersession=invoiceSupersessionMap.get(invoiceNumber);
     const rebillOf=invoiceRebillReference(invoice);
@@ -2825,7 +2910,7 @@ Return ONLY valid JSON, no markdown:
           })}
         </div>}
         {calculatedChecks.length>0&&<div style={{marginBottom:16}}><div style={{color:C.muted,fontSize:11,fontWeight:700,textTransform:"uppercase",letterSpacing:1,marginBottom:10}}>Calculated Fee Check</div>{calculatedChecks.map((check,index)=><div key={`${check.label}-${index}`} style={{background:check.mismatch?"#450a0a":C.bg,border:`1px solid ${check.mismatch?C.red:C.green+"44"}`,borderRadius:9,padding:"11px 14px",marginBottom:8}}><div style={{display:"flex",justifyContent:"space-between",gap:10,flexWrap:"wrap"}}><b>{check.label}</b><Badge color={check.mismatch?C.red:C.green}>{check.mismatch?"⚠ Math mismatch":"✓ Math checks"}</Badge></div><div style={{display:"flex",gap:16,flexWrap:"wrap",fontSize:12,color:C.sub,marginTop:6}}><span>Expected: <b style={{color:C.text}}>{money(check.expected)}</b></span><span>Billed: <b style={{color:C.text}}>{money(check.billed)}</b></span><span>Difference: <b style={{color:check.mismatch?C.red:C.green}}>{money(check.difference)}</b></span></div></div>)}</div>}
-        {contractRateChecks.length>0&&<div style={{marginBottom:16}}><div style={{color:C.muted,fontSize:11,fontWeight:700,textTransform:"uppercase",letterSpacing:1,marginBottom:10}}>Ocean Contract-Rate Audit</div>{contractRateChecks.map((check,index)=><div key={`${check.label}-${index}`} style={{background:check.mismatch?"#450a0a":C.bg,border:`1px solid ${check.mismatch?C.red:C.green+"44"}`,borderRadius:9,padding:"11px 14px",marginBottom:8}}><div style={{display:"flex",justifyContent:"space-between",gap:10,flexWrap:"wrap"}}><b>{check.label}</b><Badge color={check.mismatch?C.red:C.green}>{check.missingContractRate?"⚠ Rate not configured":check.mismatch?"⚠ Contract mismatch":"✓ Contract rate"}</Badge></div>{check.missingContractRate?<div style={{color:"#fca5a5",fontSize:11,marginTop:6}}>The app only has a planning proxy for this strength. Confirm the contractual rate before approving the invoice.</div>:<div style={{display:"flex",gap:16,flexWrap:"wrap",fontSize:12,color:C.sub,marginTop:6}}><span>Contract: <b style={{color:C.text}}>{money(check.contractRate)}/m³</b></span><span>Invoice: <b style={{color:check.rateMismatch?C.red:C.text}}>{check.billedRate==null?"not shown":`${money(check.billedRate)}/m³`}</b></span>{check.expectedAmount!=null&&<span>Expected amount: <b style={{color:C.text}}>{money(check.expectedAmount)}</b></span>}{check.amount!=null&&<span>Billed amount: <b style={{color:check.amountMismatch?C.red:C.text}}>{money(check.amount)}</b></span>}{check.difference!=null&&Math.abs(check.difference)>0.02&&<span>Difference: <b style={{color:C.red}}>{money(check.difference)}</b></span>}</div>}</div>)}</div>}
+        {contractRateChecks.length>0&&<div style={{marginBottom:16}}><div style={{color:C.muted,fontSize:11,fontWeight:700,textTransform:"uppercase",letterSpacing:1,marginBottom:10}}>Ocean Contract-Rate Audit</div>{contractRateChecks.map((check,index)=><div key={`${check.label}-${index}`} style={{background:check.mismatch?"#450a0a":C.bg,border:`1px solid ${check.missingContractRate?C.yellow+"66":check.mismatch?C.red:C.green+"44"}`,borderRadius:9,padding:"11px 14px",marginBottom:8}}><div style={{display:"flex",justifyContent:"space-between",gap:10,flexWrap:"wrap"}}><b>{check.label}</b><Badge color={check.missingContractRate?C.yellow:check.mismatch?C.red:C.green}>{check.missingContractRate?"⚠ Class/rate review":check.mismatch?"⚠ Contract mismatch":"✓ Contract rate"}</Badge></div>{check.rateBasisLabel&&<div style={{color:check.missingContractRate?"#fde68a":C.blue,fontSize:11,marginTop:6}}>Rate basis: <b>{check.rateBasisLabel}</b></div>}{check.pricingBasis?.length>0&&<div style={{marginTop:7}}>{check.pricingBasis.map((basis,basisIndex)=><div key={`${basis.spec}-${basisIndex}`} style={{fontSize:11,color:C.sub,marginTop:3}}>• {basis.spec}{basis.locations?.length?` · ${basis.locations.join(", ")}`:""} · {fmt(basis.quantity)} m³ @ <b style={{color:C.text}}>{money(basis.rate)}/m³</b></div>)}</div>}{check.missingContractRate?<div style={{color:"#fde68a",fontSize:11,marginTop:6}}>The matched ticket does not provide enough project-class information to choose safely between Ocean's quoted rates. Review the ticket coding/spec before approving this line.</div>:<div style={{display:"flex",gap:16,flexWrap:"wrap",fontSize:12,color:C.sub,marginTop:7}}><span>{check.pricingBasis?.length>1?"Weighted contract":"Contract"}: <b style={{color:C.text}}>{money(check.contractRate)}/m³</b></span><span>Invoice: <b style={{color:check.rateMismatch?C.red:C.text}}>{check.billedRate==null?"not shown":`${money(check.billedRate)}/m³`}</b></span>{check.expectedAmount!=null&&<span>Expected amount: <b style={{color:C.text}}>{money(check.expectedAmount)}</b></span>}{check.amount!=null&&<span>Billed amount: <b style={{color:check.amountMismatch?C.red:C.text}}>{money(check.amount)}</b></span>}{check.difference!=null&&Math.abs(check.difference)>0.02&&<span>Difference: <b style={{color:check.mismatch?C.red:C.green}}>{money(check.difference)}</b></span>}</div>}</div>)}</div>}
         {m.matched.length>0&&<div style={{marginBottom:16}}>
           <div style={{color:C.muted,fontSize:11,fontWeight:700,textTransform:"uppercase",letterSpacing:1,marginBottom:10}}>Matched Tickets ({m.matched.length})</div>
           {m.matched.map(({ticket:t})=>{ const mm=checkMpaMismatch(t); return(<div key={t.id} style={{background:C.bg,borderRadius:9,padding:"10px 14px",marginBottom:8,border:`1px solid ${mm?C.red+"44":"transparent"}`}}><div style={{display:"flex",justifyContent:"space-between",alignItems:"center",flexWrap:"wrap",gap:6}}><div><span style={{fontWeight:700}}>#{t.ticket_number}</span><span style={{color:C.muted,fontSize:12,marginLeft:8}}>{t.date}</span>{t.area&&<span style={{color:C.sub,fontSize:12,marginLeft:8}}>📍 {t.area}{t.item?` — ${t.item}`:""}</span>}</div><div style={{display:"flex",gap:6,flexWrap:"wrap"}}>{t.mix_design&&<Badge color={mm?C.red:C.green}>{t.mix_design}</Badge>}{t.volume_m3&&<Badge color={C.accent}>{parseFloat(t.volume_m3).toFixed(2)} m³</Badge>}{mm&&<Badge color={C.red}>⚠ MPa</Badge>}</div></div></div>); })}
@@ -3212,7 +3297,7 @@ Screenshot attached: Yes / No`}</pre>
                   const m=matchInvoiceToTickets(inv,tickets);
                   const chargeAudit=invoiceChargeAudit(inv,m.ticketsOnInvoice);
                   const calculatedIssues=invoiceCalculatedChecks(inv).filter(check=>check.mismatch);
-                  const rateIssues=invoiceContractRateChecks(inv,liveOceanContractRates).filter(check=>check.mismatch);
+                  const rateIssues=invoiceContractRateChecks(inv,m.ticketsOnInvoice,liveOceanContractRates).filter(check=>check.mismatch);
                   return m.unmatched.length>0||m.volumeOverbilled||chargeAudit.issues.length>0||calculatedIssues.length>0||rateIssues.length>0;
                 });
                 const groupHasIssues=invoicesNeedingReview.length>0;
@@ -3225,7 +3310,7 @@ Screenshot attached: Yes / No`}</pre>
                     <span style={{fontSize:18,color:groupHasIssues?C.red:C.muted,transform:isOpen?"rotate(180deg)":"none",transition:"transform .15s"}}>⌄</span>
                   </button>
                   {isOpen&&<div style={{borderTop:`1px solid ${C.border}`,padding:"10px 14px 4px"}}>
-                    {dayInvoices.map(inv=>{ const m=matchInvoiceToTickets(inv,tickets); const chargeAudit=invoiceChargeAudit(inv,m.ticketsOnInvoice); const calculatedIssues=invoiceCalculatedChecks(inv).filter(check=>check.mismatch); const rateIssues=invoiceContractRateChecks(inv,liveOceanContractRates).filter(check=>check.mismatch); const supersession=invoiceSupersessionMap.get(normalizeInvoiceNumber(inv.invoice_number)); const rebillOf=invoiceRebillReference(inv); const isSuperseded=!!supersession; const hasIssues=!isSuperseded&&(m.unmatched.length>0||m.volumeOverbilled||chargeAudit.issues.length>0||calculatedIssues.length>0||rateIssues.length>0); const hasWarnings=false;
+                    {dayInvoices.map(inv=>{ const m=matchInvoiceToTickets(inv,tickets); const chargeAudit=invoiceChargeAudit(inv,m.ticketsOnInvoice); const calculatedIssues=invoiceCalculatedChecks(inv).filter(check=>check.mismatch); const rateIssues=invoiceContractRateChecks(inv,m.ticketsOnInvoice,liveOceanContractRates).filter(check=>check.mismatch); const supersession=invoiceSupersessionMap.get(normalizeInvoiceNumber(inv.invoice_number)); const rebillOf=invoiceRebillReference(inv); const isSuperseded=!!supersession; const hasIssues=!isSuperseded&&(m.unmatched.length>0||m.volumeOverbilled||chargeAudit.issues.length>0||calculatedIssues.length>0||rateIssues.length>0); const hasWarnings=false;
                       return <div key={inv.id} onClick={()=>setSelectedInvoice(inv)} style={{background:C.bg,border:`1px solid ${hasIssues?C.red+"66":C.border}`,borderRadius:10,padding:"15px 16px",marginBottom:10,cursor:"pointer"}}>
                         <div style={{display:"flex",justifyContent:"space-between",alignItems:"flex-start",marginBottom:10,flexWrap:"wrap",gap:8}}>
                           <div><span style={{fontWeight:800,fontSize:15}}>Invoice {inv.invoice_number||"—"}</span></div>
