@@ -8,7 +8,7 @@ const C = {
   yellow: "#EAB308", red: "#EF4444", purple: "#A855F7",
   muted: "#6B7280", text: "#F9FAFB", sub: "#9CA3AF", teal: "#14B8A6",
 };
-const APP_VERSION = "20.17";
+const APP_VERSION = "20.18";
 
 // ─── SUPABASE STORAGE HELPERS ────────────────────────────────────────────────
 // Calls server-side API routes which talk to Supabase.
@@ -2152,6 +2152,7 @@ function ConcreteModule({ onBack }) {
   const [reviewQueue, setReviewQueue] = useState([]); // tickets pending area/element confirmation
   const [tests, setTests] = useState([]);
   const [testSearch, setTestSearch] = useState("");
+  const [testView, setTestView] = useState("attention");
   const [expandedTests, setExpandedTests] = useState({});
   const [expandedTicketDates, setExpandedTicketDates] = useState({});
   const [expandedInvoiceDates, setExpandedInvoiceDates] = useState({});
@@ -3497,20 +3498,68 @@ Screenshot attached: Yes / No`}</pre>
                   });
                   const testGroups=[...groupMap.values()];
 
+                  const groupStatus = group => {
+                    const statuses=group.tests.map(concreteTestStatus);
+                    const fail=statuses.find(item=>item.level==="fail");
+                    if(fail) return {...fail,category:"fail"};
+                    const followup=statuses.find(item=>item.level==="extended_pending");
+                    if(followup) return {...followup,category:"followup"};
+                    const review=statuses.find(item=>item.level==="pending"&&/review required/i.test(item.label||""));
+                    if(review) return {...review,category:"review"};
+                    if(statuses.length&&statuses.every(item=>item.level==="pass")) return {...statuses[0],category:"pass"};
+                    const pending=statuses.find(item=>item.level!=="pass")||statuses[0];
+                    return {...pending,category:"pending"};
+                  };
+
+                  const groupsWithStatus=testGroups.map(group=>({...group,monitorStatus:groupStatus(group)}));
+                  const summaryCounts={
+                    pass:groupsWithStatus.filter(group=>group.monitorStatus.category==="pass").length,
+                    pending:groupsWithStatus.filter(group=>group.monitorStatus.category==="pending").length,
+                    followup:groupsWithStatus.filter(group=>group.monitorStatus.category==="followup").length,
+                    fail:groupsWithStatus.filter(group=>["fail","review"].includes(group.monitorStatus.category)).length,
+                  };
+                  const attentionGroups=groupsWithStatus.filter(group=>["followup","fail","review"].includes(group.monitorStatus.category));
+                  const displayedGroups=testView==="attention"?attentionGroups:groupsWithStatus;
+                  const followupGroups=groupsWithStatus.filter(group=>group.monitorStatus.category==="followup");
+
                   return <div>
-                    <div style={{display:"grid",gridTemplateColumns:"110px minmax(0,1.35fr) minmax(0,1.15fr) minmax(0,1fr) 22px",gap:10,padding:"0 14px 8px",color:C.muted,fontSize:10,fontWeight:800,letterSpacing:.7,textTransform:"uppercase"}}>
-                      <span>Cast / Cure Date</span><span>Location</span><span>Status</span><span>Next Test</span><span></span>
+                    <div style={{display:"grid",gridTemplateColumns:"repeat(auto-fit,minmax(150px,1fr))",gap:10,marginBottom:14}}>
+                      {[
+                        {label:"Strength Met",count:summaryCounts.pass,color:C.green,icon:"✓"},
+                        {label:"28-Day Pending",count:summaryCounts.pending,color:C.blue,icon:"○"},
+                        {label:"Follow-Up Required",count:summaryCounts.followup,color:C.yellow,icon:"⚠"},
+                        {label:"Action / Review",count:summaryCounts.fail,color:C.red,icon:"!"},
+                      ].map(item=><div key={item.label} style={{background:item.color+"10",border:`1px solid ${item.color}44`,borderRadius:11,padding:"12px 14px"}}><div style={{display:"flex",justifyContent:"space-between",alignItems:"center",gap:8}}><span style={{color:C.muted,fontSize:10,fontWeight:800,textTransform:"uppercase",letterSpacing:.7}}>{item.label}</span><span style={{color:item.color,fontWeight:900,fontSize:18}}>{item.icon} {item.count}</span></div></div>)}
                     </div>
-                    {testGroups.map(group=>{
-                      const reportStatuses=group.tests.map(concreteTestStatus);
-                      const status=reportStatuses.find(item=>item.level==="fail")
-                        ||reportStatuses.find(item=>item.level!=="pass")
-                        ||reportStatuses[0];
-                      const registerStatus=status.level==="pass"
-                        ? {label:"Up to strength",color:C.green,icon:"✓"}
-                        : status.level==="fail"
-                          ? {label:"Below strength",color:C.red,icon:"⚠"}
-                          : {label:"Awaiting testing",color:C.yellow,icon:"⏳"};
+
+                    {followupGroups.length>0&&<div style={{background:C.yellow+"12",border:`1px solid ${C.yellow}77`,borderRadius:12,padding:"13px 16px",marginBottom:14}}>
+                      <div style={{fontWeight:850,color:C.yellow,marginBottom:6}}>⚠ Follow-Up Required</div>
+                      {followupGroups.map(group=>{ const status=group.monitorStatus; const next=group.tests.map(nextPendingConcreteTest).filter(Boolean).sort((a,b)=>String(a?.break_date||"9999-12-31").localeCompare(String(b?.break_date||"9999-12-31")))[0]; return <div key={group.key} style={{fontSize:12,color:C.sub,marginTop:4}}><b style={{color:C.text}}>{formatTestDate(group.castDate)} · {group.location}</b>{Number.isFinite(status.average)?` — ${status.age}-day average ${status.average.toFixed(1)} MPa`:""}{next?.break_date?` · ${next.age_days||"Follow-up"}-day test ${formatTestDate(next.break_date)}`:""}</div>;})}
+                    </div>}
+
+                    <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",gap:10,flexWrap:"wrap",marginBottom:12}}>
+                      <div style={{display:"flex",gap:7}}>
+                        <button type="button" onClick={()=>setTestView("attention")} style={{background:testView==="attention"?C.yellow+"22":C.card,border:`1px solid ${testView==="attention"?C.yellow:C.border}`,color:testView==="attention"?C.yellow:C.sub,borderRadius:8,padding:"7px 12px",fontSize:12,fontWeight:800,cursor:"pointer"}}>Needs Attention {attentionGroups.length?`(${attentionGroups.length})`:""}</button>
+                        <button type="button" onClick={()=>setTestView("all")} style={{background:testView==="all"?C.blue+"18":C.card,border:`1px solid ${testView==="all"?C.blue:C.border}`,color:testView==="all"?C.blue:C.sub,borderRadius:8,padding:"7px 12px",fontSize:12,fontWeight:800,cursor:"pointer"}}>All Tests ({groupsWithStatus.length})</button>
+                      </div>
+                      {testView==="attention"&&attentionGroups.length===0&&<span style={{color:C.green,fontSize:12,fontWeight:700}}>✓ No tests currently require attention</span>}
+                    </div>
+
+                    {displayedGroups.length>0&&<div style={{display:"grid",gridTemplateColumns:"110px minmax(0,1.35fr) minmax(0,1.15fr) minmax(0,1fr) 22px",gap:10,padding:"0 14px 8px",color:C.muted,fontSize:10,fontWeight:800,letterSpacing:.7,textTransform:"uppercase"}}>
+                      <span>Cast / Cure Date</span><span>Location</span><span>Status</span><span>Next Test</span><span></span>
+                    </div>}
+                    {displayedGroups.length===0&&<div style={{background:C.green+"0D",border:`1px solid ${C.green}33`,borderRadius:12,padding:"30px 18px",textAlign:"center",color:C.green,fontWeight:800}}>✓ Nothing currently needs follow-up or action</div>}
+                    {displayedGroups.map(group=>{
+                      const status=group.monitorStatus;
+                      const registerStatus=status.category==="pass"
+                        ? {label:"Strength Met",color:C.green,icon:"✓"}
+                        : status.category==="fail"
+                          ? {label:"Action Required",color:C.red,icon:"⚠"}
+                          : status.category==="review"
+                            ? {label:"Review Required",color:C.red,icon:"⚠"}
+                            : status.category==="followup"
+                              ? {label:`${status.age||28}-Day Low — Follow-Up`,color:C.yellow,icon:"⚠"}
+                              : {label:"28-Day Pending",color:C.blue,icon:"○"};
                       const nextTest=group.tests.map(nextPendingConcreteTest).filter(Boolean).sort((a,b)=>{
                         if(a.break_date&&b.break_date)return String(a.break_date).localeCompare(String(b.break_date));
                         if(a.break_date)return -1;
@@ -3522,13 +3571,16 @@ Screenshot attached: Yes / No`}</pre>
                         ? `${formatTestDate(nextTest.break_date)}${nextTest.age_days?` · ${nextTest.age_days}-day`:""}`
                         : nextTest?.age_days
                           ? `${nextTest.age_days}-day test pending`
-                          : (status.level==="pass"||status.level==="fail")?"Testing complete":"Awaiting test date";
-                      return <div key={group.key} style={{background:C.card,border:`1px solid ${isOpen?status.color+"77":C.border}`,borderRadius:12,marginBottom:9,overflow:"hidden"}}>
+                          : (status.category==="pass"||status.category==="fail")?"Testing complete":"Awaiting test date";
+                      const rowTint=status.category==="pass"?C.green+"0A":status.category==="followup"?C.yellow+"12":["fail","review"].includes(status.category)?C.red+"12":C.card;
+                      const rowBorder=status.category==="pass"?C.green+"44":status.category==="followup"?C.yellow+"88":["fail","review"].includes(status.category)?C.red+"88":C.blue+"33";
+                      const nextColor=status.category==="followup"?C.yellow:["fail","review"].includes(status.category)?C.red:nextTest?C.blue:C.muted;
+                      return <div key={group.key} style={{background:rowTint,border:`1px solid ${isOpen?registerStatus.color+"99":rowBorder}`,borderRadius:12,marginBottom:9,overflow:"hidden"}}>
                         <button type="button" onClick={()=>setExpandedTests(current=>({...current,[group.key]:!current[group.key]}))} style={{width:"100%",display:"grid",gridTemplateColumns:"110px minmax(0,1.35fr) minmax(0,1.15fr) minmax(0,1fr) 22px",gap:10,alignItems:"center",background:"transparent",border:"none",padding:"14px",color:C.text,textAlign:"left",cursor:"pointer",fontFamily:"inherit"}}>
-                          <div><div style={{fontWeight:800,fontSize:13}}>{formatTestDate(group.castDate)}</div><div style={{color:C.muted,fontSize:10,marginTop:2}}>{group.tests.length} test report{group.tests.length!==1?"s":""}</div></div>
+                          <div><div style={{fontWeight:800,fontSize:13,color:status.category==="pass"?C.green:C.text}}>{formatTestDate(group.castDate)}</div><div style={{color:C.muted,fontSize:10,marginTop:2}}>{group.tests.length} test report{group.tests.length!==1?"s":""}</div></div>
                           <div style={{fontWeight:750,fontSize:13}}>{group.location}</div>
                           <div style={{minWidth:0}}><Badge color={registerStatus.color}>{registerStatus.icon} {registerStatus.label}</Badge></div>
-                          <div style={{fontSize:12,color:nextTest?C.yellow:C.muted,fontWeight:nextTest?700:500}}>{nextTestText}</div>
+                          <div style={{fontSize:12,color:nextColor,fontWeight:nextTest?700:500}}>{nextTestText}</div>
                           <div style={{fontSize:18,color:C.muted,textAlign:"center",transform:isOpen?"rotate(180deg)":"none",transition:"transform .15s"}}>⌄</div>
                         </button>
 
