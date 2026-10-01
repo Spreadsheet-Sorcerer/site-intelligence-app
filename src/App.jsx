@@ -1,3 +1,4 @@
+// v20.19 — concrete testing progress aggregation fix
 import { useState, useRef, useEffect } from "react";
 import * as XLSX from "xlsx";
 
@@ -885,11 +886,50 @@ function concreteTestStatus(test) {
   return status("pending","28-day test pending");
 }
 
+// Bruce may issue progressive versions of the same cylinder set (7-day, then
+// 28-day, then a later follow-up). Treat those as updates to one test set rather
+// than separate unresolved tests. Use the most advanced uploaded report for each
+// set when calculating the dashboard status.
+function concreteTestSetKey(test) {
+  const report=String(test?.report_number||"").trim().toLowerCase();
+  if(report) return `report:${report}`;
+  const ticket=String(test?.ticket_number||"").trim().toLowerCase();
+  if(ticket) return `ticket:${ticket}`;
+  const date=String(test?.date_cast||test?.date_sampled||"").slice(0,10);
+  const location=String(test?.test_location||[test?.pour_area,test?.pour_element].filter(Boolean).join(" ")||"").toLowerCase().replace(/[^a-z0-9]+/g," ").trim();
+  const mix=String(test?.mix_design||"").toLowerCase().replace(/[^a-z0-9]+/g," ").trim();
+  return `fallback:${date}|${location}|${mix}`;
+}
+
+function concreteTestProgressScore(test) {
+  const results=(test?.results||[]).map(result=>({
+    age:parseFloat(result?.age_days),
+    strength:parseFloat(result?.strength_mpa),
+  }));
+  const tested=results.filter(result=>Number.isFinite(result.age)&&Number.isFinite(result.strength));
+  const maxAge=tested.length?Math.max(...tested.map(result=>result.age)):0;
+  const testedCount=tested.length;
+  const datedCount=(test?.results||[]).filter(result=>result?.break_date).length;
+  return maxAge*10000 + testedCount*100 + datedCount;
+}
+
+function currentConcreteTestReports(tests) {
+  const current=new Map();
+  (tests||[]).forEach(test=>{
+    const key=concreteTestSetKey(test);
+    const existing=current.get(key);
+    if(!existing || concreteTestProgressScore(test)>=concreteTestProgressScore(existing)) current.set(key,test);
+  });
+  return [...current.values()];
+}
+
 function concreteBreakDisplayState(test,result,overallStatus) {
   const strength=parseFloat(result?.strength_mpa);
   const age=parseFloat(result?.age_days);
   const specified=parseFloat(test?.specified_mpa);
-  if(!Number.isFinite(strength)) return {label:"PENDING",color:C.muted};
+  if(!Number.isFinite(strength)) return overallStatus?.level==="pass"
+    ? {label:"HOLD",color:C.muted}
+    : {label:"PENDING",color:C.muted};
   if(Number.isFinite(age)&&age<28) return {label:"EARLY AGE",color:C.blue};
   if(Number.isFinite(specified)&&strength>=specified) return {label:"PASS",color:C.green};
   if(overallStatus?.level==="extended_pending") return {label:"LOW — FOLLOW-UP PENDING",color:C.yellow};
@@ -3499,19 +3539,23 @@ Screenshot attached: Yes / No`}</pre>
                   const testGroups=[...groupMap.values()];
 
                   const groupStatus = group => {
-                    const statuses=group.tests.map(concreteTestStatus);
+                    const currentTests=currentConcreteTestReports(group.tests);
+                    const statuses=currentTests.map(concreteTestStatus);
                     const fail=statuses.find(item=>item.level==="fail");
-                    if(fail) return {...fail,category:"fail"};
+                    if(fail) return {...fail,category:"fail",currentTests};
                     const followup=statuses.find(item=>item.level==="extended_pending");
-                    if(followup) return {...followup,category:"followup"};
+                    if(followup) return {...followup,category:"followup",currentTests};
                     const review=statuses.find(item=>item.level==="pending"&&/review required/i.test(item.label||""));
-                    if(review) return {...review,category:"review"};
-                    if(statuses.length&&statuses.every(item=>item.level==="pass")) return {...statuses[0],category:"pass"};
+                    if(review) return {...review,category:"review",currentTests};
+                    if(statuses.length&&statuses.every(item=>item.level==="pass")) return {...statuses[0],category:"pass",currentTests};
                     const pending=statuses.find(item=>item.level!=="pass")||statuses[0];
-                    return {...pending,category:"pending"};
+                    return {...pending,category:"pending",currentTests};
                   };
 
-                  const groupsWithStatus=testGroups.map(group=>({...group,monitorStatus:groupStatus(group)}));
+                  const groupsWithStatus=testGroups.map(group=>{
+                    const monitorStatus=groupStatus(group);
+                    return {...group,currentTests:monitorStatus.currentTests||currentConcreteTestReports(group.tests),monitorStatus};
+                  });
                   const summaryCounts={
                     pass:groupsWithStatus.filter(group=>group.monitorStatus.category==="pass").length,
                     pending:groupsWithStatus.filter(group=>group.monitorStatus.category==="pending").length,
@@ -3534,7 +3578,7 @@ Screenshot attached: Yes / No`}</pre>
 
                     {followupGroups.length>0&&<div style={{background:C.yellow+"12",border:`1px solid ${C.yellow}77`,borderRadius:12,padding:"13px 16px",marginBottom:14}}>
                       <div style={{fontWeight:850,color:C.yellow,marginBottom:6}}>⚠ Follow-Up Required</div>
-                      {followupGroups.map(group=>{ const status=group.monitorStatus; const next=group.tests.map(nextPendingConcreteTest).filter(Boolean).sort((a,b)=>String(a?.break_date||"9999-12-31").localeCompare(String(b?.break_date||"9999-12-31")))[0]; return <div key={group.key} style={{fontSize:12,color:C.sub,marginTop:4}}><b style={{color:C.text}}>{formatTestDate(group.castDate)} · {group.location}</b>{Number.isFinite(status.average)?` — ${status.age}-day average ${status.average.toFixed(1)} MPa`:""}{next?.break_date?` · ${next.age_days||"Follow-up"}-day test ${formatTestDate(next.break_date)}`:""}</div>;})}
+                      {followupGroups.map(group=>{ const status=group.monitorStatus; const next=(group.currentTests||group.tests).map(nextPendingConcreteTest).filter(Boolean).sort((a,b)=>String(a?.break_date||"9999-12-31").localeCompare(String(b?.break_date||"9999-12-31")))[0]; return <div key={group.key} style={{fontSize:12,color:C.sub,marginTop:4}}><b style={{color:C.text}}>{formatTestDate(group.castDate)} · {group.location}</b>{Number.isFinite(status.average)?` — ${status.age}-day average ${status.average.toFixed(1)} MPa`:""}{next?.break_date?` · ${next.age_days||"Follow-up"}-day test ${formatTestDate(next.break_date)}`:""}</div>;})}
                     </div>}
 
                     <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",gap:10,flexWrap:"wrap",marginBottom:12}}>
@@ -3560,24 +3604,26 @@ Screenshot attached: Yes / No`}</pre>
                             : status.category==="followup"
                               ? {label:`${status.age||28}-Day Low — Follow-Up`,color:C.yellow,icon:"⚠"}
                               : {label:"28-Day Pending",color:C.blue,icon:"○"};
-                      const nextTest=group.tests.map(nextPendingConcreteTest).filter(Boolean).sort((a,b)=>{
+                      const nextTest=status.category==="pass"?null:(group.currentTests||group.tests).map(nextPendingConcreteTest).filter(Boolean).sort((a,b)=>{
                         if(a.break_date&&b.break_date)return String(a.break_date).localeCompare(String(b.break_date));
                         if(a.break_date)return -1;
                         if(b.break_date)return 1;
                         return (parseFloat(a.age_days)||999)-(parseFloat(b.age_days)||999);
                       })[0];
                       const isOpen=!!expandedTests[group.key];
-                      const nextTestText=nextTest?.break_date
-                        ? `${formatTestDate(nextTest.break_date)}${nextTest.age_days?` · ${nextTest.age_days}-day`:""}`
-                        : nextTest?.age_days
-                          ? `${nextTest.age_days}-day test pending`
-                          : (status.category==="pass"||status.category==="fail")?"Testing complete":"Awaiting test date";
+                      const nextTestText=status.category==="pass"
+                        ? "Strength requirement met"
+                        : nextTest?.break_date
+                          ? `${formatTestDate(nextTest.break_date)}${nextTest.age_days?` · ${nextTest.age_days}-day`:""}`
+                          : nextTest?.age_days
+                            ? `${nextTest.age_days}-day test pending`
+                            : status.category==="fail"?"Testing complete":"Awaiting test date";
                       const rowTint=status.category==="pass"?C.green+"0A":status.category==="followup"?C.yellow+"12":["fail","review"].includes(status.category)?C.red+"12":C.card;
                       const rowBorder=status.category==="pass"?C.green+"44":status.category==="followup"?C.yellow+"88":["fail","review"].includes(status.category)?C.red+"88":C.blue+"33";
                       const nextColor=status.category==="followup"?C.yellow:["fail","review"].includes(status.category)?C.red:nextTest?C.blue:C.muted;
                       return <div key={group.key} style={{background:rowTint,border:`1px solid ${isOpen?registerStatus.color+"99":rowBorder}`,borderRadius:12,marginBottom:9,overflow:"hidden"}}>
                         <button type="button" onClick={()=>setExpandedTests(current=>({...current,[group.key]:!current[group.key]}))} style={{width:"100%",display:"grid",gridTemplateColumns:"110px minmax(0,1.35fr) minmax(0,1.15fr) minmax(0,1fr) 22px",gap:10,alignItems:"center",background:"transparent",border:"none",padding:"14px",color:C.text,textAlign:"left",cursor:"pointer",fontFamily:"inherit"}}>
-                          <div><div style={{fontWeight:800,fontSize:13,color:status.category==="pass"?C.green:C.text}}>{formatTestDate(group.castDate)}</div><div style={{color:C.muted,fontSize:10,marginTop:2}}>{group.tests.length} test report{group.tests.length!==1?"s":""}</div></div>
+                          <div><div style={{fontWeight:800,fontSize:13,color:status.category==="pass"?C.green:C.text}}>{formatTestDate(group.castDate)}</div><div style={{color:C.muted,fontSize:10,marginTop:2}}>{group.tests.length} report{group.tests.length!==1?"s":""}{group.currentTests&&group.currentTests.length!==group.tests.length?` · ${group.currentTests.length} current test set${group.currentTests.length!==1?"s":""}`:""}</div></div>
                           <div style={{fontWeight:750,fontSize:13}}>{group.location}</div>
                           <div style={{minWidth:0}}><Badge color={registerStatus.color}>{registerStatus.icon} {registerStatus.label}</Badge></div>
                           <div style={{fontSize:12,color:nextColor,fontWeight:nextTest?700:500}}>{nextTestText}</div>
