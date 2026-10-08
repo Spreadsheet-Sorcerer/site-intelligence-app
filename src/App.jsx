@@ -11,7 +11,7 @@ const C = {
   yellow: "#EAB308", red: "#EF4444", purple: "#A855F7",
   muted: "#6B7280", text: "#F9FAFB", sub: "#9CA3AF", teal: "#14B8A6",
 };
-const APP_VERSION = "21.2";
+const APP_VERSION = "21.3";
 
 // ─── SUPABASE STORAGE HELPERS ────────────────────────────────────────────────
 // Calls server-side API routes which talk to Supabase.
