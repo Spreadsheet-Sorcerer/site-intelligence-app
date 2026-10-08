@@ -1,3 +1,4 @@
+import SafetyModule from "./SafetyModule.jsx";
 // v20.20 — concrete testing progress aggregation fix
 import { useState, useRef, useEffect } from "react";
 import * as XLSX from "xlsx";
@@ -9,7 +10,7 @@ const C = {
   yellow: "#EAB308", red: "#EF4444", purple: "#A855F7",
   muted: "#6B7280", text: "#F9FAFB", sub: "#9CA3AF", teal: "#14B8A6",
 };
-const APP_VERSION = "20.18";
+const APP_VERSION = "21.0";
 
 // ─── SUPABASE STORAGE HELPERS ────────────────────────────────────────────────
 // Calls server-side API routes which talk to Supabase.
@@ -1004,10 +1005,10 @@ function LandingScreen({ onSelect }) {
       stats: ["Volume tracking","MPa validation","Invoice matching","Export to .xlsx"],
     },
     {
-      id:"certs", emoji:"📋", title:"Worker Certificates",
-      desc:"Scan worker training certifications, track expiry dates, get alerts before certifications lapse.",
+      id:"certs", emoji:"📋", title:"Worker Safety & Orientations",
+      desc:"Digital site orientations, manager review, worker profiles, certificates and expiry alerts.",
       color: C.teal,
-      stats: ["25 cert types","Expiry tracking","Worker roster","Email intake ready"],
+      stats: ["Digital orientation","Manager approvals","Trade roster","Expiry alerts"],
     },
     {
       id:"tradedocs", emoji:"🦺", title:"Trade Documents",
@@ -4214,7 +4215,8 @@ function RecordEditor({title,draft,setDraft,fields,checkbox,select,onClose,onSav
 export default function App() {
   const [module, setModule] = useState(null);
   if (module === "concrete")  return <ConcreteModule  onBack={() => setModule(null)} />;
-  if (module === "certs")     return <CertsModule     onBack={() => setModule(null)} />;
+  if (module === "certs")     return <SafetyModule onBack={() => setModule(null)} onLegacy={() => setModule("legacy-certs")} />;
+  if (module === "legacy-certs") return <CertsModule onBack={() => setModule("certs")} />;
   if (module === "tradedocs") return <TradeDocsModule onBack={() => setModule(null)} />;
   if (module === "tm")        return <TMModule        onBack={() => setModule(null)} />;
   return <LandingScreen onSelect={setModule} />;
