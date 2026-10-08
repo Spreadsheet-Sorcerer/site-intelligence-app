@@ -6,7 +6,7 @@ function role(req){const secret=String(req.headers.authorization||'').replace(/^
 async function db(method,body){const url=process.env.SUPABASE_URL,key=process.env.SUPABASE_SERVICE_KEY;if(!url||!key)throw new Error('Supabase is not configured');const res=await fetch(`${url}/rest/v1/safety_data?id=eq.1${method==='GET'?'&select=id,payload,revision':''}`,{method,headers:{apikey:key,Authorization:`Bearer ${key}`,'Content-Type':'application/json',Prefer:'return=representation'},body:body?JSON.stringify(body):undefined});const txt=await res.text();if(!res.ok)throw new Error(`Safety storage request failed (${res.status}): ${txt.slice(0,300)}`);return txt?JSON.parse(txt):[];}
 export default async function handler(req,res){res.setHeader('Cache-Control','no-store');const who=role(req);if(!who)return res.status(401).json({error:'Safety staff sign-in required'});if(!['GET','POST'].includes(req.method))return res.status(405).json({error:'Unsupported method'});
 try{const rows=await db('GET');if(rows.length!==1)return res.status(409).json({error:'Missing safety_data row. Run the included SQL migration.'});const record=rows[0];if(req.method==='GET')return res.status(200).json({...record,role:who});
-const {action,payload,revision,workerId,decision,reviewNote}=req.body||{};
+const {action,payload,revision,workerId,decision,reviewNote,ticketId,fields}=req.body||{};
 if(action==='worker_link'){
   if(!process.env.SAFETY_PORTAL_SIGNING_KEY || process.env.SAFETY_PORTAL_SIGNING_KEY.length<32)return res.status(503).json({error:'Worker portal signing key not configured'});
   if(!(record.payload?.workers||[]).some(w=>String(w.id)===String(workerId)))return res.status(404).json({error:'Worker not found'});
@@ -20,9 +20,19 @@ if(!payload||!Array.isArray(payload.workers)||!Array.isArray(payload.orientation
 // Only a safety manager can change verification fields. Staff may maintain worker and orientation records.
 const old=new Map((record.payload?.orientations||[]).map(o=>[String(o.id),o]));
 for(const entry of payload.orientations){const previous=old.get(String(entry.id));if(previous&&(entry.approval_status!==previous.approval_status||entry.approved_by!==previous.approved_by||entry.approved_at!==previous.approved_at))return res.status(403).json({error:'Use the manager approval action to change orientation verification'});if(!previous&&entry.approval_status==='approved')return res.status(403).json({error:'New orientations cannot start approved'});}
+// Ticket approvals are manager-only and must use the dedicated review action.
+const oldWorkers=new Map((record.payload?.workers||[]).map(w=>[String(w.id),w]));
+for(const w of payload.workers){const oldWorker=oldWorkers.get(String(w.id));const oldTickets=new Map((oldWorker?.tickets||[]).map(t=>[String(t.id),t]));for(const t of w.tickets||[]){const before=oldTickets.get(String(t.id));if(t.status==='verified'&&(!before||before.status!=='verified'))return res.status(403).json({error:'Use manager certificate verification to approve tickets'});if(before?.status==='verified'&&JSON.stringify(before)!==JSON.stringify(t))return res.status(403).json({error:'Verified tickets cannot be changed by an ordinary save'});}}
 // Protect approved records from being removed by ordinary staff.
 for(const p of old.values())if(p.approval_status==='approved'&&!payload.orientations.some(o=>String(o.id)===String(p.id)))return res.status(403).json({error:'Approved orientations cannot be deleted'});
 next={workers:payload.workers,orientations:payload.orientations};
+}else if(action==='ticket_review'){
+if(who!=='manager')return res.status(403).json({error:'Safety manager credentials required'});
+const type=String(fields?.type||'').trim().slice(0,160),holder=String(fields?.holder_name||'').trim().slice(0,160),expiry=String(fields?.expiry_date||'').trim();
+if(!type||!holder||!/^\d{4}-\d{2}-\d{2}$/.test(expiry)||Number.isNaN(Date.parse(expiry)))return res.status(400).json({error:'Certificate type, printed name and a valid expiry date are required'});
+let found=false;const workers=(record.payload?.workers||[]).map(w=>String(w.id)===String(workerId)?{...w,tickets:(w.tickets||[]).map(t=>{if(String(t.id)!==String(ticketId))return t;found=true;if(t.status==='verified')throw new Error('Certificate is already verified');return {...t,type,holder_name:holder,expiry_date:expiry,status:'verified',verified_at:new Date().toISOString(),verified_by:'Safety manager'};})}:w);
+if(!found)return res.status(404).json({error:'Certificate not found'});
+next={...(record.payload||{}),workers};
 }else if(action==='review'){
 if(who!=='manager')return res.status(403).json({error:'Safety manager credentials required'});
 if(!['approve','return'].includes(decision))return res.status(400).json({error:'Invalid review decision'});
