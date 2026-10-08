@@ -1,3 +1,4 @@
+import {createHmac} from 'node:crypto';
 // v21.0: separate, protected safety records. QR/public access intentionally not enabled.
 import { timingSafeEqual } from 'node:crypto';
 const equal=(a,b)=>{const x=Buffer.from(String(a||'')),y=Buffer.from(String(b||''));return x.length===y.length&&timingSafeEqual(x,y);};
@@ -5,7 +6,15 @@ function role(req){const secret=String(req.headers.authorization||'').replace(/^
 async function db(method,body){const url=process.env.SUPABASE_URL,key=process.env.SUPABASE_SERVICE_KEY;if(!url||!key)throw new Error('Supabase is not configured');const res=await fetch(`${url}/rest/v1/safety_data?id=eq.1${method==='GET'?'&select=id,payload,revision':''}`,{method,headers:{apikey:key,Authorization:`Bearer ${key}`,'Content-Type':'application/json',Prefer:'return=representation'},body:body?JSON.stringify(body):undefined});const txt=await res.text();if(!res.ok)throw new Error(`Safety storage request failed (${res.status}): ${txt.slice(0,300)}`);return txt?JSON.parse(txt):[];}
 export default async function handler(req,res){res.setHeader('Cache-Control','no-store');const who=role(req);if(!who)return res.status(401).json({error:'Safety staff sign-in required'});if(!['GET','POST'].includes(req.method))return res.status(405).json({error:'Unsupported method'});
 try{const rows=await db('GET');if(rows.length!==1)return res.status(409).json({error:'Missing safety_data row. Run the included SQL migration.'});const record=rows[0];if(req.method==='GET')return res.status(200).json({...record,role:who});
-const {action,payload,revision,workerId,decision,reviewNote}=req.body||{};if(Number(revision)!==Number(record.revision))return res.status(409).json({error:'Someone updated these records. Refresh before saving.'});let next;
+const {action,payload,revision,workerId,decision,reviewNote}=req.body||{};
+if(action==='worker_link'){
+  if(!process.env.SAFETY_PORTAL_SIGNING_KEY || process.env.SAFETY_PORTAL_SIGNING_KEY.length<32)return res.status(503).json({error:'Worker portal signing key not configured'});
+  if(!(record.payload?.workers||[]).some(w=>String(w.id)===String(workerId)))return res.status(404).json({error:'Worker not found'});
+  const p=Buffer.from(JSON.stringify({workerId:String(workerId),exp:Date.now()+12*60*60*1000})).toString('base64url');
+  const mac=createHmac('sha256',process.env.SAFETY_PORTAL_SIGNING_KEY).update(p).digest('base64url');
+  return res.status(200).json({token:`${p}.${mac}`,expires_hours:12});
+}
+if(Number(revision)!==Number(record.revision))return res.status(409).json({error:'Someone updated these records. Refresh before saving.'});let next;
 if(action==='save'){
 if(!payload||!Array.isArray(payload.workers)||!Array.isArray(payload.orientations))return res.status(400).json({error:'Invalid record format'});
 // Only a safety manager can change verification fields. Staff may maintain worker and orientation records.
