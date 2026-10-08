@@ -1,4 +1,5 @@
 import SafetyModule from "./SafetyModule.jsx";
+import WorkerPortal from "./WorkerPortal.jsx";
 // v20.20 — concrete testing progress aggregation fix
 import { useState, useRef, useEffect } from "react";
 import * as XLSX from "xlsx";
@@ -10,7 +11,7 @@ const C = {
   yellow: "#EAB308", red: "#EF4444", purple: "#A855F7",
   muted: "#6B7280", text: "#F9FAFB", sub: "#9CA3AF", teal: "#14B8A6",
 };
-const APP_VERSION = "21.0";
+const APP_VERSION = "21.2";
 
 // ─── SUPABASE STORAGE HELPERS ────────────────────────────────────────────────
 // Calls server-side API routes which talk to Supabase.
@@ -4213,6 +4214,7 @@ function RecordEditor({title,draft,setDraft,fields,checkbox,select,onClose,onSav
 // ROOT — ROUTER
 // ═══════════════════════════════════════════════════════════════════════════════
 export default function App() {
+  if (window.location.pathname === "/worker") return <WorkerPortal />;
   const [module, setModule] = useState(null);
   if (module === "concrete")  return <ConcreteModule  onBack={() => setModule(null)} />;
   if (module === "certs")     return <SafetyModule onBack={() => setModule(null)} onLegacy={() => setModule("legacy-certs")} />;
