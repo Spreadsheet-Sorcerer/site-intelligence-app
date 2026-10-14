@@ -2456,48 +2456,62 @@ Return ONLY valid JSON (no markdown):
   }
 
   function matchInvoiceToTickets(invoice, allTickets) {
-    const invoiceTicketNums = [...new Set((invoice.ticket_numbers||[]).map(ticketNumberKey).filter(Boolean))];
-    const invoiceNumber = normalizeInvoiceNumber(invoice.invoice_number);
-    const explicitlyMatched = allTickets.filter(t => {
-      const number=ticketNumberKey(t.ticket_number);
-      return (number && invoiceTicketNums.includes(number)) ||
-        (invoiceNumber && normalizeInvoiceNumber(t.invoice_number)===invoiceNumber);
+    if(isOceanCredit(invoice)) return {matched:[],unmatched:[],ticketsOnInvoice:[],ticketVolume:0,invoiceVolume:0,volumeMatch:null,volumeOverbilled:false,usesConsolidatedBatch:false,batchDate:"",incompleteSupport:false};
+    const invoiceTicketNums=[...new Set((invoice.ticket_numbers||[]).map(ticketNumberKey).filter(Boolean))];
+    const invoiceNumber=normalizeInvoiceNumber(invoice.invoice_number);
+    const explicitlyMatched=allTickets.filter(t=>{
+      const n=ticketNumberKey(t.ticket_number);
+      return (n&&invoiceTicketNums.includes(n))||(invoiceNumber&&normalizeInvoiceNumber(t.invoice_number)===invoiceNumber);
     });
     const isOcean=String(invoice.supplier||"").toLowerCase().includes("ocean");
     const invoiceVolume=resolvedInvoiceVolumeM3(invoice);
     const statedDate=String(invoice.delivery_date||invoice.pour_date||invoice.invoice_date||"").slice(0,10);
     const referencedDates=[...new Set(explicitlyMatched.map(t=>String(t.date||"").slice(0,10)).filter(Boolean))];
-    // A supplier invoice date is not necessarily the delivery date. Prefer the
-    // date of the tickets the invoice explicitly references, if unambiguous.
-    const candidateDates=referencedDates.length===1
-      ? [referencedDates[0],...(statedDate!==referencedDates[0]?[statedDate]:[])]
-      : [statedDate];
-    let oceanDateBatch=[], batchDate="", usesConsolidatedBatch=false;
-    if(isOcean && invoiceVolume>0){
-      for(const date of candidateDates.filter(Boolean)){
-        const batch=allTickets.filter(t=>String(t.date||"").slice(0,10)===date &&
-          String(t.supplier||"").toLowerCase().includes("ocean") && (parseFloat(t.volume_m3)||0)>0);
-        const volume=batch.reduce((sum,t)=>sum+(parseFloat(t.volume_m3)||0),0);
-        // An exact full-day total is reliable only if referenced tickets are
-        // present in that same batch. Do not silently allocate a day's loads
-        // to one of multiple invoices without clear supporting references.
-        const coversRefs=explicitlyMatched.every(t=>batch.some(b=>b.id===t.id));
-        if(batch.length && coversRefs && Math.abs(volume-invoiceVolume)<0.5){
-          oceanDateBatch=batch;batchDate=date;usesConsolidatedBatch=true;break;
+    const candidateDates=referencedDates.length===1?[referencedDates[0],statedDate].filter((d,i,a)=>d&&a.indexOf(d)===i):[statedDate];
+    const baseLines=(invoice.line_items||[]).filter(line=>/\b\d+\s*mpa\b/i.test(String(line.description||""))&&/plain|grout|concrete|mix/i.test(String(line.description||""))&&Number(line.quantity)>0);
+    const baseStrengthTotals=new Map();
+    for(const line of baseLines){
+      const strength=parseMpaNum(line.description);
+      if(!Number.isFinite(strength))continue;
+      baseStrengthTotals.set(strength,(baseStrengthTotals.get(strength)||0)+Number(line.quantity));
+    }
+    let ticketsOnInvoice=explicitlyMatched, batchDate="", usesConsolidatedBatch=false, incompleteSupport=false;
+    if(isOcean&&baseStrengthTotals.size){
+      for(const date of candidateDates){
+        const day=allTickets.filter(t=>String(t.date||"").slice(0,10)===date&&String(t.supplier||"").toLowerCase().includes("ocean")&&Number(t.volume_m3)>0);
+        // Match each concrete/grout strength separately; a small grout load
+        // must not make the day's structural-concrete reconciliation fail.
+        const selected=day.filter(t=>baseStrengthTotals.has(parseMpaNum(t.mix_design)));
+        const coverage=[...baseStrengthTotals].every(([strength,qty])=>{
+          const actual=selected.filter(t=>parseMpaNum(t.mix_design)===strength).reduce((sum,t)=>sum+Number(t.volume_m3||0),0);
+          return Math.abs(actual-qty)<=0.06;
+        });
+        // Some grout tickets have no usable mix strength; honor an explicitly
+        // referenced ticket only if it completes the invoice total.
+        let candidate=selected;
+        if(!coverage){
+          const missingRefs=explicitlyMatched.filter(t=>!candidate.some(x=>x.id===t.id));
+          const withRefs=[...candidate,...missingRefs];
+          const combined=withRefs.reduce((sum,t)=>sum+Number(t.volume_m3||0),0);
+          if(Math.abs(combined-invoiceVolume)<=0.06)candidate=withRefs;
+        }
+        const combined=candidate.reduce((sum,t)=>sum+Number(t.volume_m3||0),0);
+        const supportsRefs=explicitlyMatched.every(t=>candidate.some(x=>x.id===t.id));
+        // Do not claim a full-date match when other active invoices on that date
+        // might also claim the same deliveries. Explicitly matched ticket ownership
+        // is checked against other recorded invoice references.
+        const conflicts=candidate.some(t=>t.invoice_number&&normalizeInvoiceNumber(t.invoice_number)!==invoiceNumber);
+        if(candidate.length&&supportsRefs&&!conflicts&&Math.abs(combined-invoiceVolume)<=0.06){
+          ticketsOnInvoice=candidate;batchDate=date;usesConsolidatedBatch=true;break;
         }
       }
     }
-    const ticketsOnInvoice=usesConsolidatedBatch?oceanDateBatch:explicitlyMatched;
-    const matched=ticketsOnInvoice.map(t=>({invoiceRef:usesConsolidatedBatch?"Ocean delivery-date batch":t.ticket_number,ticket:t}));
+    const ticketVolume=ticketsOnInvoice.reduce((sum,t)=>sum+(Number(t.volume_m3)||0),0);
     const unmatched=invoiceTicketNums.filter(n=>!allTickets.some(t=>ticketNumberKey(t.ticket_number)===n));
-    const ticketVolume=ticketsOnInvoice.reduce((sum,t)=>sum+(parseFloat(t.volume_m3)||0),0);
-    const volumeMatch=invoiceVolume>0?Math.abs(ticketVolume-invoiceVolume)<0.5:null;
-    // When the source ticket set is incomplete, billed-minus-matched volume
-    // is NOT evidence of overbilling. Flag incomplete reconciliation instead.
-    const incompleteSupport=isOcean && invoiceVolume>ticketVolume+0.5 && !usesConsolidatedBatch;
-    const volumeOverbilled=!incompleteSupport && invoiceVolume>0 && invoiceVolume-ticketVolume>0.5;
-    return {matched,unmatched,ticketsOnInvoice,ticketVolume,invoiceVolume,
-      volumeMatch,volumeOverbilled,usesConsolidatedBatch,batchDate,incompleteSupport};
+    const volumeMatch=invoiceVolume>0?Math.abs(ticketVolume-invoiceVolume)<=0.06:null;
+    incompleteSupport=isOcean&&invoiceVolume>ticketVolume+0.06&&!usesConsolidatedBatch;
+    const volumeOverbilled=!incompleteSupport&&invoiceVolume>0&&invoiceVolume-ticketVolume>0.06;
+    return {matched:ticketsOnInvoice.map(t=>({invoiceRef:usesConsolidatedBatch?"Ocean delivery-date batch":t.ticket_number,ticket:t})),unmatched,ticketsOnInvoice,ticketVolume,invoiceVolume,volumeMatch,volumeOverbilled,usesConsolidatedBatch,batchDate,incompleteSupport};
   }
 
   function invoiceHasAuditIssues(inv, match) {
@@ -2538,10 +2552,10 @@ Return ONLY valid JSON (no markdown):
     const linkCount=links.length;
     const creditAmount=creditBeforeHst(credit);
     const allocation=(credit.credit_allocations||{})[n];
-    if(linkCount>1 && !(Number(allocation)>0)) {
-      showToast("Shared credit: enter the amount allocated to this invoice on the credit memo first.","err");return;
-    }
-    saveInvoiceResolution(original,{status:"credited",reference:credit.invoice_number,amount:linkCount===1?creditAmount:Number(allocation),notes:"Verified against uploaded Ocean credit document.",credit_id:credit.id});
+    // Confirmation tracks the credit reference even when a shared memo doesn't
+    // state a per-invoice allocation. Never invent an allocation or multiply the
+    // memo total across each linked invoice. Financials deduct the memo once.
+    saveInvoiceResolution(original,{status:"credited",reference:credit.invoice_number,amount:linkCount===1?creditAmount:(Number(allocation)>0?Number(allocation):null),notes:linkCount>1&&!(Number(allocation)>0)?"Linked shared credit memo; amount by invoice not specified. Confirm original discrepancy is fully addressed before marking resolved.":"Verified against uploaded Ocean credit document.",credit_id:credit.id});
   }
   function allocateCredit(credit, invoiceNumber, amount) {
     const n=normalizeInvoiceNumber(invoiceNumber);
@@ -3047,11 +3061,11 @@ Return ONLY valid JSON, no markdown:
           {[...new Set([...offeredCreditRefs,...savedCreditRefs])].length===0&&<div style={{color:C.yellow,marginTop:8}}>No original invoice references identified. Check the document and upload the original invoices first.</div>}
           {[...new Set([...offeredCreditRefs,...savedCreditRefs])].map(ref=><label key={ref} style={{display:"block",marginTop:8,fontSize:13}}><input type="checkbox" checked={pickedCreditRefs.includes(ref)} onChange={e=>{const updated=e.target.checked?[...pickedCreditRefs,ref]:pickedCreditRefs.filter(x=>x!==ref);setCreditSelection(updated);}}/> Link to invoice {ref}{!invoices.some(x=>!isOceanCredit(x)&&normalizeInvoiceNumber(x.invoice_number)===ref)?" (not yet uploaded)":""}</label>)}
           <button type="button" onClick={()=>{linkCreditToInvoices(invoice,pickedCreditRefs);}} style={{...primaryBtn,marginTop:12}}>Confirm linked invoices</button>
-          {savedCreditRefs.length>0&&<div style={{borderTop:`1px solid ${C.border}`,marginTop:12,paddingTop:12}}><b>Resolve individual overcharges</b><div style={{color:C.sub,fontSize:12}}>For shared credits, enter each invoice's portion of the credit before marking resolved. Original warnings remain in history.</div>
-          {savedCreditRefs.map(ref=>{const original=invoices.find(x=>!isOceanCredit(x)&&normalizeInvoiceNumber(x.invoice_number)===ref);return <div key={ref} style={{marginTop:10}}><b>{ref}</b>{savedCreditRefs.length>1&&<input type="number" min="0" step="0.01" placeholder="Amount allocated before HST" value={allocationDrafts[ref]??invoice.credit_allocations?.[ref]??""} onChange={e=>setAllocationDrafts(prev=>({...prev,[ref]:e.target.value}))} style={{...inputStyle,marginTop:5}}/>}{savedCreditRefs.length>1&&<button type="button" onClick={()=>allocateCredit(invoice,ref,allocationDrafts[ref]??invoice.credit_allocations?.[ref])} style={{...ghostBtn,marginTop:5,marginRight:6}}>Save allocation</button>}{original?<button type="button" disabled={!!original.invoice_resolution||(savedCreditRefs.length>1&&!(Number(invoice.credit_allocations?.[ref])>0))} onClick={()=>resolveWithLinkedCredit(original,invoice)} style={{...ghostBtn,marginTop:5,opacity:original.invoice_resolution?0.5:1}}>{original.invoice_resolution?"Resolved":"Mark this invoice resolved"}</button>:<span style={{color:C.yellow}}> Upload original invoice to resolve</span>}</div>})}
+          {savedCreditRefs.length>0&&<div style={{borderTop:`1px solid ${C.border}`,marginTop:12,paddingTop:12}}><b>Resolve individual overcharges</b><div style={{color:C.sub,fontSize:12}}>Confirm only invoices fully corrected by this memo. Allocations are optional if Ocean does not specify them; the memo is deducted once from project totals. Original warnings remain in history.</div>
+          {savedCreditRefs.map(ref=>{const original=invoices.find(x=>!isOceanCredit(x)&&normalizeInvoiceNumber(x.invoice_number)===ref);return <div key={ref} style={{marginTop:10}}><b>{ref}</b>{savedCreditRefs.length>1&&<input type="number" min="0" step="0.01" placeholder="Amount allocated before HST" value={allocationDrafts[ref]??invoice.credit_allocations?.[ref]??""} onChange={e=>setAllocationDrafts(prev=>({...prev,[ref]:e.target.value}))} style={{...inputStyle,marginTop:5}}/>}{savedCreditRefs.length>1&&<button type="button" onClick={()=>allocateCredit(invoice,ref,allocationDrafts[ref]??invoice.credit_allocations?.[ref])} style={{...ghostBtn,marginTop:5,marginRight:6}}>Save allocation</button>}{original?<button type="button" disabled={!!original.invoice_resolution} onClick={()=>resolveWithLinkedCredit(original,invoice)} style={{...ghostBtn,marginTop:5,opacity:original.invoice_resolution?0.5:1}}>{original.invoice_resolution?"Resolved":"Mark this invoice resolved"}</button>:<span style={{color:C.yellow}}> Upload original invoice to resolve</span>}</div>})}
           </div>}
         </div>}
-        {!creditMode&&invoice.invoice_resolution&&<div style={{background:"#052e16",border:`1px solid ${C.green}`,borderRadius:10,padding:"12px 16px",marginBottom:14,fontSize:13}}><b style={{color:"#86efac"}}>✓ Resolved — credit received / reconciliation confirmed</b><div style={{marginTop:6}}>Reference: {invoice.invoice_resolution.reference} · Credit: {money(invoice.invoice_resolution.amount)} · Recorded: {String(invoice.invoice_resolution.recorded_at||"").slice(0,10)}</div>{invoice.invoice_resolution.notes&&<div style={{marginTop:4}}>{invoice.invoice_resolution.notes}</div>}<div style={{color:C.sub,fontSize:11,marginTop:6}}>Original discrepancy details remain below for the audit trail.</div><button type="button" onClick={()=>reopenInvoiceResolution(invoice)} style={{...ghostBtn,marginTop:9}}>Reopen issue</button></div>}
+        {!creditMode&&invoice.invoice_resolution&&<div style={{background:"#052e16",border:`1px solid ${C.green}`,borderRadius:10,padding:"12px 16px",marginBottom:14,fontSize:13}}><b style={{color:"#86efac"}}>✓ Resolved — credit received / reconciliation confirmed</b><div style={{marginTop:6}}>Reference: {invoice.invoice_resolution.reference} · Credit: {invoice.invoice_resolution.amount!=null?money(invoice.invoice_resolution.amount):"shared credit — unallocated"} · Recorded: {String(invoice.invoice_resolution.recorded_at||"").slice(0,10)}</div>{invoice.invoice_resolution.notes&&<div style={{marginTop:4}}>{invoice.invoice_resolution.notes}</div>}<div style={{color:C.sub,fontSize:11,marginTop:6}}>Original discrepancy details remain below for the audit trail.</div><button type="button" onClick={()=>reopenInvoiceResolution(invoice)} style={{...ghostBtn,marginTop:9}}>Reopen issue</button></div>}
         {!creditMode&&!invoice.invoice_resolution&&hasIssues&&<div style={{background:C.bg,border:`1px solid ${C.border}`,borderRadius:10,padding:14,marginBottom:14,fontSize:13}}>To resolve this warning, upload Ocean's credit memo from <b>Scan Invoice / Credit</b>. Open the credit memo, confirm its invoice references, and mark this discrepancy resolved there. Original findings will remain visible.</div>}
         {!creditMode&&m.incompleteSupport&&<div style={{background:"#451a03",border:`1px solid ${C.yellow}`,borderRadius:10,padding:"12px 16px",marginBottom:14,color:"#fde68a",fontSize:13}}>⚠ Incomplete ticket reconciliation. The invoice lists fewer tickets than its quantity suggests. The app could not confidently identify the entire delivery batch; do not treat the volume difference as a confirmed overcharge. Verify delivery dates and whether another invoice covers the same day.</div>}
         {isSuperseded&&<div style={{background:C.purple+"14",border:`1px solid ${C.purple}66`,borderRadius:10,padding:"12px 16px",marginBottom:14,color:"#e9d5ff",fontSize:13}}>↪ This invoice was superseded by <b>{supersession.replacement.invoice_number||"a replacement invoice"}</b> and is retained for audit history only. Its dollars, concrete cost and invoice-side pumping charges are excluded from project totals.</div>}
