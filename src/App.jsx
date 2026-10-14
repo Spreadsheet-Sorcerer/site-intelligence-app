@@ -407,6 +407,30 @@ function invoiceMaterialLines(inv){
 }
 function ticketIsGrout(ticket){return inferredTicketUse(ticket)==='pump_priming_grout'||/grout/i.test(String(ticket?.mix_design||''));}
 
+// Each computed finding has a stable category key and a fingerprint of the
+// underlying figures. Changing an invoice/ticket figure requires fresh review.
+function invoiceFindings(invoice, matching, audit, fees, rates) {
+  if (isCreditMemo(invoice)) return [];
+  const findings=[];
+  const add=(key,label,figures,amount=null)=>{
+    const signature=JSON.stringify(figures.map(v=>typeof v==='number' ? Math.round(v*10000)/10000 : v));
+    findings.push({key,label,signature,amount});
+  };
+  matching.unmatched.forEach(num=>add(`ticket:${num}`,`Ticket ${num} not found`,[num]));
+  if (matching.needsReconciliation) add('tickets:reconciliation','Delivery ticket reconciliation requires review',[matching.invoiceVolume,matching.ticketVolume,matching.materialBreakdown?.map(x=>[x.strength,x.grout,x.qty,x.ticketQty])]);
+  if (matching.volumeOverbilled) add('tickets:volume','Possible volume overbilling',[matching.invoiceVolume,matching.ticketVolume]);
+  audit.issues.forEach(row=>add(`charge:${row.key}`,`${row.label} — extra charge`,[row.invoiceQuantity,row.ticketQuantity,row.invoiceRate,row.ticketRate,row.invoiceAmount,row.ticketAmount],row.invoiceAmount-row.ticketAmount));
+  fees.filter(row=>row.mismatch).forEach((row,index)=>add(`fee:${index}:${row.label}`,row.label,[row.expected,row.billed],row.difference));
+  rates.filter(row=>row.mismatch).forEach((row,index)=>add(`rate:${index}:${row.strength}`,`${row.label} — contract rate`,[row.quantity,row.contractRate,row.billedRate,row.expectedAmount,row.amount],row.difference));
+  return findings;
+}
+function findingResolution(invoice, finding) {
+  const resolution=invoice?.discrepancy_reviews?.[finding.key];
+  return resolution?.signature===finding.signature ? resolution : null;
+}
+function openInvoiceFindings(invoice,matching,audit,fees,rates){
+  return invoiceFindings(invoice,matching,audit,fees,rates).filter(f=>!findingResolution(invoice,f));
+}
 function invoiceAmountBeforeHst(invoice) {
   if(isCreditMemo(invoice)) return -creditNetAmount(invoice);
   const chargeLines = (invoice?.line_items || []).filter(line => {
@@ -2729,7 +2753,17 @@ Return ONLY valid JSON, no markdown:
   const liveOceanForecastRates={...OCEAN_BASE_RATES};
   const creditMemos=activeInvoices.filter(isCreditMemo);
   const billingInvoices=activeInvoices.filter(inv=>!isCreditMemo(inv));
-  const invoicesWithIssues=billingInvoices.filter(inv=>!invoiceResolvedByCredit(inv,creditMemos)).filter(inv=>{ const m=matchInvoiceToTickets(inv,tickets); const audit=invoiceChargeAudit(inv,m.needsReconciliation?[]:m.ticketsOnInvoice); const calculated=invoiceCalculatedChecks(inv); const rates=invoiceContractRateChecks(inv,m.needsReconciliation?[]:m.ticketsOnInvoice,liveOceanContractRates); return m.unmatched.length>0||m.volumeOverbilled||audit.issues.length>0||calculated.some(check=>check.mismatch)||rates.some(check=>check.mismatch); }).length;
+  const findingsForInvoice=inv=>{
+    const m=matchInvoiceToTickets(inv,tickets);
+    const audit=invoiceChargeAudit(inv,m.needsReconciliation?[]:m.ticketsOnInvoice);
+    return invoiceFindings(inv,m,audit,invoiceCalculatedChecks(inv),invoiceContractRateChecks(inv,m.needsReconciliation?[]:m.ticketsOnInvoice,liveOceanContractRates));
+  };
+  const outstandingForInvoice=inv=>invoiceSupersessionMap.has(normalizeInvoiceNumber(inv.invoice_number))?[]:findingsForInvoice(inv).filter(f=>!findingResolution(inv,f)&&!invoiceResolvedByCredit(inv,creditMemos));
+  const invoicesWithIssues=billingInvoices.filter(inv=>outstandingForInvoice(inv).length>0).length;
+  const creditReviewCount=creditMemos.filter(credit=>{
+    const refs=referencedCreditInvoices(credit,invoices);
+    return refs.length===0||refs.some(inv=>outstandingForInvoice(inv).length>0);
+  }).length;
   const matchedInvoiceCount=Math.max(0,billingInvoices.length-invoicesWithIssues);
   const totalInvoiced=activeInvoices.reduce((s,inv)=>s+(isCreditMemo(inv)?-creditGrossAmount(inv):(parseFloat(inv.total_amount)||0)),0);
   const invoicedBeforeHst=activeInvoices.reduce((s,inv)=>s+invoiceAmountBeforeHst(inv),0);
@@ -2961,8 +2995,24 @@ Return ONLY valid JSON, no markdown:
     const supersession=invoiceSupersessionMap.get(invoiceNumber);
     const rebillOf=invoiceRebillReference(invoice);
     const isSuperseded=!!supersession;
-    const hasIssues=!isCredit&&!invoiceResolvedByCredit(invoice,creditMemos)&&!isSuperseded&&(m.unmatched.length>0||m.volumeOverbilled||chargeAudit.issues.length>0||calculatedChecks.some(check=>check.mismatch)||contractRateChecks.some(check=>check.mismatch));
+    const hasIssues=!isCredit&&!invoiceResolvedByCredit(invoice,creditMemos)&&!isSuperseded&&outstandingForInvoice(invoice).length>0;
     const hasWarnings=m.needsReconciliation;
+    const findings=invoiceFindings(invoice,m,chargeAudit,calculatedChecks,contractRateChecks);
+    const outstanding=findings.filter(f=>!findingResolution(invoice,f)&&!invoiceResolvedByCredit(invoice,creditMemos));
+    const saveReview=(finding,status)=>{
+      const note=window.prompt(status==='accepted'?'Optional review note (accepted as billed):':'Optional resolution note:', '') ;
+      if(note===null)return;
+      const currentReviews=invoice.discrepancy_reviews||{};
+      const next={...currentReviews,[finding.key]:{status,signature:finding.signature,label:finding.label,note:note.trim(),date:new Date().toISOString()}};
+      setInvoices(prev=>prev.map(item=>item.id===invoice.id?{...item,discrepancy_reviews:next}:item));
+      setSelectedInvoice({...invoice,discrepancy_reviews:next});
+    };
+    const reopenReview=finding=>{
+      if(!window.confirm(`Reopen ${finding.label}?`))return;
+      const next={...(invoice.discrepancy_reviews||{})};delete next[finding.key];
+      setInvoices(prev=>prev.map(item=>item.id===invoice.id?{...item,discrepancy_reviews:next}:item));
+      setSelectedInvoice({...invoice,discrepancy_reviews:next});
+    };
     return(<div style={{position:"fixed",inset:0,background:"#000c",zIndex:200,display:"flex",alignItems:"center",justifyContent:"center"}} onClick={e=>e.target===e.currentTarget&&onClose()}>
       <div style={{background:C.card,border:`1px solid ${C.border}`,borderRadius:16,padding:28,width:"94%",maxWidth:580,maxHeight:"90vh",overflowY:"auto"}}>
         <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:20}}>
@@ -2971,11 +3021,20 @@ Return ONLY valid JSON, no markdown:
         </div>
         {isCredit&&<section style={{padding:14,background:C.bg,border:`1px solid ${C.blue}66`,borderRadius:10,marginBottom:15}}>
           <h3 style={{margin:"0 0 8px"}}>Credit memo · {money(creditNetAmount(invoice))} before HST</h3>
-          <p style={{fontSize:12,color:C.sub}}>Original invoices detected from this credit. Confirm only the invoices whose discrepancies are fully corrected. The credit is deducted from totals once, even if multiple invoices are linked.</p>
+          <p style={{fontSize:12,color:C.sub}}>Original invoices detected from this credit. Tick an invoice ONLY if this credit resolves every outstanding issue on that invoice. For partial credits, use the individual discrepancy controls on the original invoice. The credit amount is deducted from totals only once.</p>
           {suggestedCreditLinks.length===0?<p style={{color:C.yellow,fontSize:12}}>No matching original invoices found. Check the extracted references; no warnings have been cleared.</p>:suggestedCreditLinks.map(original=>{const number=normalizeInvoiceNumber(original.invoice_number);const checked=confirmedCreditLinks.includes(number);return <label key={number} style={{display:"flex",gap:9,alignItems:"center",padding:7,fontSize:13}}><input type="checkbox" checked={checked} onChange={e=>{const next=e.target.checked?[...new Set([...confirmedCreditLinks,number])]:confirmedCreditLinks.filter(n=>n!==number);setInvoices(prev=>prev.map(x=>x.id===invoice.id?{...x,confirmed_invoice_numbers:next}:x));setSelectedInvoice({...invoice,confirmed_invoice_numbers:next});}}/>Invoice {number} — {checked?"Resolved by confirmed credit":"Needs review"}</label>})}
           {invoice.file_url&&<a href={invoice.file_url} target="_blank" rel="noreferrer" style={{color:C.blue,fontSize:12}}>Open original credit memo</a>}
         </section>}
         {!isCredit&&linkedCredits.length>0&&<div style={{padding:12,background:C.green+"16",border:`1px solid ${C.green}55`,borderRadius:9,marginBottom:12}}>✓ Resolved by confirmed credit: {linkedCredits.map(x=>x.invoice_number).join(", ")}. Original audit findings retained below.</div>}
+        {!isCredit&&!isSuperseded&&findings.length>0&&<section style={{padding:14,border:`1px solid ${C.blue}66`,borderRadius:10,marginBottom:16,background:C.bg}}>
+          <div style={{fontWeight:800,marginBottom:5}}>Discrepancy review · {outstanding.length} outstanding</div>
+          <p style={{fontSize:12,color:C.sub,marginBottom:12}}>Review each issue separately. Approved items remain in the audit history. If source amounts or quantities change, their approval becomes invalid and the warning returns. Both current app users may approve.</p>
+          {findings.map(f=>{const review=findingResolution(invoice,f);const credited=invoiceResolvedByCredit(invoice,creditMemos);return <div key={f.key} style={{padding:10,border:`1px solid ${review||credited?C.green+'55':C.red+'77'}`,borderRadius:8,marginBottom:8}}>
+            <div style={{display:'flex',justifyContent:'space-between',gap:8,alignItems:'center'}}><b style={{fontSize:12}}>{f.label}</b><Badge color={review||credited?C.green:C.red}>{review?review.status.replaceAll('_',' '):credited?'Credited':'Review'}</Badge></div>
+            {f.amount!=null&&Number.isFinite(f.amount)&&<div style={{fontSize:11,color:C.sub,marginTop:4}}>Calculated difference: {money(f.amount)}</div>}
+            {review?<div style={{fontSize:11,color:C.sub,marginTop:6}}>Reviewed {new Date(review.date).toLocaleDateString('en-CA')}{review.note?` · ${review.note}`:''}<button style={{marginLeft:10,background:'transparent',color:C.yellow,border:'none',cursor:'pointer'}} onClick={()=>reopenReview(f)}>Reopen</button></div>:!credited?<div style={{display:'flex',gap:6,flexWrap:'wrap',marginTop:9}}>{[['accepted','Accept as billed'],['credit_received','Credit received'],['corrected_invoice','Corrected invoice']].map(([status,label])=><button key={status} onClick={()=>saveReview(f,status)} style={{background:C.card2,color:C.text,border:`1px solid ${C.border}`,borderRadius:6,padding:'6px 9px',fontSize:11,cursor:'pointer'}}>{label}</button>)}</div>:<div style={{fontSize:11,color:C.green,marginTop:5}}>Linked credit memo confirmed. Original warning retained.</div>}
+          </div>})}
+        </section>}
         {isSuperseded&&<div style={{background:C.purple+"14",border:`1px solid ${C.purple}66`,borderRadius:10,padding:"12px 16px",marginBottom:14,color:"#e9d5ff",fontSize:13}}>↪ This invoice was superseded by <b>{supersession.replacement.invoice_number||"a replacement invoice"}</b> and is retained for audit history only. Its dollars, concrete cost and invoice-side pumping charges are excluded from project totals.</div>}
         {!isSuperseded&&rebillOf&&<div style={{background:C.blue+"14",border:`1px solid ${C.blue}66`,borderRadius:10,padding:"12px 16px",marginBottom:14,color:"#bfdbfe",fontSize:13}}>↩ Replacement / rebill of <b>{rebillOf}</b>. This invoice is the active version used in project totals.</div>}
         <div style={{display:"flex",gap:12,marginBottom:20,flexWrap:"wrap"}}>
@@ -3361,6 +3420,11 @@ Screenshot attached: Yes / No`}</pre>
               <div style={{fontWeight:850,fontSize:28,color:C.green}}>${invoicedBeforeHst.toLocaleString(undefined,{minimumFractionDigits:2,maximumFractionDigits:2})}</div>
               <div style={{color:C.muted,fontSize:11,marginTop:4}}>Before HST · {billingInvoices.length} active invoice{activeInvoices.length===1?"":"s"}{supersededInvoiceCount?` · ${supersededInvoiceCount} superseded excluded`:""}</div>
             </div>
+            <section style={{background:C.card,border:`1px solid ${C.blue}77`,borderRadius:12,padding:'16px 20px',marginBottom:18}}>
+              <div style={{display:'flex',alignItems:'center',justifyContent:'space-between',marginBottom:10,flexWrap:'wrap',gap:8}}><b style={{fontSize:16}}>Credit Memos ({creditMemos.length})</b><Badge color={creditReviewCount?C.yellow:C.green}>{creditReviewCount?`${creditReviewCount} awaiting review`:'No outstanding credit links'}</Badge></div>
+              <p style={{color:C.sub,fontSize:12,marginBottom:12}}>Credits stay visible here after uploading, even when they have no errors. Open one to confirm its original invoice references.</p>
+              {creditMemos.length===0?<div style={{color:C.muted,fontSize:12}}>No credit memos uploaded yet.</div>:[...creditMemos].sort((a,b)=>String(b.invoice_date||'').localeCompare(String(a.invoice_date||''))).map(credit=>{const refs=referencedCreditInvoices(credit,invoices);const pending=refs.filter(inv=>outstandingForInvoice(inv).length>0);return <button key={credit.id} onClick={()=>setSelectedInvoice(credit)} style={{display:'flex',alignItems:'center',justifyContent:'space-between',width:'100%',gap:10,background:C.bg,border:`1px solid ${C.border}`,borderRadius:8,color:C.text,padding:'12px',marginBottom:7,cursor:'pointer',textAlign:'left'}}><span><b>{credit.invoice_number||'Credit memo'}</b><span style={{display:'block',fontSize:11,color:C.sub}}>{credit.invoice_date||'No date'} · {refs.length} referenced invoice(s)</span></span><span style={{textAlign:'right'}}><b style={{color:C.green}}>-{money(creditNetAmount(credit))}</b><span style={{display:'block',fontSize:11,color:pending.length?C.yellow:C.green}}>{pending.length?`${pending.length} needing review`:'Links reviewed / no active warnings'}</span></span></button>})}
+            </section>
             {invoices.length===0?<div style={{color:C.muted,textAlign:"center",padding:"60px 0"}}>No invoices yet.</div>
             :filteredInvoices.length===0?<div style={{color:C.muted,textAlign:"center",padding:"60px 0"}}>No invoices match “{invoiceSearch}”.</div>
             :(()=>{
@@ -3372,7 +3436,7 @@ Screenshot attached: Yes / No`}</pre>
                 return Number.isNaN(d.getTime())?value:d.toLocaleDateString("en-CA",{year:"numeric",month:"short",day:"numeric"});
               };
               const grouped=new Map();
-              [...filteredInvoices]
+              [...filteredInvoices].filter(inv=>!isCreditMemo(inv))
                 .sort((a,b)=>dateKey(b.invoice_date).localeCompare(dateKey(a.invoice_date)))
                 .forEach(invoice=>{
                   const key=dateKey(invoice.invoice_date);
@@ -3381,15 +3445,7 @@ Screenshot attached: Yes / No`}</pre>
                 });
               return <div>{[...grouped.entries()].map(([date,dayInvoices])=>{
                 const isOpen=!!expandedInvoiceDates[date];
-                const invoicesNeedingReview=dayInvoices.filter(inv=>{
-                  if(isCreditMemo(inv)||invoiceResolvedByCredit(inv,creditMemos)) return false;
-                  if(invoiceSupersessionMap.has(normalizeInvoiceNumber(inv.invoice_number))) return false;
-                  const m=matchInvoiceToTickets(inv,tickets);
-                  const chargeAudit=invoiceChargeAudit(inv,m.needsReconciliation?[]:m.ticketsOnInvoice);
-                  const calculatedIssues=invoiceCalculatedChecks(inv).filter(check=>check.mismatch);
-                  const rateIssues=invoiceContractRateChecks(inv,m.needsReconciliation?[]:m.ticketsOnInvoice,liveOceanContractRates).filter(check=>check.mismatch);
-                  return m.unmatched.length>0||m.volumeOverbilled||chargeAudit.issues.length>0||calculatedIssues.length>0||rateIssues.length>0;
-                });
+                const invoicesNeedingReview=dayInvoices.filter(inv=>!isCreditMemo(inv)&&outstandingForInvoice(inv).length>0);
                 const groupHasIssues=invoicesNeedingReview.length>0;
                 return <div key={date} style={{background:C.card,border:`1px solid ${groupHasIssues?C.red+"77":isOpen?C.purple+"66":C.border}`,borderRadius:12,marginBottom:9,overflow:"hidden"}}>
                   <button type="button" onClick={()=>setExpandedInvoiceDates(current=>({...current,[date]:!current[date]}))} style={{width:"100%",display:"flex",justifyContent:"space-between",alignItems:"center",gap:10,background:groupHasIssues?C.red+"08":"transparent",border:"none",padding:"14px 16px",color:C.text,textAlign:"left",cursor:"pointer",fontFamily:"inherit"}}>
@@ -3400,11 +3456,11 @@ Screenshot attached: Yes / No`}</pre>
                     <span style={{fontSize:18,color:groupHasIssues?C.red:C.muted,transform:isOpen?"rotate(180deg)":"none",transition:"transform .15s"}}>⌄</span>
                   </button>
                   {isOpen&&<div style={{borderTop:`1px solid ${C.border}`,padding:"10px 14px 4px"}}>
-                    {dayInvoices.map(inv=>{ const m=matchInvoiceToTickets(inv,tickets); const chargeAudit=invoiceChargeAudit(inv,m.needsReconciliation?[]:m.ticketsOnInvoice); const calculatedIssues=invoiceCalculatedChecks(inv).filter(check=>check.mismatch); const rateIssues=invoiceContractRateChecks(inv,m.needsReconciliation?[]:m.ticketsOnInvoice,liveOceanContractRates).filter(check=>check.mismatch); const supersession=invoiceSupersessionMap.get(normalizeInvoiceNumber(inv.invoice_number)); const rebillOf=invoiceRebillReference(inv); const isSuperseded=!!supersession; const hasIssues=!isCreditMemo(inv)&&!invoiceResolvedByCredit(inv,creditMemos)&&!isSuperseded&&(m.unmatched.length>0||m.volumeOverbilled||chargeAudit.issues.length>0||calculatedIssues.length>0||rateIssues.length>0); const hasWarnings=m.needsReconciliation;
+                    {dayInvoices.map(inv=>{ const m=matchInvoiceToTickets(inv,tickets); const chargeAudit=invoiceChargeAudit(inv,m.needsReconciliation?[]:m.ticketsOnInvoice); const calculatedIssues=invoiceCalculatedChecks(inv).filter(check=>check.mismatch); const rateIssues=invoiceContractRateChecks(inv,m.needsReconciliation?[]:m.ticketsOnInvoice,liveOceanContractRates).filter(check=>check.mismatch); const supersession=invoiceSupersessionMap.get(normalizeInvoiceNumber(inv.invoice_number)); const rebillOf=invoiceRebillReference(inv); const isSuperseded=!!supersession; const hasIssues=outstandingForInvoice(inv).length>0; const hasWarnings=m.needsReconciliation;
                       return <div key={inv.id} onClick={()=>setSelectedInvoice(inv)} style={{background:C.bg,border:`1px solid ${hasIssues?C.red+"66":C.border}`,borderRadius:10,padding:"15px 16px",marginBottom:10,cursor:"pointer"}}>
                         <div style={{display:"flex",justifyContent:"space-between",alignItems:"flex-start",marginBottom:10,flexWrap:"wrap",gap:8}}>
                           <div><span style={{fontWeight:800,fontSize:15}}>Invoice {inv.invoice_number||"—"}</span></div>
-                          <div style={{display:"flex",gap:7,flexWrap:"wrap",alignItems:"center"}}>{inv.total_amount>0&&<Badge color={isSuperseded?C.muted:C.green}>{inv.currency||""} {inv.total_amount?.toLocaleString()}</Badge>}{isSuperseded?<Badge color={C.muted}>↪ Superseded by {supersession.replacement.invoice_number||"replacement"}</Badge>:rebillOf?<Badge color={C.blue}>↩ Rebill of {rebillOf}</Badge>:null}<Badge color={isSuperseded?C.muted:hasIssues?C.red:hasWarnings?C.yellow:C.green}>{isCreditMemo(inv)?"↩ Credit memo":invoiceResolvedByCredit(inv,creditMemos)?"✓ Credited":isSuperseded?"Audit history":hasIssues?"⚠ Review":hasWarnings?"Support Check":"✓ Matched"}</Badge>
+                          <div style={{display:"flex",gap:7,flexWrap:"wrap",alignItems:"center"}}>{inv.total_amount>0&&<Badge color={isSuperseded?C.muted:C.green}>{inv.currency||""} {inv.total_amount?.toLocaleString()}</Badge>}{isSuperseded?<Badge color={C.muted}>↪ Superseded by {supersession.replacement.invoice_number||"replacement"}</Badge>:rebillOf?<Badge color={C.blue}>↩ Rebill of {rebillOf}</Badge>:null}<Badge color={isSuperseded?C.muted:hasIssues?C.red:hasWarnings?C.yellow:C.green}>{isCreditMemo(inv)?"↩ Credit memo":invoiceResolvedByCredit(inv,creditMemos)?"✓ Credited":!hasIssues&&findingsForInvoice(inv).some(f=>findingResolution(inv,f))?"✓ Reviewed":isSuperseded?"Audit history":hasIssues?"⚠ Review":hasWarnings?"Support Check":"✓ Matched"}</Badge>
                             {(inv.file_url||inv.originalFile)&&<button onClick={e=>{ e.stopPropagation(); const src=inv.file_url||inv.originalFile; const isImg=/^data:image|\.(jpg|jpeg|png|gif|webp|heic)/i.test(src); const w=window.open(); w.document.write(isImg?`<html><body style="margin:0;background:#000;display:flex;align-items:center;justify-content:center;min-height:100vh"><img src="${src}" style="max-width:100%;max-height:100vh;object-fit:contain"></body></html>`:`<iframe src="${src}" width="100%" height="100%" style="border:none;position:fixed;top:0;left:0"></iframe>`); }} style={{background:"transparent",border:`1px solid ${C.blue}44`,color:C.blue,borderRadius:6,padding:"3px 9px",fontSize:12,fontWeight:700,cursor:"pointer"}}>📄 View</button>}
                             <button onClick={e=>{ e.stopPropagation(); if(window.confirm(`Delete invoice ${inv.invoice_number||"this invoice"}? You can undo this from Recently Deleted.`)) deleteInvoice(inv); }} style={{background:"transparent",border:`1px solid ${C.red}44`,color:C.red,borderRadius:6,padding:"3px 9px",fontSize:12,fontWeight:700,cursor:"pointer"}}>🗑 Delete</button>
                           </div>
