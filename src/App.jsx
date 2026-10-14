@@ -2431,34 +2431,78 @@ Return ONLY valid JSON (no markdown):
   }
 
   function matchInvoiceToTickets(invoice, allTickets) {
-    const invoiceTicketNums = (invoice.ticket_numbers||[]).map(n=>String(n).trim().toLowerCase());
-    const explicitlyMatched = allTickets.filter(t=>{
-      const tNum=String(t.ticket_number||"").trim().toLowerCase();
-      const tInv=String(t.invoice_number||"").trim().toLowerCase();
-      const invNum=String(invoice.invoice_number||"").trim().toLowerCase();
-      return (invoiceTicketNums.includes(tNum)&&tNum!=="")||(tInv!==""&&invNum!==""&&tInv===invNum);
+    const invoiceTicketNums = [...new Set((invoice.ticket_numbers||[]).map(ticketNumberKey).filter(Boolean))];
+    const invoiceNumber = normalizeInvoiceNumber(invoice.invoice_number);
+    const explicitlyMatched = allTickets.filter(t => {
+      const number=ticketNumberKey(t.ticket_number);
+      return (number && invoiceTicketNums.includes(number)) ||
+        (invoiceNumber && normalizeInvoiceNumber(t.invoice_number)===invoiceNumber);
     });
-
-    const supplierText=String(invoice.supplier||"").toLowerCase();
-    const isOcean=supplierText.includes("ocean");
-    const invoiceDate=String(invoice.invoice_date||"");
+    const isOcean=String(invoice.supplier||"").toLowerCase().includes("ocean");
     const invoiceVolume=resolvedInvoiceVolumeM3(invoice);
-    // Ocean invoices show the first/reference ticket for each pour rather than
-    // every delivery docket. When the complete same-day Ocean batch reconciles
-    // to the invoice total, use that batch. Exact ticket matching remains the
-    // default for Quality Concrete and all other suppliers.
-    const oceanDateBatch=isOcean&&invoiceDate
-      ? allTickets.filter(t=>String(t.date||"")===invoiceDate&&String(t.supplier||"").toLowerCase().includes("ocean")&&(parseFloat(t.volume_m3)||0)>0)
-      : [];
-    const oceanBatchVolume=oceanDateBatch.reduce((s,t)=>s+(parseFloat(t.volume_m3)||0),0);
-    const usesConsolidatedBatch=isOcean&&invoiceVolume>0&&oceanDateBatch.length>0&&Math.abs(oceanBatchVolume-invoiceVolume)<0.5;
+    const statedDate=String(invoice.delivery_date||invoice.pour_date||invoice.invoice_date||"").slice(0,10);
+    const referencedDates=[...new Set(explicitlyMatched.map(t=>String(t.date||"").slice(0,10)).filter(Boolean))];
+    // A supplier invoice date is not necessarily the delivery date. Prefer the
+    // date of the tickets the invoice explicitly references, if unambiguous.
+    const candidateDates=referencedDates.length===1
+      ? [referencedDates[0],...(statedDate!==referencedDates[0]?[statedDate]:[])]
+      : [statedDate];
+    let oceanDateBatch=[], batchDate="", usesConsolidatedBatch=false;
+    if(isOcean && invoiceVolume>0){
+      for(const date of candidateDates.filter(Boolean)){
+        const batch=allTickets.filter(t=>String(t.date||"").slice(0,10)===date &&
+          String(t.supplier||"").toLowerCase().includes("ocean") && (parseFloat(t.volume_m3)||0)>0);
+        const volume=batch.reduce((sum,t)=>sum+(parseFloat(t.volume_m3)||0),0);
+        // An exact full-day total is reliable only if referenced tickets are
+        // present in that same batch. Do not silently allocate a day's loads
+        // to one of multiple invoices without clear supporting references.
+        const coversRefs=explicitlyMatched.every(t=>batch.some(b=>b.id===t.id));
+        if(batch.length && coversRefs && Math.abs(volume-invoiceVolume)<0.5){
+          oceanDateBatch=batch;batchDate=date;usesConsolidatedBatch=true;break;
+        }
+      }
+    }
     const ticketsOnInvoice=usesConsolidatedBatch?oceanDateBatch:explicitlyMatched;
-    const matched=ticketsOnInvoice.map(t=>({invoiceRef:usesConsolidatedBatch?"Ocean date batch":t.ticket_number,ticket:t}));
-    const unmatched=usesConsolidatedBatch?[]:invoiceTicketNums.filter(n=>!allTickets.some(t=>String(t.ticket_number||"").trim().toLowerCase()===n));
-    const ticketVolume=ticketsOnInvoice.reduce((s,t)=>s+(parseFloat(t.volume_m3)||0),0);
+    const matched=ticketsOnInvoice.map(t=>({invoiceRef:usesConsolidatedBatch?"Ocean delivery-date batch":t.ticket_number,ticket:t}));
+    const unmatched=invoiceTicketNums.filter(n=>!allTickets.some(t=>ticketNumberKey(t.ticket_number)===n));
+    const ticketVolume=ticketsOnInvoice.reduce((sum,t)=>sum+(parseFloat(t.volume_m3)||0),0);
     const volumeMatch=invoiceVolume>0?Math.abs(ticketVolume-invoiceVolume)<0.5:null;
-    const volumeOverbilled=invoiceVolume>0&&(invoiceVolume-ticketVolume)>0.5;
-    return {matched,unmatched,ticketsOnInvoice,ticketVolume,invoiceVolume,volumeMatch,volumeOverbilled,usesConsolidatedBatch};
+    // When the source ticket set is incomplete, billed-minus-matched volume
+    // is NOT evidence of overbilling. Flag incomplete reconciliation instead.
+    const incompleteSupport=isOcean && invoiceVolume>ticketVolume+0.5 && !usesConsolidatedBatch;
+    const volumeOverbilled=!incompleteSupport && invoiceVolume>0 && invoiceVolume-ticketVolume>0.5;
+    return {matched,unmatched,ticketsOnInvoice,ticketVolume,invoiceVolume,
+      volumeMatch,volumeOverbilled,usesConsolidatedBatch,batchDate,incompleteSupport};
+  }
+
+  function invoiceHasAuditIssues(inv, match) {
+    const audit=invoiceChargeAudit(inv,match.ticketsOnInvoice);
+    const fees=invoiceCalculatedChecks(inv);
+    const rates=invoiceContractRateChecks(inv,match.ticketsOnInvoice,liveOceanContractRates);
+    // Only trust ticket-vs-invoice extra-charge comparisons with a complete
+    // delivery-ticket batch. Contract-rate and self-math checks still run.
+    return match.volumeOverbilled || (!match.incompleteSupport && audit.issues.length>0) ||
+      fees.some(x=>x.mismatch) || rates.some(x=>x.mismatch);
+  }
+
+  function invoiceRequiresReview(inv, match) {
+    return match.unmatched.length>0 || match.incompleteSupport || invoiceHasAuditIssues(inv,match);
+  }
+
+  function saveInvoiceResolution(invoice, details) {
+    setInvoices(prev=>prev.map(item=>item.id===invoice.id?{
+      ...item,invoice_resolution:{...details,recorded_at:new Date().toISOString(),
+        original_invoice_number:invoice.invoice_number||""}
+    }:item));
+    setSelectedInvoice(prev=>prev?.id===invoice.id?{...prev,invoice_resolution:{...details,
+      recorded_at:new Date().toISOString(),original_invoice_number:invoice.invoice_number||""}}:prev);
+    showToast(`Invoice ${invoice.invoice_number||""} resolution recorded; original findings retained.`);
+  }
+
+  function reopenInvoiceResolution(invoice) {
+    setInvoices(prev=>prev.map(item=>item.id===invoice.id?{...item,invoice_resolution:null}:item));
+    setSelectedInvoice(prev=>prev?.id===invoice.id?{...prev,invoice_resolution:null}:prev);
+    showToast(`Invoice ${invoice.invoice_number||""} returned to review.`);
   }
 
   // ── Upload file to Supabase Storage and return public URL ──
@@ -2693,7 +2737,7 @@ Return ONLY valid JSON, no markdown:
   // invoice, because an overbilled invoice must not redefine the contract rate.
   const liveOceanContractRates={...OCEAN_CONTRACT_BASE_RATES};
   const liveOceanForecastRates={...OCEAN_BASE_RATES};
-  const invoicesWithIssues=activeInvoices.filter(inv=>{ const m=matchInvoiceToTickets(inv,tickets); const audit=invoiceChargeAudit(inv,m.ticketsOnInvoice); const calculated=invoiceCalculatedChecks(inv); const rates=invoiceContractRateChecks(inv,m.ticketsOnInvoice,liveOceanContractRates); return m.unmatched.length>0||m.volumeOverbilled||audit.issues.length>0||calculated.some(check=>check.mismatch)||rates.some(check=>check.mismatch); }).length;
+  const invoicesWithIssues=activeInvoices.filter(inv=>!inv.invoice_resolution && invoiceRequiresReview(inv,matchInvoiceToTickets(inv,tickets))).length;
   const matchedInvoiceCount=Math.max(0,activeInvoices.length-invoicesWithIssues);
   const totalInvoiced=activeInvoices.reduce((s,inv)=>s+(parseFloat(inv.total_amount)||0),0);
   const invoicedBeforeHst=activeInvoices.reduce((s,inv)=>s+invoiceAmountBeforeHst(inv),0);
@@ -2914,21 +2958,27 @@ Return ONLY valid JSON, no markdown:
 
   function InvoiceModal({invoice,onClose}){
     const m=matchInvoiceToTickets(invoice,tickets);
-    const chargeAudit=invoiceChargeAudit(invoice,m.ticketsOnInvoice);
+    const chargeAudit=m.incompleteSupport?{comparisons:[],issues:[],warnings:[]}:invoiceChargeAudit(invoice,m.ticketsOnInvoice);
     const calculatedChecks=invoiceCalculatedChecks(invoice);
     const contractRateChecks=invoiceContractRateChecks(invoice,m.ticketsOnInvoice,liveOceanContractRates);
     const invoiceNumber=normalizeInvoiceNumber(invoice.invoice_number);
     const supersession=invoiceSupersessionMap.get(invoiceNumber);
     const rebillOf=invoiceRebillReference(invoice);
     const isSuperseded=!!supersession;
-    const hasIssues=!isSuperseded&&(m.unmatched.length>0||m.volumeOverbilled||chargeAudit.issues.length>0||calculatedChecks.some(check=>check.mismatch)||contractRateChecks.some(check=>check.mismatch));
+    const hasIssues=!isSuperseded&&!invoice.invoice_resolution&&invoiceRequiresReview(invoice,m);
     const hasWarnings=false;
+    const [creditRef,setCreditRef]=useState("");
+    const [creditAmount,setCreditAmount]=useState("");
+    const [creditNotes,setCreditNotes]=useState("");
     return(<div style={{position:"fixed",inset:0,background:"#000c",zIndex:200,display:"flex",alignItems:"center",justifyContent:"center"}} onClick={e=>e.target===e.currentTarget&&onClose()}>
       <div style={{background:C.card,border:`1px solid ${C.border}`,borderRadius:16,padding:28,width:"94%",maxWidth:580,maxHeight:"90vh",overflowY:"auto"}}>
         <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:20}}>
           <div><div style={{fontWeight:800,fontSize:18}}>🧾 Invoice {invoice.invoice_number||"—"}</div><div style={{color:C.muted,fontSize:13}}>{invoice.supplier} · {invoice.invoice_date}</div></div>
-          <Badge color={isSuperseded?C.muted:hasIssues?C.red:hasWarnings?C.yellow:C.green}>{isSuperseded?"↪ Superseded":hasIssues?"⚠ Review":hasWarnings?"Support Check":"✓ OK"}</Badge>
+          <Badge color={isSuperseded?C.muted:hasIssues?C.red:hasWarnings?C.yellow:C.green}>{isSuperseded?"↪ Superseded":invoice.invoice_resolution?"✓ Resolved":hasIssues?"⚠ Review":hasWarnings?"Support Check":"✓ OK"}</Badge>
         </div>
+        {invoice.invoice_resolution&&<div style={{background:"#052e16",border:`1px solid ${C.green}`,borderRadius:10,padding:"12px 16px",marginBottom:14,fontSize:13}}><b style={{color:"#86efac"}}>✓ Resolved — credit received / reconciliation confirmed</b><div style={{marginTop:6}}>Reference: {invoice.invoice_resolution.reference} · Credit: {money(invoice.invoice_resolution.amount)} · Recorded: {String(invoice.invoice_resolution.recorded_at||"").slice(0,10)}</div>{invoice.invoice_resolution.notes&&<div style={{marginTop:4}}>{invoice.invoice_resolution.notes}</div>}<div style={{color:C.sub,fontSize:11,marginTop:6}}>Original discrepancy details remain below for the audit trail.</div><button type="button" onClick={()=>reopenInvoiceResolution(invoice)} style={{...ghostBtn,marginTop:9}}>Reopen issue</button></div>}
+        {!isSuperseded&&!invoice.invoice_resolution&&hasIssues&&<div style={{background:C.bg,border:`1px solid ${C.border}`,borderRadius:10,padding:14,marginBottom:14}}><div style={{fontWeight:800,marginBottom:5}}>Resolve a previously credited discrepancy</div><div style={{color:C.sub,fontSize:12,marginBottom:10}}>Mark resolved only once Ocean's credit has been confirmed. The original warnings will stay in the record.</div><input value={creditRef} onChange={e=>setCreditRef(e.target.value)} placeholder="Credit memo / reference number (required)" style={{...inputStyle,marginBottom:7}}/><input type="number" min="0.01" step="0.01" value={creditAmount} onChange={e=>setCreditAmount(e.target.value)} placeholder="Credit amount before HST (required)" style={{...inputStyle,marginBottom:7}}/><input value={creditNotes} onChange={e=>setCreditNotes(e.target.value)} placeholder="Notes (optional)" style={{...inputStyle,marginBottom:9}}/><button type="button" disabled={!creditRef.trim()||!(Number(creditAmount)>0)} onClick={()=>saveInvoiceResolution(invoice,{status:"credited",reference:creditRef.trim(),amount:Number(creditAmount),notes:creditNotes.trim()})} style={{...primaryBtn,opacity:!creditRef.trim()||!(Number(creditAmount)>0)?0.45:1}}>✓ Mark resolved — credit issued</button></div>}
+        {m.incompleteSupport&&<div style={{background:"#451a03",border:`1px solid ${C.yellow}`,borderRadius:10,padding:"12px 16px",marginBottom:14,color:"#fde68a",fontSize:13}}>⚠ Incomplete ticket reconciliation. The invoice lists fewer tickets than its quantity suggests. The app could not confidently identify the entire delivery batch; do not treat the volume difference as a confirmed overcharge. Verify delivery dates and whether another invoice covers the same day.</div>}
         {isSuperseded&&<div style={{background:C.purple+"14",border:`1px solid ${C.purple}66`,borderRadius:10,padding:"12px 16px",marginBottom:14,color:"#e9d5ff",fontSize:13}}>↪ This invoice was superseded by <b>{supersession.replacement.invoice_number||"a replacement invoice"}</b> and is retained for audit history only. Its dollars, concrete cost and invoice-side pumping charges are excluded from project totals.</div>}
         {!isSuperseded&&rebillOf&&<div style={{background:C.blue+"14",border:`1px solid ${C.blue}66`,borderRadius:10,padding:"12px 16px",marginBottom:14,color:"#bfdbfe",fontSize:13}}>↩ Replacement / rebill of <b>{rebillOf}</b>. This invoice is the active version used in project totals.</div>}
         <div style={{display:"flex",gap:12,marginBottom:20,flexWrap:"wrap"}}>
@@ -2937,7 +2987,7 @@ Return ONLY valid JSON, no markdown:
           {m.ticketVolume>0&&<div style={{background:C.bg,borderRadius:10,padding:"12px 18px",flex:1}}><div style={{color:C.muted,fontSize:11,fontWeight:700,textTransform:"uppercase",letterSpacing:1}}>Ticket Volume</div><div style={{color:m.volumeOverbilled?C.red:C.green,fontWeight:800,fontSize:20,fontFamily:"monospace"}}>{fmt(m.ticketVolume)} m³</div></div>}
         </div>
         {m.volumeOverbilled&&<div style={{background:"#450a0a",border:`1px solid ${C.red}`,borderRadius:10,padding:"12px 16px",marginBottom:14,color:"#fca5a5",fontSize:13}}>⚠ Possible volume overbilling — invoice shows {fmt(m.invoiceVolume)} m³ but matched tickets support {fmt(m.ticketVolume)} m³</div>}
-        {m.usesConsolidatedBatch&&<div style={{background:"#082f49",border:`1px solid ${C.blue}`,borderRadius:10,padding:"12px 16px",marginBottom:14,color:"#bae6fd",fontSize:13}}>✓ Ocean consolidated invoice — reconciled against all {m.matched.length} concrete delivery tickets dated {invoice.invoice_date}. Ocean does not print every delivery ticket number on its invoice.</div>}
+        {m.usesConsolidatedBatch&&<div style={{background:"#082f49",border:`1px solid ${C.blue}`,borderRadius:10,padding:"12px 16px",marginBottom:14,color:"#bae6fd",fontSize:13}}>✓ Ocean consolidated invoice — reconciled against all {m.matched.length} concrete delivery tickets dated {m.batchDate}. Ocean does not print every delivery ticket number on its invoice.</div>}
         {m.unmatched.length>0&&<div style={{background:"#451a03",border:`1px solid ${C.yellow}`,borderRadius:10,padding:"12px 16px",marginBottom:14,color:"#fde68a",fontSize:13}}>⚠ {m.unmatched.length} ticket{m.unmatched.length>1?"s":""} on invoice not in system: <b>{m.unmatched.join(", ")}</b></div>}
         {chargeAudit.comparisons.length>0&&<div style={{marginBottom:16}}>
           <div style={{color:C.muted,fontSize:11,fontWeight:700,textTransform:"uppercase",letterSpacing:1,marginBottom:10}}>Admixture & Extra-Charge Audit</div>
@@ -3336,10 +3386,10 @@ Screenshot attached: Yes / No`}</pre>
                 const invoicesNeedingReview=dayInvoices.filter(inv=>{
                   if(invoiceSupersessionMap.has(normalizeInvoiceNumber(inv.invoice_number))) return false;
                   const m=matchInvoiceToTickets(inv,tickets);
-                  const chargeAudit=invoiceChargeAudit(inv,m.ticketsOnInvoice);
+                  const chargeAudit=m.incompleteSupport?{comparisons:[],issues:[],warnings:[]}:invoiceChargeAudit(inv,m.ticketsOnInvoice);
                   const calculatedIssues=invoiceCalculatedChecks(inv).filter(check=>check.mismatch);
                   const rateIssues=invoiceContractRateChecks(inv,m.ticketsOnInvoice,liveOceanContractRates).filter(check=>check.mismatch);
-                  return m.unmatched.length>0||m.volumeOverbilled||chargeAudit.issues.length>0||calculatedIssues.length>0||rateIssues.length>0;
+                  return !inv.invoice_resolution && invoiceRequiresReview(inv,m);
                 });
                 const groupHasIssues=invoicesNeedingReview.length>0;
                 return <div key={date} style={{background:C.card,border:`1px solid ${groupHasIssues?C.red+"77":isOpen?C.purple+"66":C.border}`,borderRadius:12,marginBottom:9,overflow:"hidden"}}>
@@ -3351,11 +3401,11 @@ Screenshot attached: Yes / No`}</pre>
                     <span style={{fontSize:18,color:groupHasIssues?C.red:C.muted,transform:isOpen?"rotate(180deg)":"none",transition:"transform .15s"}}>⌄</span>
                   </button>
                   {isOpen&&<div style={{borderTop:`1px solid ${C.border}`,padding:"10px 14px 4px"}}>
-                    {dayInvoices.map(inv=>{ const m=matchInvoiceToTickets(inv,tickets); const chargeAudit=invoiceChargeAudit(inv,m.ticketsOnInvoice); const calculatedIssues=invoiceCalculatedChecks(inv).filter(check=>check.mismatch); const rateIssues=invoiceContractRateChecks(inv,m.ticketsOnInvoice,liveOceanContractRates).filter(check=>check.mismatch); const supersession=invoiceSupersessionMap.get(normalizeInvoiceNumber(inv.invoice_number)); const rebillOf=invoiceRebillReference(inv); const isSuperseded=!!supersession; const hasIssues=!isSuperseded&&(m.unmatched.length>0||m.volumeOverbilled||chargeAudit.issues.length>0||calculatedIssues.length>0||rateIssues.length>0); const hasWarnings=false;
+                    {dayInvoices.map(inv=>{ const m=matchInvoiceToTickets(inv,tickets); const chargeAudit=m.incompleteSupport?{comparisons:[],issues:[],warnings:[]}:invoiceChargeAudit(inv,m.ticketsOnInvoice); const calculatedIssues=invoiceCalculatedChecks(inv).filter(check=>check.mismatch); const rateIssues=invoiceContractRateChecks(inv,m.ticketsOnInvoice,liveOceanContractRates).filter(check=>check.mismatch); const supersession=invoiceSupersessionMap.get(normalizeInvoiceNumber(inv.invoice_number)); const rebillOf=invoiceRebillReference(inv); const isSuperseded=!!supersession; const hasIssues=!isSuperseded&&!inv.invoice_resolution&&invoiceRequiresReview(inv,m); const hasWarnings=false;
                       return <div key={inv.id} onClick={()=>setSelectedInvoice(inv)} style={{background:C.bg,border:`1px solid ${hasIssues?C.red+"66":C.border}`,borderRadius:10,padding:"15px 16px",marginBottom:10,cursor:"pointer"}}>
                         <div style={{display:"flex",justifyContent:"space-between",alignItems:"flex-start",marginBottom:10,flexWrap:"wrap",gap:8}}>
                           <div><span style={{fontWeight:800,fontSize:15}}>Invoice {inv.invoice_number||"—"}</span></div>
-                          <div style={{display:"flex",gap:7,flexWrap:"wrap",alignItems:"center"}}>{inv.total_amount>0&&<Badge color={isSuperseded?C.muted:C.green}>{inv.currency||""} {inv.total_amount?.toLocaleString()}</Badge>}{isSuperseded?<Badge color={C.muted}>↪ Superseded by {supersession.replacement.invoice_number||"replacement"}</Badge>:rebillOf?<Badge color={C.blue}>↩ Rebill of {rebillOf}</Badge>:null}<Badge color={isSuperseded?C.muted:hasIssues?C.red:hasWarnings?C.yellow:C.green}>{isSuperseded?"Audit history":hasIssues?"⚠ Review":hasWarnings?"Support Check":"✓ Matched"}</Badge>
+                          <div style={{display:"flex",gap:7,flexWrap:"wrap",alignItems:"center"}}>{inv.total_amount>0&&<Badge color={isSuperseded?C.muted:C.green}>{inv.currency||""} {inv.total_amount?.toLocaleString()}</Badge>}{isSuperseded?<Badge color={C.muted}>↪ Superseded by {supersession.replacement.invoice_number||"replacement"}</Badge>:rebillOf?<Badge color={C.blue}>↩ Rebill of {rebillOf}</Badge>:null}<Badge color={isSuperseded?C.muted:hasIssues?C.red:hasWarnings?C.yellow:C.green}>{isSuperseded?"Audit history":inv.invoice_resolution?"✓ Resolved — credited":hasIssues?"⚠ Review":hasWarnings?"Support Check":"✓ Matched"}</Badge>
                             {(inv.file_url||inv.originalFile)&&<button onClick={e=>{ e.stopPropagation(); const src=inv.file_url||inv.originalFile; const isImg=/^data:image|\.(jpg|jpeg|png|gif|webp|heic)/i.test(src); const w=window.open(); w.document.write(isImg?`<html><body style="margin:0;background:#000;display:flex;align-items:center;justify-content:center;min-height:100vh"><img src="${src}" style="max-width:100%;max-height:100vh;object-fit:contain"></body></html>`:`<iframe src="${src}" width="100%" height="100%" style="border:none;position:fixed;top:0;left:0"></iframe>`); }} style={{background:"transparent",border:`1px solid ${C.blue}44`,color:C.blue,borderRadius:6,padding:"3px 9px",fontSize:12,fontWeight:700,cursor:"pointer"}}>📄 View</button>}
                             <button onClick={e=>{ e.stopPropagation(); if(window.confirm(`Delete invoice ${inv.invoice_number||"this invoice"}? You can undo this from Recently Deleted.`)) deleteInvoice(inv); }} style={{background:"transparent",border:`1px solid ${C.red}44`,color:C.red,borderRadius:6,padding:"3px 9px",fontSize:12,fontWeight:700,cursor:"pointer"}}>🗑 Delete</button>
                           </div>
@@ -3365,8 +3415,8 @@ Screenshot attached: Yes / No`}</pre>
                           <span style={{color:m.matched.length>0?C.green:C.muted}}>✓ {m.matched.length} matched</span>
                           {isSuperseded&&<span style={{color:C.muted}}>↪ excluded from totals · original retained for audit</span>}
                           {!isSuperseded&&m.unmatched.length>0&&<span style={{color:C.red}}>⚠ {m.unmatched.length} not found</span>}
-                          {!isSuperseded&&m.volumeOverbilled&&<span style={{color:C.red}}>⚠ Possible volume overbilling</span>}
-                          {!isSuperseded&&chargeAudit.issues.length>0&&<span style={{color:C.red}}>⚠ {chargeAudit.issues.length} charge mismatch{chargeAudit.issues.length===1?"":"es"}</span>}
+                          {!isSuperseded&&m.incompleteSupport&&<span style={{color:C.yellow}}>⚠ Incomplete ticket matching — review dates</span>}{!isSuperseded&&m.volumeOverbilled&&<span style={{color:C.red}}>⚠ Possible volume overbilling</span>}
+                          {!isSuperseded&&!m.incompleteSupport&&chargeAudit.issues.length>0&&<span style={{color:C.red}}>⚠ {chargeAudit.issues.length} charge mismatch{chargeAudit.issues.length===1?"":"es"}</span>}
                           {!isSuperseded&&calculatedIssues.length>0&&<span style={{color:C.red}}>⚠ calculated fee mismatch</span>}
                           {!isSuperseded&&rateIssues.length>0&&<span style={{color:C.red}}>⚠ {rateIssues.length} contract-rate issue{rateIssues.length===1?"":"s"}</span>}
                           {!isSuperseded&&chargeAudit.comparisons.length>0&&chargeAudit.issues.length===0&&<span style={{color:C.green}}>✓ extra charges checked</span>}
