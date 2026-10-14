@@ -996,14 +996,31 @@ function concreteBreakDisplayState(test,result,overallStatus) {
 function nextPendingConcreteTest(test) {
   const pending=(test?.results||[]).filter(result=>{
     const strength=parseFloat(result?.strength_mpa);
-    // A recorded strength is completed even if OCR left the status as "pending".
-    return !Number.isFinite(strength);
+    return !Number.isFinite(strength)||result?.result==="pending";
   });
   return pending.sort((a,b)=>{
     const dateCompare=String(a?.break_date||"9999-12-31").localeCompare(String(b?.break_date||"9999-12-31"));
     if(dateCompare!==0) return dateCompare;
     return (parseFloat(a?.age_days)||999)-(parseFloat(b?.age_days)||999);
   })[0]||null;
+}
+
+// Choose the outstanding *later-age* cylinder for a failed 28-day set.
+// Do not allow placeholders on old/historical reports to replace a scheduled
+// 56-day follow-up shown on the current testing report.
+function pendingTestsForGroup(group,status) {
+  const active=group.currentTests||group.tests||[];
+  const minimumAge=status?.category==="followup" ? Math.max(28, Number(status.age)||28) : 0;
+  const relevant=status?.category==="followup" ? active.filter(test=>concreteTestStatus(test).level==="extended_pending") : active;
+  const pending=relevant.flatMap(test=>(test?.results||[]).filter(result=>{
+    const strength=parseFloat(result?.strength_mpa);
+    const age=Number(result?.age_days)||0;
+    return !Number.isFinite(strength) && age>minimumAge;
+  }));
+  return pending.sort((a,b)=>{
+    const dateCompare=String(a?.break_date||"9999-12-31").localeCompare(String(b?.break_date||"9999-12-31"));
+    return dateCompare||(Number(a?.age_days)||999)-(Number(b?.age_days)||999);
+  });
 }
 
 // ─── EXPIRY HELPERS ────────────────────────────────────────────────────────────
@@ -2496,15 +2513,22 @@ Return ONLY valid JSON (no markdown):
     const ocean=/ocean/i.test(String(invoice.supplier||''));
     const date=String(invoice.invoice_date||'').slice(0,10);
     const lines=invoiceMaterialLines(invoice);
-    const day=allTickets.filter(t=>ocean&&date&&String(t.date||'').slice(0,10)===date&&/ocean/i.test(String(t.supplier||''))&&Number(t.volume_m3)>0);
+    const day=allTickets.filter(t=>ocean&&date&&String(t.date||'').slice(0,10)===date&&/ocean/i.test(String(t.supplier||'')));
     const otherInvoices=invoices.filter(other=>other!==invoice&&!isCreditMemo(other)&&!invoiceSupersessionMap.has(normalizeInvoiceNumber(other.invoice_number))&&String(other.invoice_date||'').slice(0,10)===date&&/ocean/i.test(String(other.supplier||'')));
     const claimedByOthers=new Set(otherInvoices.flatMap(other=>(other.ticket_numbers||[]).map(ticketNumberKey)));
     // Use the entire day ONLY when each invoice base-material category reconciles.
     // Exclude loads explicitly referenced by another invoice on the same day.
     const candidate=day.filter(ticket=>!claimedByOthers.has(ticketNumberKey(ticket.ticket_number))||invoiceTicketNums.includes(ticketNumberKey(ticket.ticket_number)));
     const materialBreakdown=lines.map(line=>{
-      const rows=candidate.filter(t=>ticketIsGrout(t)===line.grout&&parseMpaNum(t.mix_design)===line.strength);
-      return {...line,ticketQty:rows.reduce((n,t)=>n+Number(t.volume_m3||0),0),tickets:rows};
+      // Match by documented date and material, with explicit printed ticket
+      // references as a fallback when a grout ticket has no readable MPa/volume.
+      const rows=candidate.filter(t=>ticketIsGrout(t)===line.grout&&(
+        parseMpaNum(t.mix_design)===line.strength ||
+        (invoiceTicketNums.includes(ticketNumberKey(t.ticket_number)) && !parseMpaNum(t.mix_design))
+      ));
+      const ticketQty=rows.reduce((n,t)=>n+Number(t.volume_m3||0),0);
+      const missingQuantity=rows.filter(t=>!(Number(t.volume_m3)>0));
+      return {...line,ticketQty,tickets:rows,missingQuantity};
     });
     const balanced=materialBreakdown.length>0&&materialBreakdown.every(row=>Math.abs(row.qty-row.ticketQty)<=0.055);
     const covered=new Set(materialBreakdown.flatMap(row=>row.tickets));
@@ -3052,7 +3076,7 @@ Return ONLY valid JSON, no markdown:
         </div>
         {m.needsReconciliation&&<div style={{background:"#451a03",border:`1px solid ${C.yellow}`,borderRadius:9,padding:12,marginBottom:12,color:"#fde68a"}}>⚠ Full delivery batch needs reconciliation — printed references may be partial. This is NOT a confirmed overcharge; related extra-charge comparisons are deferred until tickets reconcile.</div>}
         {m.volumeOverbilled&&<div style={{background:"#450a0a",border:`1px solid ${C.red}`,borderRadius:10,padding:"12px 16px",marginBottom:14,color:"#fca5a5",fontSize:13}}>⚠ Possible volume overbilling — invoice shows {fmt(m.invoiceVolume)} m³ but matched tickets support {fmt(m.ticketVolume)} m³</div>}
-        {m.needsReconciliation&&m.materialBreakdown?.length>0&&<div style={{background:"#1c1917",border:`1px solid ${C.yellow}66`,borderRadius:10,padding:"12px 16px",marginBottom:14,fontSize:12}}><b style={{color:"#fde68a"}}>Delivery-date reconciliation details</b>{m.materialBreakdown.map((row,i)=><div key={i} style={{color:row.matched?"#86efac":"#fde68a",marginTop:5}}>{row.desc}: invoice {fmt(row.qty)} m³ / same-date tickets {fmt(row.ticketQty)} m³ ({row.tickets.length} loads) {row.matched?"✓":"— review this material"}</div>)}<div style={{color:C.sub,marginTop:8}}>All eligible same-date loads are shown below. A missing material or competing invoice must be reviewed; it is not automatically an overcharge.</div></div>}
+        {m.needsReconciliation&&m.materialBreakdown?.length>0&&<div style={{background:"#1c1917",border:`1px solid ${C.yellow}66`,borderRadius:10,padding:"12px 16px",marginBottom:14,fontSize:12}}><b style={{color:"#fde68a"}}>Delivery-date reconciliation details</b>{m.materialBreakdown.map((row,i)=><div key={i} style={{color:row.matched?"#86efac":"#fde68a",marginTop:5}}>{row.desc}: invoice {fmt(row.qty)} m³ / same-date tickets {fmt(row.ticketQty)} m³ ({row.tickets.length} loads) {row.matched?"✓":row.missingQuantity?.length?`— Ticket ${row.missingQuantity.map(t=>t.ticket_number).join(", ")} exists, but its volume is missing. Open that ticket and enter the volume printed on the delivery slip.`:"— review this material"}</div>)}<div style={{color:C.sub,marginTop:8}}>Matching a ticket number alone cannot verify its delivered quantity; a missing material quantity requires review, not automatic approval.</div></div>}
         {m.usesConsolidatedBatch&&<div style={{background:"#082f49",border:`1px solid ${C.blue}`,borderRadius:10,padding:"12px 16px",marginBottom:14,color:"#bae6fd",fontSize:13}}>✓ Ocean consolidated invoice — reconciled against {m.matched.length} delivery tickets (concrete and grout separately) dated {invoice.invoice_date}. Ocean does not print every delivery ticket number on its invoice.</div>}
         {m.unmatched.length>0&&<div style={{background:"#451a03",border:`1px solid ${C.yellow}`,borderRadius:10,padding:"12px 16px",marginBottom:14,color:"#fde68a",fontSize:13}}>⚠ {m.unmatched.length} ticket{m.unmatched.length>1?"s":""} on invoice not in system: <b>{m.unmatched.join(", ")}</b></div>}
         {chargeAudit.comparisons.length>0&&<div style={{marginBottom:16}}>
@@ -3702,7 +3726,7 @@ Screenshot attached: Yes / No`}</pre>
 
                     {followupGroups.length>0&&<div style={{background:C.yellow+"12",border:`1px solid ${C.yellow}77`,borderRadius:12,padding:"13px 16px",marginBottom:14}}>
                       <div style={{fontWeight:850,color:C.yellow,marginBottom:6}}>⚠ Follow-Up Required</div>
-                      {followupGroups.map(group=>{ const status=group.monitorStatus; const next=(group.currentTests||group.tests).map(nextPendingConcreteTest).filter(Boolean).sort((a,b)=>String(a?.break_date||"9999-12-31").localeCompare(String(b?.break_date||"9999-12-31")))[0]; return <div key={group.key} style={{fontSize:12,color:C.sub,marginTop:4}}><b style={{color:C.text}}>{formatTestDate(group.castDate)} · {group.location}</b>{Number.isFinite(status.average)?` — ${status.age}-day average ${status.average.toFixed(1)} MPa`:""}{next?.break_date?` · ${next.age_days||"Follow-up"}-day test ${formatTestDate(next.break_date)}`:""}</div>;})}
+                      {followupGroups.map(group=>{ const status=group.monitorStatus; const next=pendingTestsForGroup(group,status)[0]; return <div key={group.key} style={{fontSize:12,color:C.sub,marginTop:4}}><b style={{color:C.text}}>{formatTestDate(group.castDate)} · {group.location}</b>{Number.isFinite(status.average)?` — ${status.age}-day average ${status.average.toFixed(1)} MPa`:""}{next?.break_date?` · ${next.age_days||"Follow-up"}-day test ${formatTestDate(next.break_date)}`:""}</div>;})}
                     </div>}
 
                     <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",gap:10,flexWrap:"wrap",marginBottom:12}}>
@@ -3730,17 +3754,12 @@ Screenshot attached: Yes / No`}</pre>
                               : status.category==="mixed"
                                 ? {label:`✓ ${status.counts?.pass||0} Met · ○ ${status.counts?.pending||0} Pending`,color:C.blue,icon:""}
                                 : {label:"28-Day Pending",color:C.blue,icon:"○"};
-                      const nextTest=status.category==="pass"?null:(group.currentTests||group.tests).map(nextPendingConcreteTest).filter(Boolean).sort((a,b)=>{
-                        if(a.break_date&&b.break_date)return String(a.break_date).localeCompare(String(b.break_date));
-                        if(a.break_date)return -1;
-                        if(b.break_date)return 1;
-                        return (parseFloat(a.age_days)||999)-(parseFloat(b.age_days)||999);
-                      })[0];
+                      const nextTest=status.category==="pass"?null:pendingTestsForGroup(group,status)[0];
                       const isOpen=!!expandedTests[group.key];
                       const nextTestText=status.category==="pass"
                         ? "Strength requirement met"
                         : nextTest?.break_date
-                          ? `${nextTest.break_date < new Date().toISOString().slice(0,10)?"OVERDUE — results required · ":""}${formatTestDate(nextTest.break_date)}${nextTest.age_days?` · ${nextTest.age_days}-day`:""}`
+                          ? `${formatTestDate(nextTest.break_date)}${nextTest.age_days?` · ${nextTest.age_days}-day`:""}`
                           : nextTest?.age_days
                             ? `${nextTest.age_days}-day test pending`
                             : status.category==="fail"?"Testing complete":"Awaiting test date";
