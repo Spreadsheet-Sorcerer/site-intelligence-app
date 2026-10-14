@@ -376,7 +376,30 @@ function buildInvoiceSupersessionMap(allInvoices) {
   return map;
 }
 
+// A credit memo is its own financial document, never a concrete delivery.
+function isOceanCredit(inv) {
+  return inv?.document_type === "credit_memo" || (!inv?.document_type && /\bcredit\s*(?:memo|note|invoice)\b/i.test([inv?.notes,inv?.filename].join(" ")));
+}
+function creditReferences(inv, allInvoices=[]) {
+  const extracted=(inv?.credited_invoice_numbers||[]).map(normalizeInvoiceNumber).filter(Boolean);
+  const text=[inv?.notes,...(inv?.line_items||[]).map(x=>x?.description)].filter(Boolean).join(" ").toUpperCase();
+  const known=allInvoices.filter(x=>!isOceanCredit(x)).map(x=>normalizeInvoiceNumber(x.invoice_number)).filter(Boolean);
+  const tokens=new Set((text.match(/[A-Z]+\s*-?\s*\d+/g)||[]).map(normalizeInvoiceNumber));
+  return [...new Set([...extracted,...known.filter(n=>tokens.has(n))])];
+}
+function creditBeforeHst(inv) {
+  const printed=Number(inv?.credit_amount_before_hst);
+  if(Number.isFinite(printed)&&printed>0)return printed;
+  const lines=(inv?.line_items||[]).filter(x=>!/hst|gst|tax|subtotal|total|balance/i.test(String(x.description||"")));
+  const sum=lines.reduce((n,x)=>n+Math.abs(Number(x.amount)||0),0);
+  if(sum>0)return sum;
+  const total=Math.abs(Number(inv?.total_amount)||0);
+  return total>0?total/1.14:0;
+}
+function creditTotalWithHst(inv){return Math.abs(Number(inv?.total_amount)||0);}
+
 function invoiceAmountBeforeHst(invoice) {
+  if(isOceanCredit(invoice)) return -creditBeforeHst(invoice);
   const chargeLines = (invoice?.line_items || []).filter(line => {
     const description = String(line?.description || "").toLowerCase();
     return !/hst|gst|tax|invoice total|total sale|subtotal/.test(description);
@@ -389,6 +412,7 @@ function invoiceAmountBeforeHst(invoice) {
 }
 
 function invoiceBaseConcreteBeforeHst(invoice) {
+  if(isOceanCredit(invoice)) return 0;
   return (invoice?.line_items || []).reduce((sum,line) => {
     const description = String(line?.description || "").toLowerCase();
     // Ocean's base-material rows are described as "20/25/35 MPA Plain".
@@ -546,7 +570,7 @@ function invoiceCalculatedChecks(invoice) {
 
 function invoiceContractRateChecks(invoice,matchedTickets=[],contractRates=OCEAN_CONTRACT_BASE_RATES) {
   if(Number(invoice?.audit_version)<20) return [];
-  if(!String(invoice?.supplier||"").toLowerCase().includes("ocean")) return [];
+  if(isOceanCredit(invoice)||!String(invoice?.supplier||"").toLowerCase().includes("ocean")) return [];
   return (invoice?.line_items||[]).flatMap(line=>{
     const description=String(line?.description||"");
     const strengthMatch=description.match(/(\d+)\s*mpa/i);
@@ -2384,11 +2408,12 @@ Return ONLY a valid JSON array (even if only one ticket). No markdown, no explan
     const b64 = await toB64(file);
     const isPDF = file.type==="application/pdf";
     const block = isPDF ? {type:"document",source:{type:"base64",media_type:"application/pdf",data:b64}} : {type:"image",source:{type:"base64",media_type:file.type,data:b64}};
-    const prompt = `You are a construction accounts assistant. Extract ALL information from this concrete supplier invoice. Preserve EVERY invoice line separately, including concrete mixes, grout, set retarder, water reducer, accelerator, fibres, heat, pumping, environmental fees, taxes and credits. Read quantities exactly as printed.
+    const prompt = `You are a construction accounts assistant. First determine whether the document is a POSITIVE INVOICE or a CREDIT MEMO / CREDIT NOTE. A credit must NEVER add concrete volume or be treated as a delivery invoice. Extract ALL information from this concrete supplier invoice or credit memo. Preserve EVERY invoice line separately, including concrete mixes, grout, set retarder, water reducer, accelerator, fibres, heat, pumping, environmental fees, taxes and credits. Read quantities exactly as printed.
 For total_volume_m3, sum ONLY the quantities of the base concrete and grout material rows. Do not count admixture, waterproofing, environmental-fee, pumping, or other extra-charge quantities as additional delivered volume. For example, 1.00 m³ grout + 7.65 m³ concrete + 38.25 m³ concrete equals 46.90 m³ total volume.
+If this is a CREDIT MEMO, set document_type to "credit_memo" and extract all ORIGINAL invoice numbers referenced (e.g. C25388), into credited_invoice_numbers. A credit memo can refer to several invoices; NEVER invent how the total credit is allocated among them. Extract credit_amount_before_hst as a positive absolute amount, not a negative number. total_amount should be the printed amount including HST, also as a positive absolute number. For ordinary invoices use document_type "invoice", credited_invoice_numbers [], and credit_amount_before_hst null.
 If the invoice states that it is a rebill/reissue/replacement of another invoice (for example "Rebill-C25716"), return that original invoice number in rebill_of_invoice_number. A rebill is still a positive invoice unless the document itself prints negative credit amounts. Preserve the rebill wording in notes as well.
 Return ONLY valid JSON (no markdown):
-{"invoice_number":"string","invoice_date":"YYYY-MM-DD","supplier":"name","total_amount":number or null,"currency":"CAD/USD/AUD","ticket_numbers":["array"],"total_volume_m3":number or null,"total_volume_yd3":number or null,"rebill_of_invoice_number":"string or null","line_items":[{"description":"string","quantity":number or null,"unit":"string","unit_price":number or null,"amount":number or null}],"notes":"string or null"}`;
+{"document_type":"invoice|credit_memo","credited_invoice_numbers":["original invoice numbers mentioned"],"credit_amount_before_hst":number or null,"invoice_number":"string","invoice_date":"YYYY-MM-DD","supplier":"name","total_amount":number or null,"currency":"CAD/USD/AUD","ticket_numbers":["array"],"total_volume_m3":number or null,"total_volume_yd3":number or null,"rebill_of_invoice_number":"string or null","line_items":[{"description":"string","quantity":number or null,"unit":"string","unit_price":number or null,"amount":number or null}],"notes":"string or null"}`;
     const res = await fetch("/api/claude",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({model:"claude-sonnet-4-6",max_tokens:4000,messages:[{role:"user",content:[block,{type:"text",text:prompt}]}]})});
     const data = await res.json();
     if(data.error) throw new Error("API error: "+(data.error.message||JSON.stringify(data.error)));
@@ -2497,6 +2522,36 @@ Return ONLY valid JSON (no markdown):
     setSelectedInvoice(prev=>prev?.id===invoice.id?{...prev,invoice_resolution:{...details,
       recorded_at:new Date().toISOString(),original_invoice_number:invoice.invoice_number||""}}:prev);
     showToast(`Invoice ${invoice.invoice_number||""} resolution recorded; original findings retained.`);
+  }
+
+  function linkCreditToInvoices(credit, selectedNumbers) {
+    const refs=[...new Set(selectedNumbers.map(normalizeInvoiceNumber).filter(Boolean))];
+    setInvoices(prev=>prev.map(inv=>inv.id===credit.id?{...inv,credit_links:refs,credit_reviewed_at:new Date().toISOString()}:inv));
+    setSelectedInvoice(prev=>prev?.id===credit.id?{...prev,credit_links:refs,credit_reviewed_at:new Date().toISOString()}:prev);
+    showToast(`Credit ${credit.invoice_number} linked to ${refs.length} invoice(s); confirm individual resolutions separately.`);
+  }
+  function resolveWithLinkedCredit(original, credit) {
+    const links=credit.credit_links||[];
+    const n=normalizeInvoiceNumber(original.invoice_number);
+    if(!links.includes(n)) return;
+    // A shared credit cannot be assumed to cover each invoice's full discrepancy.
+    const linkCount=links.length;
+    const creditAmount=creditBeforeHst(credit);
+    const allocation=(credit.credit_allocations||{})[n];
+    if(linkCount>1 && !(Number(allocation)>0)) {
+      showToast("Shared credit: enter the amount allocated to this invoice on the credit memo first.","err");return;
+    }
+    saveInvoiceResolution(original,{status:"credited",reference:credit.invoice_number,amount:linkCount===1?creditAmount:Number(allocation),notes:"Verified against uploaded Ocean credit document.",credit_id:credit.id});
+  }
+  function allocateCredit(credit, invoiceNumber, amount) {
+    const n=normalizeInvoiceNumber(invoiceNumber);
+    const num=Number(amount);
+    const existing=credit.credit_allocations||{};
+    const other=Object.entries(existing).filter(([k])=>k!==n).reduce((sum,[,v])=>sum+(Number(v)||0),0);
+    if(!(num>0)||num+other>creditBeforeHst(credit)+0.02){showToast("Allocation must be positive and cannot exceed the credit before HST.","err");return;}
+    const updated={...credit,credit_allocations:{...existing,[n]:num}};
+    setInvoices(prev=>prev.map(x=>x.id===credit.id?updated:x));
+    setSelectedInvoice(prev=>prev?.id===credit.id?updated:prev);
   }
 
   function reopenInvoiceResolution(invoice) {
@@ -2657,7 +2712,10 @@ Return ONLY valid JSON, no markdown:
       setLoadMsg(`Reading invoice: "${file.name}"…`);
       try{
         const [extracted,fileUrl]=await Promise.all([extractInvoice(file),uploadFile(file,"invoices")]);
-        setInvoices(prev=>[...prev,{id:Date.now()+Math.random(),filename:file.name,fileType:file.type,file_url:fileUrl,added_at:new Date().toISOString(),audit_version:20,...extracted}]);
+        const document={id:Date.now()+Math.random(),filename:file.name,fileType:file.type,file_url:fileUrl,added_at:new Date().toISOString(),audit_version:20,...extracted,document_type:extracted.document_type==="credit_memo"?"credit_memo":"invoice"};
+        const duplicate=invoices.some(inv=>normalizeInvoiceNumber(inv.invoice_number)===normalizeInvoiceNumber(document.invoice_number)&&String(inv.supplier||"").toLowerCase()===String(document.supplier||"").toLowerCase());
+        if(duplicate){showToast(`Document ${document.invoice_number} already exists — duplicate not added.`,"err");continue;}
+        setInvoices(prev=>prev.some(inv=>normalizeInvoiceNumber(inv.invoice_number)===normalizeInvoiceNumber(document.invoice_number)&&String(inv.supplier||"").toLowerCase()===String(document.supplier||"").toLowerCase())?prev:[...prev,document]);
         added++;
       }catch(e){ showToast(`Could not read invoice "${file.name}": ${e.message}`,"err"); }
     }
@@ -2667,6 +2725,7 @@ Return ONLY valid JSON, no markdown:
   const invoiceSupersessionMap=buildInvoiceSupersessionMap(invoices);
   const supersededInvoiceNumbers=new Set(invoiceSupersessionMap.keys());
   const activeInvoices=invoices.filter(inv=>!supersededInvoiceNumbers.has(normalizeInvoiceNumber(inv.invoice_number)));
+  const activeDeliveryInvoices=activeInvoices.filter(inv=>!isOceanCredit(inv));
   const supersededInvoiceCount=invoices.length-activeInvoices.length;
 
   const structuralTickets=tickets.filter(isStructuralTicket);
@@ -2678,7 +2737,7 @@ Return ONLY valid JSON, no markdown:
   // Invoice hourly rows are authoritative once received. Pump slips fill the
   // gap for dates that have not yet been invoiced, so hours are never counted
   // twice and a missing standalone slip does not hide invoiced hours.
-  const invoicePumpHoursData = activeInvoices.map(inv => {
+  const invoicePumpHoursData = activeDeliveryInvoices.map(inv => {
     const hours = (inv.line_items||[])
       .filter(line=>/pump/i.test(String(line.description||"")) && /hour|hr\b/i.test(`${line.description||""} ${line.unit||""}`))
       .reduce((sum,line)=>sum+(parseFloat(line.quantity)||0),0);
@@ -2694,7 +2753,7 @@ Return ONLY valid JSON, no markdown:
   // Pump slips usually record volume/hours but not pricing. Pull pumping charges
   // from uploaded invoice line items, while retaining ticket-entered costs only
   // when that ticket is not already represented by a priced invoice.
-  const invoicePumpData = activeInvoices.map(inv => {
+  const invoicePumpData = activeDeliveryInvoices.map(inv => {
     const pumpCost = (inv.line_items||[])
       .filter(line=>/pump/i.test(String(line.description||"")))
       .reduce((s,line)=>s+(parseFloat(line.amount)||0),0);
@@ -2737,9 +2796,9 @@ Return ONLY valid JSON, no markdown:
   // invoice, because an overbilled invoice must not redefine the contract rate.
   const liveOceanContractRates={...OCEAN_CONTRACT_BASE_RATES};
   const liveOceanForecastRates={...OCEAN_BASE_RATES};
-  const invoicesWithIssues=activeInvoices.filter(inv=>!inv.invoice_resolution && invoiceRequiresReview(inv,matchInvoiceToTickets(inv,tickets))).length;
-  const matchedInvoiceCount=Math.max(0,activeInvoices.length-invoicesWithIssues);
-  const totalInvoiced=activeInvoices.reduce((s,inv)=>s+(parseFloat(inv.total_amount)||0),0);
+  const invoicesWithIssues=activeDeliveryInvoices.filter(inv=>!inv.invoice_resolution && invoiceRequiresReview(inv,matchInvoiceToTickets(inv,tickets))).length;
+  const matchedInvoiceCount=Math.max(0,activeDeliveryInvoices.length-invoicesWithIssues);
+  const totalInvoiced=activeInvoices.reduce((s,inv)=>s+(isOceanCredit(inv)?-creditTotalWithHst(inv):(parseFloat(inv.total_amount)||0)),0);
   const invoicedBeforeHst=activeInvoices.reduce((s,inv)=>s+invoiceAmountBeforeHst(inv),0);
   const actualBaseConcreteCost=activeInvoices.reduce((s,inv)=>s+invoiceBaseConcreteBeforeHst(inv),0);
   const actualAllowanceCost=Math.max(0,invoicedBeforeHst-actualBaseConcreteCost);
@@ -2793,7 +2852,7 @@ Return ONLY valid JSON, no markdown:
     searchableDate(t.date),t.ticket_number,t.supplier,ticketUseLabel(t),t.mix_design,t.area,t.item,t.invoice_number,t.driver,t.truck_number
   ].some(value=>String(value||"").toLowerCase().includes(ticketNeedle))):tickets;
   const filteredInvoices=invoiceNeedle?invoices.filter(inv=>[
-    searchableDate(inv.invoice_date),inv.invoice_number,inv.supplier,inv.total_amount,
+    searchableDate(inv.invoice_date),inv.invoice_number,inv.supplier,inv.total_amount,...(inv.credited_invoice_numbers||[]),
     ...(inv.ticket_numbers||[])
   ].some(value=>String(value||"").toLowerCase().includes(invoiceNeedle))):invoices;
 
@@ -2965,20 +3024,36 @@ Return ONLY valid JSON, no markdown:
     const supersession=invoiceSupersessionMap.get(invoiceNumber);
     const rebillOf=invoiceRebillReference(invoice);
     const isSuperseded=!!supersession;
-    const hasIssues=!isSuperseded&&!invoice.invoice_resolution&&invoiceRequiresReview(invoice,m);
+    const hasIssues=!isOceanCredit(invoice)&&!isSuperseded&&!invoice.invoice_resolution&&invoiceRequiresReview(invoice,m);
     const hasWarnings=false;
     const [creditRef,setCreditRef]=useState("");
     const [creditAmount,setCreditAmount]=useState("");
     const [creditNotes,setCreditNotes]=useState("");
+    const [creditSelection,setCreditSelection]=useState(null);
+    const [allocationDrafts,setAllocationDrafts]=useState({});
+    const creditMode=isOceanCredit(invoice);
+    const offeredCreditRefs=creditReferences(invoice,invoices);
+    const savedCreditRefs=invoice.credit_links||[];
+    const pickedCreditRefs=creditSelection??savedCreditRefs;
     return(<div style={{position:"fixed",inset:0,background:"#000c",zIndex:200,display:"flex",alignItems:"center",justifyContent:"center"}} onClick={e=>e.target===e.currentTarget&&onClose()}>
       <div style={{background:C.card,border:`1px solid ${C.border}`,borderRadius:16,padding:28,width:"94%",maxWidth:580,maxHeight:"90vh",overflowY:"auto"}}>
         <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:20}}>
-          <div><div style={{fontWeight:800,fontSize:18}}>🧾 Invoice {invoice.invoice_number||"—"}</div><div style={{color:C.muted,fontSize:13}}>{invoice.supplier} · {invoice.invoice_date}</div></div>
+          <div><div style={{fontWeight:800,fontSize:18}}>🧾 {creditMode?"Credit Memo":"Invoice"} {invoice.invoice_number||"—"}</div><div style={{color:C.muted,fontSize:13}}>{invoice.supplier} · {invoice.invoice_date}</div></div>
           <Badge color={isSuperseded?C.muted:hasIssues?C.red:hasWarnings?C.yellow:C.green}>{isSuperseded?"↪ Superseded":invoice.invoice_resolution?"✓ Resolved":hasIssues?"⚠ Review":hasWarnings?"Support Check":"✓ OK"}</Badge>
         </div>
-        {invoice.invoice_resolution&&<div style={{background:"#052e16",border:`1px solid ${C.green}`,borderRadius:10,padding:"12px 16px",marginBottom:14,fontSize:13}}><b style={{color:"#86efac"}}>✓ Resolved — credit received / reconciliation confirmed</b><div style={{marginTop:6}}>Reference: {invoice.invoice_resolution.reference} · Credit: {money(invoice.invoice_resolution.amount)} · Recorded: {String(invoice.invoice_resolution.recorded_at||"").slice(0,10)}</div>{invoice.invoice_resolution.notes&&<div style={{marginTop:4}}>{invoice.invoice_resolution.notes}</div>}<div style={{color:C.sub,fontSize:11,marginTop:6}}>Original discrepancy details remain below for the audit trail.</div><button type="button" onClick={()=>reopenInvoiceResolution(invoice)} style={{...ghostBtn,marginTop:9}}>Reopen issue</button></div>}
-        {!isSuperseded&&!invoice.invoice_resolution&&hasIssues&&<div style={{background:C.bg,border:`1px solid ${C.border}`,borderRadius:10,padding:14,marginBottom:14}}><div style={{fontWeight:800,marginBottom:5}}>Resolve a previously credited discrepancy</div><div style={{color:C.sub,fontSize:12,marginBottom:10}}>Mark resolved only once Ocean's credit has been confirmed. The original warnings will stay in the record.</div><input value={creditRef} onChange={e=>setCreditRef(e.target.value)} placeholder="Credit memo / reference number (required)" style={{...inputStyle,marginBottom:7}}/><input type="number" min="0.01" step="0.01" value={creditAmount} onChange={e=>setCreditAmount(e.target.value)} placeholder="Credit amount before HST (required)" style={{...inputStyle,marginBottom:7}}/><input value={creditNotes} onChange={e=>setCreditNotes(e.target.value)} placeholder="Notes (optional)" style={{...inputStyle,marginBottom:9}}/><button type="button" disabled={!creditRef.trim()||!(Number(creditAmount)>0)} onClick={()=>saveInvoiceResolution(invoice,{status:"credited",reference:creditRef.trim(),amount:Number(creditAmount),notes:creditNotes.trim()})} style={{...primaryBtn,opacity:!creditRef.trim()||!(Number(creditAmount)>0)?0.45:1}}>✓ Mark resolved — credit issued</button></div>}
-        {m.incompleteSupport&&<div style={{background:"#451a03",border:`1px solid ${C.yellow}`,borderRadius:10,padding:"12px 16px",marginBottom:14,color:"#fde68a",fontSize:13}}>⚠ Incomplete ticket reconciliation. The invoice lists fewer tickets than its quantity suggests. The app could not confidently identify the entire delivery batch; do not treat the volume difference as a confirmed overcharge. Verify delivery dates and whether another invoice covers the same day.</div>}
+        {creditMode&&<div style={{background:C.bg,border:`1px solid ${C.blue}`,borderRadius:10,padding:14,marginBottom:14}}>
+          <b style={{color:C.blue}}>Ocean credit memo — reduces billed costs, not delivered volume</b>
+          <div style={{marginTop:8,fontSize:13}}>Credit before HST: <b>{money(creditBeforeHst(invoice))}</b> · Original references suggested by document:</div>
+          {[...new Set([...offeredCreditRefs,...savedCreditRefs])].length===0&&<div style={{color:C.yellow,marginTop:8}}>No original invoice references identified. Check the document and upload the original invoices first.</div>}
+          {[...new Set([...offeredCreditRefs,...savedCreditRefs])].map(ref=><label key={ref} style={{display:"block",marginTop:8,fontSize:13}}><input type="checkbox" checked={pickedCreditRefs.includes(ref)} onChange={e=>{const updated=e.target.checked?[...pickedCreditRefs,ref]:pickedCreditRefs.filter(x=>x!==ref);setCreditSelection(updated);}}/> Link to invoice {ref}{!invoices.some(x=>!isOceanCredit(x)&&normalizeInvoiceNumber(x.invoice_number)===ref)?" (not yet uploaded)":""}</label>)}
+          <button type="button" onClick={()=>{linkCreditToInvoices(invoice,pickedCreditRefs);}} style={{...primaryBtn,marginTop:12}}>Confirm linked invoices</button>
+          {savedCreditRefs.length>0&&<div style={{borderTop:`1px solid ${C.border}`,marginTop:12,paddingTop:12}}><b>Resolve individual overcharges</b><div style={{color:C.sub,fontSize:12}}>For shared credits, enter each invoice's portion of the credit before marking resolved. Original warnings remain in history.</div>
+          {savedCreditRefs.map(ref=>{const original=invoices.find(x=>!isOceanCredit(x)&&normalizeInvoiceNumber(x.invoice_number)===ref);return <div key={ref} style={{marginTop:10}}><b>{ref}</b>{savedCreditRefs.length>1&&<input type="number" min="0" step="0.01" placeholder="Amount allocated before HST" value={allocationDrafts[ref]??invoice.credit_allocations?.[ref]??""} onChange={e=>setAllocationDrafts(prev=>({...prev,[ref]:e.target.value}))} style={{...inputStyle,marginTop:5}}/>}{savedCreditRefs.length>1&&<button type="button" onClick={()=>allocateCredit(invoice,ref,allocationDrafts[ref]??invoice.credit_allocations?.[ref])} style={{...ghostBtn,marginTop:5,marginRight:6}}>Save allocation</button>}{original?<button type="button" disabled={!!original.invoice_resolution||(savedCreditRefs.length>1&&!(Number(invoice.credit_allocations?.[ref])>0))} onClick={()=>resolveWithLinkedCredit(original,invoice)} style={{...ghostBtn,marginTop:5,opacity:original.invoice_resolution?0.5:1}}>{original.invoice_resolution?"Resolved":"Mark this invoice resolved"}</button>:<span style={{color:C.yellow}}> Upload original invoice to resolve</span>}</div>})}
+          </div>}
+        </div>}
+        {!creditMode&&invoice.invoice_resolution&&<div style={{background:"#052e16",border:`1px solid ${C.green}`,borderRadius:10,padding:"12px 16px",marginBottom:14,fontSize:13}}><b style={{color:"#86efac"}}>✓ Resolved — credit received / reconciliation confirmed</b><div style={{marginTop:6}}>Reference: {invoice.invoice_resolution.reference} · Credit: {money(invoice.invoice_resolution.amount)} · Recorded: {String(invoice.invoice_resolution.recorded_at||"").slice(0,10)}</div>{invoice.invoice_resolution.notes&&<div style={{marginTop:4}}>{invoice.invoice_resolution.notes}</div>}<div style={{color:C.sub,fontSize:11,marginTop:6}}>Original discrepancy details remain below for the audit trail.</div><button type="button" onClick={()=>reopenInvoiceResolution(invoice)} style={{...ghostBtn,marginTop:9}}>Reopen issue</button></div>}
+        {!creditMode&&!invoice.invoice_resolution&&hasIssues&&<div style={{background:C.bg,border:`1px solid ${C.border}`,borderRadius:10,padding:14,marginBottom:14,fontSize:13}}>To resolve this warning, upload Ocean's credit memo from <b>Scan Invoice / Credit</b>. Open the credit memo, confirm its invoice references, and mark this discrepancy resolved there. Original findings will remain visible.</div>}
+        {!creditMode&&m.incompleteSupport&&<div style={{background:"#451a03",border:`1px solid ${C.yellow}`,borderRadius:10,padding:"12px 16px",marginBottom:14,color:"#fde68a",fontSize:13}}>⚠ Incomplete ticket reconciliation. The invoice lists fewer tickets than its quantity suggests. The app could not confidently identify the entire delivery batch; do not treat the volume difference as a confirmed overcharge. Verify delivery dates and whether another invoice covers the same day.</div>}
         {isSuperseded&&<div style={{background:C.purple+"14",border:`1px solid ${C.purple}66`,borderRadius:10,padding:"12px 16px",marginBottom:14,color:"#e9d5ff",fontSize:13}}>↪ This invoice was superseded by <b>{supersession.replacement.invoice_number||"a replacement invoice"}</b> and is retained for audit history only. Its dollars, concrete cost and invoice-side pumping charges are excluded from project totals.</div>}
         {!isSuperseded&&rebillOf&&<div style={{background:C.blue+"14",border:`1px solid ${C.blue}66`,borderRadius:10,padding:"12px 16px",marginBottom:14,color:"#bfdbfe",fontSize:13}}>↩ Replacement / rebill of <b>{rebillOf}</b>. This invoice is the active version used in project totals.</div>}
         <div style={{display:"flex",gap:12,marginBottom:20,flexWrap:"wrap"}}>
@@ -2986,9 +3061,9 @@ Return ONLY valid JSON, no markdown:
           {m.invoiceVolume>0&&<div style={{background:C.bg,borderRadius:10,padding:"12px 18px",flex:1}}><div style={{color:C.muted,fontSize:11,fontWeight:700,textTransform:"uppercase",letterSpacing:1}}>Invoice Volume</div><div style={{color:C.accent,fontWeight:800,fontSize:20,fontFamily:"monospace"}}>{fmt(m.invoiceVolume)} m³</div></div>}
           {m.ticketVolume>0&&<div style={{background:C.bg,borderRadius:10,padding:"12px 18px",flex:1}}><div style={{color:C.muted,fontSize:11,fontWeight:700,textTransform:"uppercase",letterSpacing:1}}>Ticket Volume</div><div style={{color:m.volumeOverbilled?C.red:C.green,fontWeight:800,fontSize:20,fontFamily:"monospace"}}>{fmt(m.ticketVolume)} m³</div></div>}
         </div>
-        {m.volumeOverbilled&&<div style={{background:"#450a0a",border:`1px solid ${C.red}`,borderRadius:10,padding:"12px 16px",marginBottom:14,color:"#fca5a5",fontSize:13}}>⚠ Possible volume overbilling — invoice shows {fmt(m.invoiceVolume)} m³ but matched tickets support {fmt(m.ticketVolume)} m³</div>}
-        {m.usesConsolidatedBatch&&<div style={{background:"#082f49",border:`1px solid ${C.blue}`,borderRadius:10,padding:"12px 16px",marginBottom:14,color:"#bae6fd",fontSize:13}}>✓ Ocean consolidated invoice — reconciled against all {m.matched.length} concrete delivery tickets dated {m.batchDate}. Ocean does not print every delivery ticket number on its invoice.</div>}
-        {m.unmatched.length>0&&<div style={{background:"#451a03",border:`1px solid ${C.yellow}`,borderRadius:10,padding:"12px 16px",marginBottom:14,color:"#fde68a",fontSize:13}}>⚠ {m.unmatched.length} ticket{m.unmatched.length>1?"s":""} on invoice not in system: <b>{m.unmatched.join(", ")}</b></div>}
+        {!creditMode&&m.volumeOverbilled&&<div style={{background:"#450a0a",border:`1px solid ${C.red}`,borderRadius:10,padding:"12px 16px",marginBottom:14,color:"#fca5a5",fontSize:13}}>⚠ Possible volume overbilling — invoice shows {fmt(m.invoiceVolume)} m³ but matched tickets support {fmt(m.ticketVolume)} m³</div>}
+        {!creditMode&&m.usesConsolidatedBatch&&<div style={{background:"#082f49",border:`1px solid ${C.blue}`,borderRadius:10,padding:"12px 16px",marginBottom:14,color:"#bae6fd",fontSize:13}}>✓ Ocean consolidated invoice — reconciled against all {m.matched.length} concrete delivery tickets dated {m.batchDate}. Ocean does not print every delivery ticket number on its invoice.</div>}
+        {!creditMode&&m.unmatched.length>0&&<div style={{background:"#451a03",border:`1px solid ${C.yellow}`,borderRadius:10,padding:"12px 16px",marginBottom:14,color:"#fde68a",fontSize:13}}>⚠ {m.unmatched.length} ticket{m.unmatched.length>1?"s":""} on invoice not in system: <b>{m.unmatched.join(", ")}</b></div>}
         {chargeAudit.comparisons.length>0&&<div style={{marginBottom:16}}>
           <div style={{color:C.muted,fontSize:11,fontWeight:700,textTransform:"uppercase",letterSpacing:1,marginBottom:10}}>Admixture & Extra-Charge Audit</div>
           {chargeAudit.comparisons.map(row=>{
@@ -3115,8 +3190,8 @@ Screenshot attached: Yes / No`}</pre>
               </div>
               <div onDragOver={e=>{e.preventDefault();setInvDrag(true);}} onDragLeave={()=>setInvDrag(false)} onDrop={e=>{e.preventDefault();setInvDrag(false);handleInvoiceFiles(e.dataTransfer.files);}} onClick={()=>invFileRef.current.click()} style={{border:`2px dashed ${invDrag?C.purple:C.border}`,borderRadius:14,padding:"28px 20px",textAlign:"center",cursor:"pointer",flex:1,minWidth:200,background:invDrag?C.purple+"11":C.card,transition:"all .2s"}}>
                 <div style={{fontSize:28,marginBottom:8}}>💰</div>
-                <div style={{fontWeight:700,fontSize:14,marginBottom:4}}>Scan Invoice</div>
-                <div style={{color:C.muted,fontSize:12}}>Auto-matches to tickets</div>
+                <div style={{fontWeight:700,fontSize:14,marginBottom:4}}>Scan Invoice / Credit</div>
+                <div style={{color:C.muted,fontSize:12}}>Invoices match tickets · credits link to invoices</div>
                 <input ref={invFileRef} type="file" multiple accept="image/*,application/pdf" style={{display:"none"}} onChange={e=>handleInvoiceFiles(e.target.files)}/>
               </div>
             </div>
@@ -3389,7 +3464,7 @@ Screenshot attached: Yes / No`}</pre>
                   const chargeAudit=m.incompleteSupport?{comparisons:[],issues:[],warnings:[]}:invoiceChargeAudit(inv,m.ticketsOnInvoice);
                   const calculatedIssues=invoiceCalculatedChecks(inv).filter(check=>check.mismatch);
                   const rateIssues=invoiceContractRateChecks(inv,m.ticketsOnInvoice,liveOceanContractRates).filter(check=>check.mismatch);
-                  return !inv.invoice_resolution && invoiceRequiresReview(inv,m);
+                  return !isOceanCredit(inv) && !inv.invoice_resolution && invoiceRequiresReview(inv,m);
                 });
                 const groupHasIssues=invoicesNeedingReview.length>0;
                 return <div key={date} style={{background:C.card,border:`1px solid ${groupHasIssues?C.red+"77":isOpen?C.purple+"66":C.border}`,borderRadius:12,marginBottom:9,overflow:"hidden"}}>
@@ -3401,11 +3476,11 @@ Screenshot attached: Yes / No`}</pre>
                     <span style={{fontSize:18,color:groupHasIssues?C.red:C.muted,transform:isOpen?"rotate(180deg)":"none",transition:"transform .15s"}}>⌄</span>
                   </button>
                   {isOpen&&<div style={{borderTop:`1px solid ${C.border}`,padding:"10px 14px 4px"}}>
-                    {dayInvoices.map(inv=>{ const m=matchInvoiceToTickets(inv,tickets); const chargeAudit=m.incompleteSupport?{comparisons:[],issues:[],warnings:[]}:invoiceChargeAudit(inv,m.ticketsOnInvoice); const calculatedIssues=invoiceCalculatedChecks(inv).filter(check=>check.mismatch); const rateIssues=invoiceContractRateChecks(inv,m.ticketsOnInvoice,liveOceanContractRates).filter(check=>check.mismatch); const supersession=invoiceSupersessionMap.get(normalizeInvoiceNumber(inv.invoice_number)); const rebillOf=invoiceRebillReference(inv); const isSuperseded=!!supersession; const hasIssues=!isSuperseded&&!inv.invoice_resolution&&invoiceRequiresReview(inv,m); const hasWarnings=false;
+                    {dayInvoices.map(inv=>{ const m=matchInvoiceToTickets(inv,tickets); const chargeAudit=m.incompleteSupport?{comparisons:[],issues:[],warnings:[]}:invoiceChargeAudit(inv,m.ticketsOnInvoice); const calculatedIssues=invoiceCalculatedChecks(inv).filter(check=>check.mismatch); const rateIssues=invoiceContractRateChecks(inv,m.ticketsOnInvoice,liveOceanContractRates).filter(check=>check.mismatch); const supersession=invoiceSupersessionMap.get(normalizeInvoiceNumber(inv.invoice_number)); const rebillOf=invoiceRebillReference(inv); const isSuperseded=!!supersession; const hasIssues=!isOceanCredit(inv)&&!isSuperseded&&!inv.invoice_resolution&&invoiceRequiresReview(inv,m); const hasWarnings=false;
                       return <div key={inv.id} onClick={()=>setSelectedInvoice(inv)} style={{background:C.bg,border:`1px solid ${hasIssues?C.red+"66":C.border}`,borderRadius:10,padding:"15px 16px",marginBottom:10,cursor:"pointer"}}>
                         <div style={{display:"flex",justifyContent:"space-between",alignItems:"flex-start",marginBottom:10,flexWrap:"wrap",gap:8}}>
-                          <div><span style={{fontWeight:800,fontSize:15}}>Invoice {inv.invoice_number||"—"}</span></div>
-                          <div style={{display:"flex",gap:7,flexWrap:"wrap",alignItems:"center"}}>{inv.total_amount>0&&<Badge color={isSuperseded?C.muted:C.green}>{inv.currency||""} {inv.total_amount?.toLocaleString()}</Badge>}{isSuperseded?<Badge color={C.muted}>↪ Superseded by {supersession.replacement.invoice_number||"replacement"}</Badge>:rebillOf?<Badge color={C.blue}>↩ Rebill of {rebillOf}</Badge>:null}<Badge color={isSuperseded?C.muted:hasIssues?C.red:hasWarnings?C.yellow:C.green}>{isSuperseded?"Audit history":inv.invoice_resolution?"✓ Resolved — credited":hasIssues?"⚠ Review":hasWarnings?"Support Check":"✓ Matched"}</Badge>
+                          <div><span style={{fontWeight:800,fontSize:15}}>{isOceanCredit(inv)?"Credit Memo":"Invoice"} {inv.invoice_number||"—"}</span></div>
+                          <div style={{display:"flex",gap:7,flexWrap:"wrap",alignItems:"center"}}>{inv.total_amount>0&&<Badge color={isSuperseded?C.muted:C.green}>{inv.currency||""} {inv.total_amount?.toLocaleString()}</Badge>}{isSuperseded?<Badge color={C.muted}>↪ Superseded by {supersession.replacement.invoice_number||"replacement"}</Badge>:rebillOf?<Badge color={C.blue}>↩ Rebill of {rebillOf}</Badge>:null}<Badge color={isSuperseded?C.muted:hasIssues?C.red:hasWarnings?C.yellow:C.green}>{isOceanCredit(inv)?"Credit memo":isSuperseded?"Audit history":inv.invoice_resolution?"✓ Resolved — credited":hasIssues?"⚠ Review":hasWarnings?"Support Check":"✓ Matched"}</Badge>
                             {(inv.file_url||inv.originalFile)&&<button onClick={e=>{ e.stopPropagation(); const src=inv.file_url||inv.originalFile; const isImg=/^data:image|\.(jpg|jpeg|png|gif|webp|heic)/i.test(src); const w=window.open(); w.document.write(isImg?`<html><body style="margin:0;background:#000;display:flex;align-items:center;justify-content:center;min-height:100vh"><img src="${src}" style="max-width:100%;max-height:100vh;object-fit:contain"></body></html>`:`<iframe src="${src}" width="100%" height="100%" style="border:none;position:fixed;top:0;left:0"></iframe>`); }} style={{background:"transparent",border:`1px solid ${C.blue}44`,color:C.blue,borderRadius:6,padding:"3px 9px",fontSize:12,fontWeight:700,cursor:"pointer"}}>📄 View</button>}
                             <button onClick={e=>{ e.stopPropagation(); if(window.confirm(`Delete invoice ${inv.invoice_number||"this invoice"}? You can undo this from Recently Deleted.`)) deleteInvoice(inv); }} style={{background:"transparent",border:`1px solid ${C.red}44`,color:C.red,borderRadius:6,padding:"3px 9px",fontSize:12,fontWeight:700,cursor:"pointer"}}>🗑 Delete</button>
                           </div>
