@@ -996,7 +996,8 @@ function concreteBreakDisplayState(test,result,overallStatus) {
 function nextPendingConcreteTest(test) {
   const pending=(test?.results||[]).filter(result=>{
     const strength=parseFloat(result?.strength_mpa);
-    return !Number.isFinite(strength)||result?.result==="pending";
+    // A recorded strength is completed even if OCR left the status as "pending".
+    return !Number.isFinite(strength);
   });
   return pending.sort((a,b)=>{
     const dateCompare=String(a?.break_date||"9999-12-31").localeCompare(String(b?.break_date||"9999-12-31"));
@@ -2510,13 +2511,20 @@ Return ONLY valid JSON (no markdown):
     const fullCoverage=candidate.every(t=>covered.has(t));
     const anotherUnreferencedInvoice=otherInvoices.some(other=>!(other.ticket_numbers||[]).length);
     const usesConsolidatedBatch=!!(ocean&&balanced&&fullCoverage&&candidate.length>0&&!anotherUnreferencedInvoice);
-    const ticketsOnInvoice=usesConsolidatedBatch?candidate:explicit;
+    // Do not discard a verified concrete batch merely because a separate grout
+    // ticket is absent, coded differently, or read incorrectly by OCR. Keep all
+    // date/mix-matched loads visible and leave only the missing material for review.
+    // Never expand to a full date when another invoice may claim those loads.
+    const safelyAttributed=!!(ocean&&candidate.length>0&&!anotherUnreferencedInvoice&&otherInvoices.length===0);
+    const matchedMaterialTickets=[...new Set(materialBreakdown.flatMap(row=>row.tickets))];
+    const ticketsOnInvoice=usesConsolidatedBatch?candidate:safelyAttributed&&matchedMaterialTickets.length>explicit.length?matchedMaterialTickets:explicit;
     const invoiceVolume=resolvedInvoiceVolumeM3(invoice);
     const ticketVolume=ticketsOnInvoice.reduce((n,t)=>n+(Number(t.volume_m3)||0),0);
-    const needsReconciliation=!!(ocean&&!usesConsolidatedBatch&&(day.length>explicit.length||anotherUnreferencedInvoice));
+    const needsReconciliation=!!(ocean&&!usesConsolidatedBatch&&(day.length>explicit.length||anotherUnreferencedInvoice||materialBreakdown.some(row=>Math.abs(row.qty-row.ticketQty)>0.055)));
+    const materialDetail=materialBreakdown.map(row=>({...row,matched:Math.abs(row.qty-row.ticketQty)<=0.055}));
     const unmatched=invoiceTicketNums.filter(num=>!allTickets.some(t=>ticketNumberKey(t.ticket_number)===num));
     const volumeOverbilled=!needsReconciliation&&invoiceVolume-ticketVolume>0.5;
-    return {matched:ticketsOnInvoice.map(ticket=>({invoiceRef:usesConsolidatedBatch?'Ocean verified date/material batch':ticket.ticket_number,ticket})),unmatched,ticketsOnInvoice,ticketVolume,invoiceVolume,volumeMatch:Math.abs(ticketVolume-invoiceVolume)<0.5,volumeOverbilled,usesConsolidatedBatch,needsReconciliation,materialBreakdown};
+    return {matched:ticketsOnInvoice.map(ticket=>({invoiceRef:usesConsolidatedBatch?'Ocean verified date/material batch':ticket.ticket_number,ticket})),unmatched,ticketsOnInvoice,ticketVolume,invoiceVolume,volumeMatch:Math.abs(ticketVolume-invoiceVolume)<0.5,volumeOverbilled,usesConsolidatedBatch,needsReconciliation,materialBreakdown:materialDetail};
   }
 
   // ── Upload file to Supabase Storage and return public URL ──
@@ -3044,6 +3052,7 @@ Return ONLY valid JSON, no markdown:
         </div>
         {m.needsReconciliation&&<div style={{background:"#451a03",border:`1px solid ${C.yellow}`,borderRadius:9,padding:12,marginBottom:12,color:"#fde68a"}}>⚠ Full delivery batch needs reconciliation — printed references may be partial. This is NOT a confirmed overcharge; related extra-charge comparisons are deferred until tickets reconcile.</div>}
         {m.volumeOverbilled&&<div style={{background:"#450a0a",border:`1px solid ${C.red}`,borderRadius:10,padding:"12px 16px",marginBottom:14,color:"#fca5a5",fontSize:13}}>⚠ Possible volume overbilling — invoice shows {fmt(m.invoiceVolume)} m³ but matched tickets support {fmt(m.ticketVolume)} m³</div>}
+        {m.needsReconciliation&&m.materialBreakdown?.length>0&&<div style={{background:"#1c1917",border:`1px solid ${C.yellow}66`,borderRadius:10,padding:"12px 16px",marginBottom:14,fontSize:12}}><b style={{color:"#fde68a"}}>Delivery-date reconciliation details</b>{m.materialBreakdown.map((row,i)=><div key={i} style={{color:row.matched?"#86efac":"#fde68a",marginTop:5}}>{row.desc}: invoice {fmt(row.qty)} m³ / same-date tickets {fmt(row.ticketQty)} m³ ({row.tickets.length} loads) {row.matched?"✓":"— review this material"}</div>)}<div style={{color:C.sub,marginTop:8}}>All eligible same-date loads are shown below. A missing material or competing invoice must be reviewed; it is not automatically an overcharge.</div></div>}
         {m.usesConsolidatedBatch&&<div style={{background:"#082f49",border:`1px solid ${C.blue}`,borderRadius:10,padding:"12px 16px",marginBottom:14,color:"#bae6fd",fontSize:13}}>✓ Ocean consolidated invoice — reconciled against {m.matched.length} delivery tickets (concrete and grout separately) dated {invoice.invoice_date}. Ocean does not print every delivery ticket number on its invoice.</div>}
         {m.unmatched.length>0&&<div style={{background:"#451a03",border:`1px solid ${C.yellow}`,borderRadius:10,padding:"12px 16px",marginBottom:14,color:"#fde68a",fontSize:13}}>⚠ {m.unmatched.length} ticket{m.unmatched.length>1?"s":""} on invoice not in system: <b>{m.unmatched.join(", ")}</b></div>}
         {chargeAudit.comparisons.length>0&&<div style={{marginBottom:16}}>
@@ -3731,7 +3740,7 @@ Screenshot attached: Yes / No`}</pre>
                       const nextTestText=status.category==="pass"
                         ? "Strength requirement met"
                         : nextTest?.break_date
-                          ? `${formatTestDate(nextTest.break_date)}${nextTest.age_days?` · ${nextTest.age_days}-day`:""}`
+                          ? `${nextTest.break_date < new Date().toISOString().slice(0,10)?"OVERDUE — results required · ":""}${formatTestDate(nextTest.break_date)}${nextTest.age_days?` · ${nextTest.age_days}-day`:""}`
                           : nextTest?.age_days
                             ? `${nextTest.age_days}-day test pending`
                             : status.category==="fail"?"Testing complete":"Awaiting test date";
