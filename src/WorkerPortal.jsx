@@ -3,7 +3,7 @@ import {SECTIONS,pickDistinctQuestions} from './SafetyModule.jsx';
 const bg='#0A0F1E',panel='#111827',teal='#14B8A6',light='#F9FAFB',muted='#AAB5C5';
 const input={width:'100%',boxSizing:'border-box',padding:13,borderRadius:9,background:'#0A0F1E',border:'1px solid #334155',color:light,fontSize:16};
 const button={background:teal,border:0,borderRadius:9,color:'#052722',fontWeight:800,padding:'13px 17px',cursor:'pointer',fontSize:15};
-const randomize=(xs)=>[...xs].sort(()=>Math.random()-.5);
+const randomize=(xs)=>{const out=[...xs];for(let i=out.length-1;i>0;i--){const j=Math.floor(Math.random()*(i+1));[out[i],out[j]]=[out[j],out[i]];}return out;};
 const selectQuestions=i=>pickDistinctQuestions(i,2).map(q=>({prompt:q[0],options:randomize(q[1].map((label,n)=>({label,correct:n===q[2]}))),answered:false,attempts:0}));
 const sid=()=>`southwest-worker-preview-session`;
 const LANGUAGES=[['en','English'],['fr','Français'],['es','Español'],['ar','العربية'],['uk','Українська'],['de','Deutsch']];
@@ -24,7 +24,7 @@ const I18N={
   "Not quite — try again",
   "Draft translation. Ask Southwest for help if anything is unclear.",
   "Worker Safety & Orientation",
-  "v21.4 test portal · No staff dashboard access",
+  "v21.6 test portal · No staff dashboard access",
   "Worker registration",
   "Full name",
   "Company",
@@ -80,7 +80,7 @@ const I18N={
   "Pas tout à fait — réessayez",
   "Traduction provisoire. Demandez de l’aide à Southwest si quelque chose est flou.",
   "Sécurité et accueil des travailleurs",
-  "Portail de test v21.4 · Aucun accès au tableau de bord",
+  "Portail de test v21.6 · Aucun accès au tableau de bord",
   "Inscription des travailleurs",
   "Nom complet",
   "Entreprise",
@@ -136,7 +136,7 @@ const I18N={
   "No es correcto — inténtelo de nuevo",
   "Traducción provisional. Pida ayuda a Southwest si algo no está claro.",
   "Seguridad y orientación de trabajadores",
-  "Portal de prueba v21.4 · Sin acceso al panel del personal",
+  "Portal de prueba v21.6 · Sin acceso al panel del personal",
   "Registro de trabajadores",
   "Nombre completo",
   "Empresa",
@@ -248,7 +248,7 @@ const I18N={
   "Неправильно — спробуйте ще раз",
   "Переклад попередній. Якщо щось незрозуміло, зверніться до Southwest.",
   "Безпека та інструктаж працівників",
-  "Тестовий портал v21.4 · Без доступу до панелі персоналу",
+  "Тестовий портал v21.6 · Без доступу до панелі персоналу",
   "Реєстрація працівника",
   "Повне ім’я",
   "Компанія",
@@ -304,7 +304,7 @@ const I18N={
   "Nicht richtig – bitte erneut versuchen",
   "Vorläufige Übersetzung. Bitte Southwest fragen, wenn etwas unklar ist.",
   "Arbeitssicherheit und Einweisung",
-  "Testportal v21.4 · Kein Zugang zur Mitarbeiterübersicht",
+  "Testportal v21.6 · Kein Zugang zur Mitarbeiterübersicht",
   "Registrierung für Arbeiter",
   "Vollständiger Name",
   "Unternehmen",
