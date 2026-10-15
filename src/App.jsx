@@ -2673,26 +2673,42 @@ Return ONLY valid JSON (no markdown):
     });
     const balanced=materialBreakdown.length>0&&materialBreakdown.every(row=>Math.abs(row.qty-row.ticketQty)<=0.055);
     const covered=new Set(materialBreakdown.flatMap(row=>row.tickets));
-    // Pump slips do not represent additional concrete deliveries. Their
-    // pumped-volume field must not invalidate an otherwise complete batch.
-    // Likewise, a zero-volume non-delivery entry cannot be used to verify
-    // concrete quantity and is excluded from delivery completeness.
+    // A supplier may issue TWO invoices for the same date and even the same
+    // strength. When its printed references account for every invoice material
+    // quantity, that explicit ticket set is authoritative. Never require every
+    // unclaimed delivery made that day to belong to this one invoice.
+    const explicitDelivery=explicit.filter(t=>!isStandalonePumpSlip(t)&&Number(t.volume_m3)>0);
+    const explicitReferencesExist=invoiceTicketNums.length>0&&invoiceTicketNums.every(num=>
+      explicitDelivery.some(t=>ticketNumberKey(t.ticket_number)===num));
+    const exactMaterialBreakdown=lines.map(line=>{
+      const matching=explicitDelivery.filter(t=>ticketIsGrout(t)===line.grout&&parseMpaNum(t.mix_design)===line.strength);
+      return {...line,tickets:matching,ticketQty:matching.reduce((sum,t)=>sum+(Number(t.volume_m3)||0),0)};
+    });
+    const explicitMaterialMatch=exactMaterialBreakdown.length>0&&
+      exactMaterialBreakdown.every(row=>Math.abs(row.qty-row.ticketQty)<=0.055)&&
+      explicitDelivery.every(t=>exactMaterialBreakdown.some(row=>row.tickets.includes(t)));
+    const overlapOtherReferences=explicitDelivery.some(t=>claimedByOthers.has(ticketNumberKey(t.ticket_number)));
+    const verifiedExplicitBatch=!!(ocean&&explicitReferencesExist&&explicitMaterialMatch&&!overlapOtherReferences);
+    // Pump slips are equipment records, not additional concrete deliveries.
     const deliveryCandidates=candidate.filter(t=>Number(t.volume_m3)>0 ||
       (!isStandalonePumpSlip(t) && (parseMpaNum(t.mix_design)!=null || ticketIsGrout(t))));
     const fullCoverage=deliveryCandidates.every(t=>covered.has(t));
     const anotherUnreferencedInvoice=otherInvoices.some(other=>!(other.ticket_numbers||[]).length);
-    const usesConsolidatedBatch=!!(ocean&&balanced&&fullCoverage&&deliveryCandidates.length>0&&!anotherUnreferencedInvoice);
-    // Do not discard a verified concrete batch merely because a separate grout
-    // ticket is absent, coded differently, or read incorrectly by OCR. Keep all
-    // date/mix-matched loads visible and leave only the missing material for review.
-    // Never expand to a full date when another invoice may claim those loads.
+    const usesConsolidatedBatch=!!(verifiedExplicitBatch||
+      (ocean&&balanced&&fullCoverage&&deliveryCandidates.length>0&&!anotherUnreferencedInvoice&&!overlapOtherReferences));
+    // Preserve the date-based fallback for invoices with partial ticket lists,
+    // but don't discard an independently complete explicit ticket batch.
     const safelyAttributed=!!(ocean&&candidate.length>0&&!anotherUnreferencedInvoice&&otherInvoices.length===0);
     const matchedMaterialTickets=[...new Set(materialBreakdown.flatMap(row=>row.tickets))];
-    const ticketsOnInvoice=usesConsolidatedBatch?deliveryCandidates:safelyAttributed&&matchedMaterialTickets.length>explicit.length?matchedMaterialTickets:explicit;
+    const ticketsOnInvoice=verifiedExplicitBatch?explicitDelivery:
+      usesConsolidatedBatch?deliveryCandidates:
+      safelyAttributed&&matchedMaterialTickets.length>explicit.length?matchedMaterialTickets:explicit;
     const invoiceVolume=resolvedInvoiceVolumeM3(invoice);
     const ticketVolume=ticketsOnInvoice.reduce((n,t)=>n+(Number(t.volume_m3)||0),0);
-    const needsReconciliation=!!(ocean&&!usesConsolidatedBatch&&(day.length>explicit.length||anotherUnreferencedInvoice||materialBreakdown.some(row=>Math.abs(row.qty-row.ticketQty)>0.055)));
-    const materialDetail=materialBreakdown.map(row=>({...row,matched:Math.abs(row.qty-row.ticketQty)<=0.055}));
+    const needsReconciliation=!!(ocean&&!usesConsolidatedBatch&&
+      (day.length>explicit.length||anotherUnreferencedInvoice||
+       materialBreakdown.some(row=>Math.abs(row.qty-row.ticketQty)>0.055)));
+    const materialDetail=(verifiedExplicitBatch?exactMaterialBreakdown:materialBreakdown).map(row=>({...row,matched:Math.abs(row.qty-row.ticketQty)<=0.055}));
     // Treat a probable OCR typo as resolved ONLY after the entire Ocean
     // date/material delivery batch has independently reconciled. A single
     // insertion/deletion in a printed reference is not enough by itself.
@@ -2706,13 +2722,13 @@ Return ONLY valid JSON (no markdown):
     const unmatched=invoiceTicketNums.filter(num=>{
       if(allTickets.some(t=>ticketNumberKey(t.ticket_number)===num))return false;
       if(usesConsolidatedBatch){
-        const possibilities=deliveryCandidates.filter(t=>oneEditApart(num,ticketNumberKey(t.ticket_number)));
+        const possibilities=(verifiedExplicitBatch?explicitDelivery:deliveryCandidates).filter(t=>oneEditApart(num,ticketNumberKey(t.ticket_number)));
         if(possibilities.length===1){referenceCorrections.push({printed:num,actual:String(possibilities[0].ticket_number)});return false;}
       }
       return true;
     });
     const volumeOverbilled=!needsReconciliation&&invoiceVolume-ticketVolume>0.5;
-    return {matched:ticketsOnInvoice.map(ticket=>({invoiceRef:usesConsolidatedBatch?'Ocean verified date/material batch':ticket.ticket_number,ticket})),unmatched,ticketsOnInvoice,ticketVolume,invoiceVolume,volumeMatch:Math.abs(ticketVolume-invoiceVolume)<0.5,volumeOverbilled,usesConsolidatedBatch,needsReconciliation,materialBreakdown:materialDetail,referenceCorrections};
+    return {matched:ticketsOnInvoice.map(ticket=>({invoiceRef:verifiedExplicitBatch?'Ocean verified printed ticket references':usesConsolidatedBatch?'Ocean verified date/material batch':ticket.ticket_number,ticket})),unmatched,ticketsOnInvoice,ticketVolume,invoiceVolume,volumeMatch:Math.abs(ticketVolume-invoiceVolume)<0.5,volumeOverbilled,usesConsolidatedBatch,needsReconciliation,materialBreakdown:materialDetail,referenceCorrections};
   }
 
   // ── Upload file to Supabase Storage and return public URL ──
