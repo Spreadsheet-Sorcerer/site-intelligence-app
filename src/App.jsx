@@ -304,6 +304,21 @@ function normalizeInvoiceNumber(value) {
   return String(value || "").trim().toUpperCase().replace(/\s+/g, "");
 }
 
+// Prevent re-uploading the same supplier document, including credit memos.
+// Keep separate rebill document numbers distinct so corrected invoices are allowed.
+function invoiceDocumentDuplicate(existing, incoming) {
+  const number = normalizeInvoiceNumber(incoming?.invoice_number);
+  if (!number) return false;
+  const supplier = String(incoming?.supplier || "").toLowerCase().replace(/[^a-z0-9]/g, "");
+  return (existing || []).some(record => {
+    if (normalizeInvoiceNumber(record?.invoice_number) !== number) return false;
+    const otherSupplier = String(record?.supplier || "").toLowerCase().replace(/[^a-z0-9]/g, "");
+    // Incomplete OCR supplier names must never make a duplicate slip through.
+    return !supplier || !otherSupplier || supplier === otherSupplier ||
+      supplier.includes(otherSupplier) || otherSupplier.includes(supplier);
+  });
+}
+
 function invoiceRebillReference(invoice) {
   const explicit = normalizeInvoiceNumber(invoice?.rebill_of_invoice_number);
   if (explicit) return explicit;
@@ -2878,16 +2893,53 @@ Return ONLY valid JSON, no markdown:
   }
 
   async function handleInvoiceFiles(files) {
-    if(!files?.length) return; setLoading(true); let added=0;
+    if(!files?.length) return;
+    setLoading(true);
+    let added=0;
+    const duplicateNumbers=[];
+    const pending=[];
+    // Refresh before adding a batch to catch documents uploaded on another device.
+    const latestSaved=await storageGet("concrete-data");
+    if(latestSaved===null){
+      setLoading(false);
+      showToast("Unable to check saved invoices. Upload cancelled to prevent duplicates. Please retry.","err");
+      return;
+    }
+    const existing=latestSaved.invoices||[];
     for(const file of Array.from(files)){
       setLoadMsg(`Reading invoice: "${file.name}"…`);
       try{
-        const [extracted,fileUrl]=await Promise.all([extractInvoice(file),uploadFile(file,"invoices")]);
-        setInvoices(prev=>[...prev,{id:Date.now()+Math.random(),filename:file.name,fileType:file.type,file_url:fileUrl,added_at:new Date().toISOString(),audit_version:20,...extracted,document_type:extracted.document_type||(/credit/i.test(file.name)?"credit_memo":"invoice"),confirmed_invoice_numbers:[]}]);
+        // Read first; a rejected duplicate never needs to be stored as a file.
+        const extracted=await extractInvoice(file);
+        const invoiceNumber=normalizeInvoiceNumber(extracted?.invoice_number);
+        if(!invoiceNumber){
+          showToast(`Upload blocked: ${file.name} has no readable invoice/credit number. Please check the document.`,"err");
+          continue;
+        }
+        if(invoiceDocumentDuplicate([...existing,...pending,...invoices],extracted)){
+          duplicateNumbers.push(invoiceNumber);
+          continue;
+        }
+        const fileUrl=await uploadFile(file,"invoices");
+        pending.push({id:Date.now()+Math.random(),filename:file.name,fileType:file.type,file_url:fileUrl,added_at:new Date().toISOString(),audit_version:20,...extracted,document_type:extracted.document_type||(/credit/i.test(file.name)?"credit_memo":"invoice"),confirmed_invoice_numbers:[]});
         added++;
       }catch(e){ showToast(`Could not read invoice "${file.name}": ${e.message}`,"err"); }
     }
-    setLoading(false); setLoadMsg(""); if(added){showToast(`${added} invoice${added>1?"s":""} scanned ✓`);setTab("invoices");}
+    if(pending.length){
+      // Merge the freshly read invoice register, keeping any local unsaved entries.
+      setInvoices(prev=>{
+        const merged=[...prev];
+        [...existing,...pending].forEach(inv=>{
+          if(!invoiceDocumentDuplicate(merged,inv)) merged.push(inv);
+        });
+        return merged;
+      });
+    }
+    setLoading(false);
+    setLoadMsg("");
+    if(duplicateNumbers.length) showToast(`Duplicate invoice/credit blocked: ${[...new Set(duplicateNumbers)].join(", ")}`,"err");
+    else if(added){showToast(`${added} document${added>1?"s":""} scanned ✓`);}
+    if(added) setTab("invoices");
   }
 
   const invoiceSupersessionMap=buildInvoiceSupersessionMap(invoices);
