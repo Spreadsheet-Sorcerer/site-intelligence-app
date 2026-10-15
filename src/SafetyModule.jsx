@@ -24,25 +24,25 @@ export const SECTIONS=[
 // Correct options remain clear and based on the Southwest orientation handout.
 // Safety manager must review wording before external use.
 SECTIONS[0].questions.push(
-  ['Your hard hat has a crack. What should you do?', ['Wrap it with electrical tape and call it good', 'Remove it from service and replace it', 'Tell the new guy it is a ventilation feature', 'Have a Monster and hope for the best'], 1],
-  ['Your coworker says safety glasses are unnecessary for a quick chop-saw cut. What is the proper response?', ['Use the required eye and face protection for the task', 'Squint really hard', 'Ask the new guy to look away'], 0]
+  ['Your hard hat has a crack. What should you do?', ['Wrap it with electrical tape and call it good', 'Remove it from service and replace it', 'Tell the foreman it has been fine like that for years', 'Have a Monster and hope for the best'], 1],
+  ['Your coworker says safety glasses are unnecessary for a quick chop-saw cut. What is the proper response?', ['Use the required eye and face protection for the task', 'I have made a hundred cuts without glasses', 'Ask the new guy to hold the material while you cut'], 0]
 );
 SECTIONS[1].questions.push(
-  ['You find an unsecured floor opening. What should happen?', ['Put a Monster can beside it as a warning', 'Keep people clear and have it properly secured and marked', 'Tell the new guy to stand guard all afternoon', 'Step over it and yell WATCH ER'], 1],
+  ['You find an unsecured floor opening. What should happen?', ['Put a traffic cone beside it and call it done', 'Keep people clear and have it properly secured and marked', 'Say the next trade should have covered it', 'Tell everyone to watch where they are walking'], 1],
   ['Where can you smoke on site?', ['Behind the drywall stack if nobody sees you', 'Only where permitted under site smoking rules', 'Anywhere as long as you offer the foreman a dart'], 1]
 );
 SECTIONS[2].questions.push(
   ['A coworker gets a minor injury and says it is no big deal. What should happen?', ['Report it to the site safety advisor as soon as possible that same day', 'Offer a dart and tell them to walk it off', 'Wait until Friday at 3:30'], 0]
 );
 SECTIONS[3].questions.push(
-  ['You hear three short blasts of the air horn. What does that mean?', ['The foreman announced another mandatory site pizza party', 'First aid is being summoned', 'Smoko is over, boys', 'Someone found the missing tape measure'], 1]
+  ['You hear three short blasts of the air horn. What does that mean?', ['The foreman is calling everyone back from break', 'First aid is being summoned', 'The concrete truck is here early', 'The crew is being called to the trailer'], 1]
 );
 SECTIONS[4].questions.push(
-  ['A coworker says he has worked near unprotected edges for 25 years without fall protection. What do you do?', ['Trust him because experience beats gravity', 'Send the new guy first', 'Stop work until proper fall protection is in place', 'Ask if there is a site pizza party instead'], 2],
+  ['A coworker says he has worked near unprotected edges for 25 years without fall protection. What do you do?', ['He says he has been doing it that way for twenty-five years', 'Send the new guy first', 'Stop work until proper fall protection is in place', 'Ask whether it is really necessary for a five-minute job'], 2],
   ['A guardrail was removed to move materials and has not been replaced. What should you do?', ['Put a traffic cone there and call it a guardrail', 'Keep people clear and report it so proper protection is restored', 'Have a dart and debate whose job it is'], 1]
 );
 SECTIONS[5].questions.push(
-  ['Someone leaves loose materials blocking a walkway. What should you do?', ['Tell the new guy it is his problem now', 'Clear the obstruction or report it so the walkway remains safe', 'Suggest another site pizza party to improve morale', 'Go for a dart and see whether it fixes itself'], 1]
+  ['Someone leaves loose materials blocking a walkway. What should you do?', ['It belongs to another trade, so leave it', 'Clear the obstruction or report it so the walkway remains safe', 'Push it closer to the drywallers’ materials', 'Leave it for the next trade to sort out'], 1]
 );
 
 
@@ -50,69 +50,69 @@ SECTIONS[5].questions.push(
 // English canonical content comes from Southwest's orientation checklist; safety manager approval required.
 const EXTRA_QUESTIONS = [
  [
- ['work-clothes','Which clothing is acceptable for site work?',['Proper fitted work clothing with sleeves and no loose or ripped material','Shorts and a tank top if it is warm','Whatever survived last night’s dart break'],0],
- ['high-vis','When should you wear required high-visibility clothing?',['As required under Southwest site policy','Only for the site photo','When the new guy remembers to bring it'],0],
- ['footwear','The sole of your safety boot is separating. What should you do?',['Replace or repair the unsuitable footwear before work','Apply a little tape and hope','Ask for another site pizza party'],0],
- ['gloves','How do you select gloves for your task?',['Use gloves suited to the specific hazard and work','Grab any glove regardless of the task','Ask the new guy to test them'],0],
- ['hearing','When should hearing protection be worn?',['When site noise and the task require it','Only if the foreman starts singing','Never, if you have worked here long enough'],0],
+ ['work-clothes','Which clothing is acceptable for site work?',['Proper fitted work clothing with sleeves and no loose or ripped material','Shorts and a tank top if it is warm','The same torn shirt you have worn for every concrete pour'],0],
+ ['high-vis','When should you wear required high-visibility clothing?',['As required under Southwest site policy','Only for the site photo','When the safety manager comes by'],0],
+ ['footwear','The sole of your safety boot is separating. What should you do?',['Replace or repair the unsuitable footwear before work','Wrap the sole in tape; it should last another week','Tell the foreman you have been wearing them for years'],0],
+ ['gloves','How do you select gloves for your task?',['Use gloves suited to the specific hazard and work','Grab any glove regardless of the task','Use the same gloves for everything; they are all gloves'],0],
+ ['hearing','When should hearing protection be worn?',['When site noise and the task require it','Only when the safety manager is walking through','Never, if you have worked here long enough'],0],
  ['eye','What does the form specify for chop-saw work?',['Appropriate eye protection and a face shield','Sunglasses alone','Turn your head at the last second'],0],
- ['respirator','What is required when a task calls for respiratory protection?',['Appropriate respiratory protection with required fit testing and clearance','A scarf from the truck','Hold your breath until smoko'],0],
- ['hard-hat','Your hard hat has a deep crack. What now?',['Remove it from use and replace it','Tell the new guy it is a ventilation upgrade','Keep working and hope gravity takes a day off'],0]
+ ['respirator','What is required when a task calls for respiratory protection?',['Appropriate respiratory protection with required fit testing and clearance','A scarf from the truck','Hold your breath until you finish the cut'],0],
+ ['hard-hat','Your hard hat has a deep crack. What now?',['Remove it from use and replace it','Tell the foreman it still fits, so it is fine','Keep wearing it; you have had it for twenty years'],0]
  ],
  [
  ['smoking','Where does Southwest allow smoking?',['Only in permitted designated areas under the site rules','In unfinished suites if nobody is looking','Wherever you left the pack of darts'],0],
  ['toilets','Where should workers use the washroom?',['At designated site toilet facilities, not suite toilets or bathtubs','In any vacant suite','In the first room without a door'],0],
- ['eating','How should eating facilities be left?',['Clean and free of garbage and PPE on eating surfaces','Like the aftermath of another pizza party','For the new guy to sort out'],0],
+ ['eating','How should eating facilities be left?',['Clean and free of garbage and PPE on eating surfaces','Leave the mess for the other shift','Leave it; somebody else cleans the lunchroom'],0],
  ['needles','You notice a hypodermic needle on site. What do you do?',['Do not touch it; contact the site safety advisor','Pick it up with your gloves','Slide it under a pallet'],0],
  ['red-tape','Red danger tape is across a doorway. What should you do?',['Stay outside the area unless authorized','Duck under if you are late','Move it to another doorway'],0],
- ['signs','What should you do when you see a posted site safety sign?',['Follow the posted instructions','Assume it is for the new guy','Read it after smoko'],0],
- ['openings','A floor opening is uncovered. What should happen?',['Keep clear and have it secured and marked as required','Put a Monster can beside it as a warning','Ask the new guy to stand there all day'],0],
+ ['signs','What should you do when you see a posted site safety sign?',['Follow the posted instructions','Assume it is for the new guy','Read it later if someone asks about it'],0],
+ ['openings','A floor opening is uncovered. What should happen?',['Keep clear and have it secured and marked as required','Put a traffic cone beside it and call it done','Tell the other trade to keep an eye on it'],0],
  ['tape-removal','After your authorized work, what should happen to caution tape you installed?',['Remove it when the hazard is properly resolved and removal is safe','Leave it forever','Give the tape to the porta potty committee'],0]
  ],
  [
  ['injury-report','A small cut occurs while working. What should happen?',['Report it to the site safety advisor promptly that same day','Wait until it needs stitches','Have a dart and call it healed'],0],
- ['unsafe-condition','You see loose material at an edge. What do you do?',['Keep clear and report the hazard and location','Ignore it unless it falls','Ask whether a pizza party will fix it'],0],
- ['refuse','You believe a task is unsafe. What right do you have?',['The right to refuse unsafe work under applicable procedures','The right to bypass all barricades','The right to send the new guy first'],0],
+ ['unsafe-condition','You see loose material at an edge. What do you do?',['Keep clear and report the hazard and location','Ignore it unless it falls','Tell yourself somebody else is responsible'],0],
+ ['refuse','You believe a task is unsafe. What right do you have?',['The right to refuse unsafe work under applicable procedures','The right to bypass all barricades','The right to keep quiet and let the new guy try it'],0],
  ['participate','Workers are entitled to which safety involvement?',['The right to participate in workplace health and safety','Only supervisors may raise concerns','Safety concerns can be raised only on Fridays'],0],
- ['know','You are unsure about the hazards of a task. What should you do?',['Ask for the information and safe work procedure before proceeding','Guess because you have a Monster','See what the new guy does'],0],
- ['complaints','How should a worker raise a safety concern or grievance?',['Use the established reporting process and safety contacts','Write it on the porta potty wall','Wait for the next pizza party'],0],
- ['site-advisor','Who should be told about an injury, no matter how minor?',['The site safety advisor as soon as possible that day','Only the person on coffee duty','The new guy when he gets back'],0],
- ['hazard-location','What information helps supervisors respond to unsafe conditions?',['Where the hazard is and what the condition involves','Only who might get blamed','Whether it happened before smoko'],0]
+ ['know','You are unsure about the hazards of a task. What should you do?',['Ask for the information and safe work procedure before proceeding','Just copy whatever the guy beside you is doing','See what the new guy does'],0],
+ ['complaints','How should a worker raise a safety concern or grievance?',['Use the established reporting process and safety contacts','Tell the crew at lunch and assume it gets back to safety','Wait until someone else complains first'],0],
+ ['site-advisor','Who should be told about an injury, no matter how minor?',['The site safety advisor as soon as possible that day','Just tell your foreman if you feel like it','Nobody if you can still finish your shift'],0],
+ ['hazard-location','What information helps supervisors respond to unsafe conditions?',['Where the hazard is and what the condition involves','Only who might get blamed','Whether you think the other trade caused it'],0]
  ],
  [
- ['horn-firstaid','What do three short air-horn blasts mean?',['First aid assistance is being summoned','The foreman found the missing tape measure','Another site pizza party has started'],0],
+ ['horn-firstaid','What do three short air-horn blasts mean?',['First aid assistance is being summoned','The foreman wants everyone at the trailer','Someone is calling the crew back to work'],0],
  ['horn-evac','What does one long air-horn blast mean?',['Evacuate as instructed','The lunch truck arrived','Time for a dart'],0],
- ['muster','Where do workers report on evacuation?',['The designated off-site muster point','Their personal vehicle without reporting','The cleanest porta potty'],0],
- ['extinguishers','Where should you locate emergency fire extinguishers?',['Know their site locations as explained during orientation','Only in the superintendent’s office','Where the new guy left them'],0],
- ['firstaid-kit','What should each trade arrange regarding first aid?',['Their required first aid provisions and trained site person','One box of bandages for the entire year','A Monster and crossed fingers'],0],
- ['eyewash','What should you know about emergency eye-wash stations?',['Their current locations and how to access them','They are only for washing lunch containers','They are always inside the porta potty'],0],
- ['radio','What is the role of the base radio in the site trailer?',['It can be used to summon emergency assistance','It only plays jobsite music','It announces smoko'],0],
- ['airhorn-location','Before starting work, what should you confirm about air horns?',['Their location and the site emergency signals','Whether they play your favourite song','Whether the new guy knows how loud they are'],0]
+ ['muster','Where do workers report on evacuation?',['The designated off-site muster point','Their personal vehicle without reporting','Your truck; you can leave before traffic gets bad'],0],
+ ['extinguishers','Where should you locate emergency fire extinguishers?',['Know their site locations as explained during orientation','Only in the superintendent’s office','Where you think the last crew left one'],0],
+ ['firstaid-kit','What should each trade arrange regarding first aid?',['Their required first aid provisions and trained site person','One box of bandages for the entire year','One guy who says he has done first aid before'],0],
+ ['eyewash','What should you know about emergency eye-wash stations?',['Their current locations and how to access them','They are only for washing lunch containers','They should be wherever the last crew put them'],0],
+ ['radio','What is the role of the base radio in the site trailer?',['It can be used to summon emergency assistance','It only plays jobsite music','It is only for calling the foreman about deliveries'],0],
+ ['airhorn-location','Before starting work, what should you confirm about air horns?',['Their location and the site emergency signals','Whether your foreman can hear it from the trailer','Only whether you can hear it from your work area'],0]
  ],
  [
  ['fall-inspect','Before relying on fall-protection equipment, what do you do?',['Inspect it and ensure it is suitable for the work','Borrow equipment without checking','Assume the previous worker did it'],0],
- ['edge','You need to work near an unprotected edge. What comes first?',['Follow the required fall-protection controls and safe work procedure','Trust twenty-five years of experience over gravity','Offer a dart to the new guy'],0],
- ['guardrail','A guardrail was removed and left open. What is the right response?',['Keep clear and report it so the required protection is restored','Put a traffic cone there and call it done','Wait until Friday to mention it'],0],
+ ['edge','You need to work near an unprotected edge. What comes first?',['Follow the required fall-protection controls and safe work procedure','Trust the guy who says he has done it this way for twenty-five years','Tell the foreman fall protection slows the work down'],0],
+ ['guardrail','A guardrail was removed and left open. What is the right response?',['Keep clear and report it so the required protection is restored','Put a traffic cone there and call it done','Tell the next crew to watch their step'],0],
  ['stepladder','How should a step ladder be set up?',['Fully opened with spreaders locked','Half folded against a wall','On a pile of spare blocks'],0],
- ['ladder-tie','What should be done to prevent ladder movement?',['Secure the ladder as required by the safe work procedure','Ask the new guy to hold it while checking his phone','Hope it stays in place'],0],
- ['equipment-eye','Before walking near mobile equipment, what should you do?',['Make eye contact with the operator and follow traffic controls','Assume the operator sees you','Run behind the machine during smoko'],0],
- ['spotter','The operator cannot see around a load. What is required?',['Use a spotter according to the site safe work procedure','Shout louder from behind the load','Ask for a site pizza party'],0],
+ ['ladder-tie','What should be done to prevent ladder movement?',['Secure the ladder as required by the safe work procedure','Ask the new guy to hold it while checking his phone','The last guy used it like this and it was fine'],0],
+ ['equipment-eye','Before walking near mobile equipment, what should you do?',['Make eye contact with the operator and follow traffic controls','Assume the operator sees you','Walk behind the machine because the operator should see you'],0],
+ ['spotter','The operator cannot see around a load. What is required?',['Use a spotter according to the site safe work procedure','Shout louder from behind the load','Tell the operator to just take it slow'],0],
  ['ladder-type','Which ladders are permitted under the site form?',['Type 1 and Type 2 ladders','Any ladder found in the truck','A chair if it looks sturdy'],0]
  ],
  [
- ['toolbox','What does Southwest require of weekly toolbox meetings?',['Attendance and documented meetings as directed','Only a head count at the pizza party','They can always be skipped'],0],
- ['walkway','Materials obstruct a walkway. What should happen?',['Clear them safely or report the obstruction','Make it the new guy’s obstacle course','Go for a dart and see whether they move'],0],
- ['bins','How should site garbage be handled?',['Separate it into the designated waste bins','Hide it behind the porta potty','Leave it for Friday at 3:30'],0],
+ ['toolbox','What does Southwest require of weekly toolbox meetings?',['Attendance and documented meetings as directed','It counts if everybody says they were there','They can always be skipped'],0],
+ ['walkway','Materials obstruct a walkway. What should happen?',['Clear them safely or report the obstruction','Move it in front of the drywallers’ pile','Leave them because the other trade brought them'],0],
+ ['bins','How should site garbage be handled?',['Separate it into the designated waste bins','Put it behind the other trade’s materials','Leave it for Friday at 3:30'],0],
  ['harassment','What does the site orientation say about harassment?',['It is not tolerated on site','It is fine if someone says it was a joke','Only applies to the new guy'],0],
- ['drugs','What does the site policy say about drugs and alcohol?',['They are prohibited under site safety rules','They are fine after a Monster','They are permitted at pizza parties'],0],
- ['electrical','Who may operate or alter site breakers, heaters and panels?',['Only authorized people','Whoever found the missing tape measure','Anyone wearing work gloves'],0],
- ['lights','You notice an issue with a site heater. What should you do?',['Report it and leave unauthorized repairs to designated personnel','Try a few wires until it works','Ask the new guy to guess'],0],
- ['procedure','How should workers handle tasks with a site-specific safe work procedure?',['Follow the current procedure and supervisor guidance','Do it the way it was done twenty years ago regardless','Wait for another pizza party to discuss it'],0]
+ ['drugs','What does the site policy say about drugs and alcohol?',['They are prohibited under site safety rules','It is fine if the foreman says you seem okay','It is fine as long as you are not operating equipment'],0],
+ ['electrical','Who may operate or alter site breakers, heaters and panels?',['Only authorized people','Whoever says they know which breaker it is','Anyone wearing work gloves'],0],
+ ['lights','You notice an issue with a site heater. What should you do?',['Report it and leave unauthorized repairs to designated personnel','Try a few wires until it works','Try the switch a few times and see if it starts'],0],
+ ['procedure','How should workers handle tasks with a site-specific safe work procedure?',['Follow the current procedure and supervisor guidance','Do it the way it was done twenty years ago regardless','Do it the same way you have for twenty years'],0]
  ]
 ];
 EXTRA_QUESTIONS.forEach((newQs,i)=>{newQs.forEach(([topic,prompt,options,correct])=>SECTIONS[i].questions.push([prompt,options,correct,topic]));});
 
-// v21.6: additional original, site-orientation-specific questions.
+// v21.7: refined jobsite-realism pass on v21.6 original, site-orientation-specific questions.
 // The worker answers only TWO different topics after each of the six sections.
 const FORTUNA_QUESTION_ADDITIONS = [
   [
@@ -130,8 +130,8 @@ const FORTUNA_QUESTION_ADDITIONS = [
       "Your high-vis vest is in the truck. What do you do?",
       [
         "Get the required high-visibility clothing before entering the work area.",
-        "Stand beside someone wearing two vests.",
-        "Tell the new guy to wave whenever equipment comes by."
+        "Just work where equipment operators can see you.",
+        "Tell the operator you are only going to be there a minute."
       ],
       0,
       "high-vis"
@@ -140,7 +140,7 @@ const FORTUNA_QUESTION_ADDITIONS = [
       "You can see the steel toe through a worn-out boot. What is the move?",
       [
         "Replace the damaged safety footwear before working.",
-        "Paint the steel the same colour as the boot.",
+        "Keep wearing them until the safety manager notices.",
         "Tell everyone they were expensive, so they must still be good."
       ],
       0,
@@ -161,7 +161,7 @@ const FORTUNA_QUESTION_ADDITIONS = [
       [
         "Get gloves appropriate for the material and task.",
         "Use the gloves you found in the lunchroom.",
-        "Ask the new guy to carry the sharp end."
+        "Tell the new guy the gloves are optional if he is careful."
       ],
       0,
       "gloves"
@@ -212,7 +212,7 @@ const FORTUNA_QUESTION_ADDITIONS = [
       "A posted sign says the area is restricted. What do you do?",
       [
         "Follow the sign and obtain authorization before entering.",
-        "Walk in backward so the sign cannot see you.",
+        "Follow someone who says the restricted sign is from last week.",
         "Follow the guy who says he has been going through there all week."
       ],
       0,
@@ -294,7 +294,7 @@ const FORTUNA_QUESTION_ADDITIONS = [
       "Someone tells you safety concerns are management’s problem. What is true?",
       [
         "Workers have the right to participate in workplace health and safety.",
-        "Only the person holding the clipboard gets an opinion.",
+        "Only the guys in white hard hats get an opinion.",
         "It becomes your problem only after something falls."
       ],
       0,
@@ -304,7 +304,7 @@ const FORTUNA_QUESTION_ADDITIONS = [
       "You want to raise a safety concern about an ongoing practice. How do you do it?",
       [
         "Use the established reporting process and safety contacts.",
-        "Write it on a piece of plywood and leave it by the trailer.",
+        "Tell the crew at lunch and assume someone will pass it on.",
         "Wait until the crew has stopped talking about the last complaint."
       ],
       0,
@@ -429,7 +429,7 @@ const FORTUNA_QUESTION_ADDITIONS = [
       [
         "Stop until the proper fall protection is in place.",
         "Tell him you have been doing this for twenty years.",
-        "Send the new guy first; if he makes it, you are probably good."
+        "Send the new guy first; if he can do it, you can too."
       ],
       0,
       "edge"
@@ -565,12 +565,12 @@ const REPLACEMENTS = [
   [/\bsmoko\b/gi,'the break'],
   [/hope gravity takes a day off/gi,'tell the foreman you have done it for twenty years'],
   [/experience beats gravity/gi,'twenty years of experience means the rule does not apply'],
-  [/Trust twenty-five years of experience over gravity/gi,'Trust the guy who says he has done it this way for twenty-five years'],
+  [/Trust the guy who says he has done it this way for twenty-five years/gi,'Trust the guy who says he has done it this way for twenty-five years'],
   [/Have a Monster and hope for the best/gi,'Tell the foreman it has been fine for years'],
-  [/Put a Monster can beside it as a warning/gi,'Put a traffic cone beside it and call it done'],
+  [/Put a traffic cone beside it and call it done/gi,'Put a traffic cone beside it and call it done'],
   [/have a dart and debate whose job it is/gi,'argue about which trade is responsible and leave it open'],
-  [/Go for a dart and see whether it fixes itself/gi,'leave it for the next trade'],
-  [/Go for a dart and see whether they move/gi,'leave it for the next trade'],
+  [/Leave it for the next trade to sort out/gi,'leave it for the next trade'],
+  [/Leave them because the other trade brought them/gi,'leave it for the next trade'],
   [/site pizza party/gi,'toolbox meeting'],
   [/pizza party/gi,'toolbox meeting'],
 ];
@@ -603,7 +603,7 @@ export function pickDistinctQuestions(index,count=2){
   return selected;
 }
 const QUESTIONS_PER_SECTION=2;
-function makeAttempt(workerId){return {id:id(),worker_id:workerId,version:'Southwest Orientation v21.6 test',status:'in_progress',approval_status:'pending',started_at:stamp(),completed_at:null,sections:[],signature:'',acknowledged:false};}
+function makeAttempt(workerId){return {id:id(),worker_id:workerId,version:'Southwest Orientation v21.7 test',status:'in_progress',approval_status:'pending',started_at:stamp(),completed_at:null,sections:[],signature:'',acknowledged:false};}
 function daysTo(date){if(!date)return null;const due=new Date(date+'T12:00:00'),now=new Date();now.setHours(12,0,0,0);return Math.round((due-now)/86400000);}
 const cleanName=(s)=>String(s||'').trim().toLowerCase().replace(/\s+/g,' ');
 function formItem(label,value,onChange,opts){return <label style={{fontSize:12,color:UI.sub,display:'grid',gap:5}}>{label}{opts?<select value={value||''} onChange={e=>onChange(e.target.value)} style={field}><option value="">Select</option>{opts.map(o=><option key={o} value={o}>{o}</option>)}</select>:<input value={value||''} onChange={e=>onChange(e.target.value)} style={field}/>}</label>}
