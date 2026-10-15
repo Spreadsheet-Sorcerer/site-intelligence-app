@@ -2629,23 +2629,46 @@ Return ONLY valid JSON (no markdown):
     });
     const balanced=materialBreakdown.length>0&&materialBreakdown.every(row=>Math.abs(row.qty-row.ticketQty)<=0.055);
     const covered=new Set(materialBreakdown.flatMap(row=>row.tickets));
-    const fullCoverage=candidate.every(t=>covered.has(t));
+    // Pump slips do not represent additional concrete deliveries. Their
+    // pumped-volume field must not invalidate an otherwise complete batch.
+    // Likewise, a zero-volume non-delivery entry cannot be used to verify
+    // concrete quantity and is excluded from delivery completeness.
+    const deliveryCandidates=candidate.filter(t=>Number(t.volume_m3)>0 ||
+      (!isStandalonePumpSlip(t) && (parseMpaNum(t.mix_design)!=null || ticketIsGrout(t))));
+    const fullCoverage=deliveryCandidates.every(t=>covered.has(t));
     const anotherUnreferencedInvoice=otherInvoices.some(other=>!(other.ticket_numbers||[]).length);
-    const usesConsolidatedBatch=!!(ocean&&balanced&&fullCoverage&&candidate.length>0&&!anotherUnreferencedInvoice);
+    const usesConsolidatedBatch=!!(ocean&&balanced&&fullCoverage&&deliveryCandidates.length>0&&!anotherUnreferencedInvoice);
     // Do not discard a verified concrete batch merely because a separate grout
     // ticket is absent, coded differently, or read incorrectly by OCR. Keep all
     // date/mix-matched loads visible and leave only the missing material for review.
     // Never expand to a full date when another invoice may claim those loads.
     const safelyAttributed=!!(ocean&&candidate.length>0&&!anotherUnreferencedInvoice&&otherInvoices.length===0);
     const matchedMaterialTickets=[...new Set(materialBreakdown.flatMap(row=>row.tickets))];
-    const ticketsOnInvoice=usesConsolidatedBatch?candidate:safelyAttributed&&matchedMaterialTickets.length>explicit.length?matchedMaterialTickets:explicit;
+    const ticketsOnInvoice=usesConsolidatedBatch?deliveryCandidates:safelyAttributed&&matchedMaterialTickets.length>explicit.length?matchedMaterialTickets:explicit;
     const invoiceVolume=resolvedInvoiceVolumeM3(invoice);
     const ticketVolume=ticketsOnInvoice.reduce((n,t)=>n+(Number(t.volume_m3)||0),0);
     const needsReconciliation=!!(ocean&&!usesConsolidatedBatch&&(day.length>explicit.length||anotherUnreferencedInvoice||materialBreakdown.some(row=>Math.abs(row.qty-row.ticketQty)>0.055)));
     const materialDetail=materialBreakdown.map(row=>({...row,matched:Math.abs(row.qty-row.ticketQty)<=0.055}));
-    const unmatched=invoiceTicketNums.filter(num=>!allTickets.some(t=>ticketNumberKey(t.ticket_number)===num));
+    // Treat a probable OCR typo as resolved ONLY after the entire Ocean
+    // date/material delivery batch has independently reconciled. A single
+    // insertion/deletion in a printed reference is not enough by itself.
+    const oneEditApart=(a,b)=>{
+      if(!/^\d{5,8}$/.test(a)||!/^\d{5,8}$/.test(b)||Math.abs(a.length-b.length)!==1)return false;
+      const shorter=a.length<b.length?a:b, longer=a.length>b.length?a:b;
+      for(let i=0;i<longer.length;i++)if(longer.slice(0,i)+longer.slice(i+1)===shorter)return true;
+      return false;
+    };
+    const referenceCorrections=[];
+    const unmatched=invoiceTicketNums.filter(num=>{
+      if(allTickets.some(t=>ticketNumberKey(t.ticket_number)===num))return false;
+      if(usesConsolidatedBatch){
+        const possibilities=deliveryCandidates.filter(t=>oneEditApart(num,ticketNumberKey(t.ticket_number)));
+        if(possibilities.length===1){referenceCorrections.push({printed:num,actual:String(possibilities[0].ticket_number)});return false;}
+      }
+      return true;
+    });
     const volumeOverbilled=!needsReconciliation&&invoiceVolume-ticketVolume>0.5;
-    return {matched:ticketsOnInvoice.map(ticket=>({invoiceRef:usesConsolidatedBatch?'Ocean verified date/material batch':ticket.ticket_number,ticket})),unmatched,ticketsOnInvoice,ticketVolume,invoiceVolume,volumeMatch:Math.abs(ticketVolume-invoiceVolume)<0.5,volumeOverbilled,usesConsolidatedBatch,needsReconciliation,materialBreakdown:materialDetail};
+    return {matched:ticketsOnInvoice.map(ticket=>({invoiceRef:usesConsolidatedBatch?'Ocean verified date/material batch':ticket.ticket_number,ticket})),unmatched,ticketsOnInvoice,ticketVolume,invoiceVolume,volumeMatch:Math.abs(ticketVolume-invoiceVolume)<0.5,volumeOverbilled,usesConsolidatedBatch,needsReconciliation,materialBreakdown:materialDetail,referenceCorrections};
   }
 
   // ── Upload file to Supabase Storage and return public URL ──
@@ -3126,8 +3149,8 @@ Return ONLY valid JSON, no markdown:
     const rebillOf=invoiceRebillReference(invoice);
     const isSuperseded=!!supersession;
     const hasIssues=!isCredit&&!invoiceResolvedByCredit(invoice,creditMemos)&&!isSuperseded&&outstandingForInvoice(invoice).length>0;
-    const hasWarnings=m.needsReconciliation;
     const findings=invoiceFindings(invoice,m,chargeAudit,calculatedChecks,contractRateChecks);
+    const hasWarnings=m.needsReconciliation&&!findings.some(f=>f.key==="tickets:reconciliation"&&findingResolution(invoice,f));
     const outstanding=findings.filter(f=>!findingResolution(invoice,f)&&!invoiceResolvedByCredit(invoice,creditMemos));
     const saveReview=(finding,status)=>{
       const note=window.prompt(status==='accepted'?'Optional review note (accepted as billed):':'Optional resolution note:', '') ;
@@ -3172,10 +3195,11 @@ Return ONLY valid JSON, no markdown:
           {m.invoiceVolume>0&&<div style={{background:C.bg,borderRadius:10,padding:"12px 18px",flex:1}}><div style={{color:C.muted,fontSize:11,fontWeight:700,textTransform:"uppercase",letterSpacing:1}}>Invoice Volume</div><div style={{color:C.accent,fontWeight:800,fontSize:20,fontFamily:"monospace"}}>{fmt(m.invoiceVolume)} m³</div></div>}
           {m.ticketVolume>0&&<div style={{background:C.bg,borderRadius:10,padding:"12px 18px",flex:1}}><div style={{color:C.muted,fontSize:11,fontWeight:700,textTransform:"uppercase",letterSpacing:1}}>Ticket Volume</div><div style={{color:m.volumeOverbilled?C.red:C.green,fontWeight:800,fontSize:20,fontFamily:"monospace"}}>{fmt(m.ticketVolume)} m³</div></div>}
         </div>
-        {m.needsReconciliation&&<div style={{background:"#451a03",border:`1px solid ${C.yellow}`,borderRadius:9,padding:12,marginBottom:12,color:"#fde68a"}}>⚠ Full delivery batch needs reconciliation — printed references may be partial. This is NOT a confirmed overcharge; related extra-charge comparisons are deferred until tickets reconcile.</div>}
+        {hasWarnings&&<div style={{background:"#451a03",border:`1px solid ${C.yellow}`,borderRadius:9,padding:12,marginBottom:12,color:"#fde68a"}}>⚠ Full delivery batch needs reconciliation — printed references may be partial. This is NOT a confirmed overcharge; related extra-charge comparisons are deferred until tickets reconcile.</div>}
         {m.volumeOverbilled&&<div style={{background:"#450a0a",border:`1px solid ${C.red}`,borderRadius:10,padding:"12px 16px",marginBottom:14,color:"#fca5a5",fontSize:13}}>⚠ Possible volume overbilling — invoice shows {fmt(m.invoiceVolume)} m³ but matched tickets support {fmt(m.ticketVolume)} m³</div>}
         {m.needsReconciliation&&m.materialBreakdown?.length>0&&<div style={{background:"#1c1917",border:`1px solid ${C.yellow}66`,borderRadius:10,padding:"12px 16px",marginBottom:14,fontSize:12}}><b style={{color:"#fde68a"}}>Delivery-date reconciliation details</b>{m.materialBreakdown.map((row,i)=><div key={i} style={{color:row.matched?"#86efac":"#fde68a",marginTop:5}}>{row.desc}: invoice {fmt(row.qty)} m³ / same-date tickets {fmt(row.ticketQty)} m³ ({row.tickets.length} loads) {row.matched?"✓":row.missingQuantity?.length?`— Ticket ${row.missingQuantity.map(t=>t.ticket_number).join(", ")} exists, but its volume is missing. Open that ticket and enter the volume printed on the delivery slip.`:"— review this material"}</div>)}<div style={{color:C.sub,marginTop:8}}>Matching a ticket number alone cannot verify its delivered quantity; a missing material quantity requires review, not automatic approval.</div></div>}
         {m.usesConsolidatedBatch&&<div style={{background:"#082f49",border:`1px solid ${C.blue}`,borderRadius:10,padding:"12px 16px",marginBottom:14,color:"#bae6fd",fontSize:13}}>✓ Ocean consolidated invoice — reconciled against {m.matched.length} delivery tickets (concrete and grout separately) dated {invoice.invoice_date}. Ocean does not print every delivery ticket number on its invoice.</div>}
+        {m.referenceCorrections?.length>0&&<div style={{background:"#082f49",border:`1px solid ${C.blue}`,borderRadius:10,padding:"10px 14px",marginBottom:12,fontSize:12,color:"#bae6fd"}}>ℹ Probable invoice-reference OCR typo (quantity independently reconciled): {m.referenceCorrections.map(x=>`${x.printed} → ${x.actual}`).join(", ")}. Original invoice reference retained.</div>}
         {m.unmatched.length>0&&<div style={{background:"#451a03",border:`1px solid ${C.yellow}`,borderRadius:10,padding:"12px 16px",marginBottom:14,color:"#fde68a",fontSize:13}}>⚠ {m.unmatched.length} ticket{m.unmatched.length>1?"s":""} on invoice not in system: <b>{m.unmatched.join(", ")}</b></div>}
         {chargeAudit.comparisons.length>0&&<div style={{marginBottom:16}}>
           <div style={{color:C.muted,fontSize:11,fontWeight:700,textTransform:"uppercase",letterSpacing:1,marginBottom:10}}>Admixture & Extra-Charge Audit</div>
@@ -3618,7 +3642,7 @@ Screenshot attached: Yes / No`}</pre>
                     <span style={{fontSize:18,color:groupHasIssues?C.red:C.muted,transform:isOpen?"rotate(180deg)":"none",transition:"transform .15s"}}>⌄</span>
                   </button>
                   {isOpen&&<div style={{borderTop:`1px solid ${C.border}`,padding:"10px 14px 4px"}}>
-                    {dayInvoices.map(inv=>{ const m=matchInvoiceToTickets(inv,tickets); const chargeAudit=invoiceChargeAudit(inv,m.needsReconciliation?[]:m.ticketsOnInvoice); const calculatedIssues=invoiceCalculatedChecks(inv).filter(check=>check.mismatch); const rateIssues=invoiceContractRateChecks(inv,m.needsReconciliation?[]:m.ticketsOnInvoice,liveOceanContractRates).filter(check=>check.mismatch); const supersession=invoiceSupersessionMap.get(normalizeInvoiceNumber(inv.invoice_number)); const rebillOf=invoiceRebillReference(inv); const isSuperseded=!!supersession; const hasIssues=outstandingForInvoice(inv).length>0; const hasWarnings=m.needsReconciliation;
+                    {dayInvoices.map(inv=>{ const m=matchInvoiceToTickets(inv,tickets); const chargeAudit=invoiceChargeAudit(inv,m.needsReconciliation?[]:m.ticketsOnInvoice); const calculatedIssues=invoiceCalculatedChecks(inv).filter(check=>check.mismatch); const rateIssues=invoiceContractRateChecks(inv,m.needsReconciliation?[]:m.ticketsOnInvoice,liveOceanContractRates).filter(check=>check.mismatch); const supersession=invoiceSupersessionMap.get(normalizeInvoiceNumber(inv.invoice_number)); const rebillOf=invoiceRebillReference(inv); const isSuperseded=!!supersession; const hasIssues=outstandingForInvoice(inv).length>0; const hasWarnings=m.needsReconciliation&&outstandingForInvoice(inv).some(f=>f.key==="tickets:reconciliation");
                       return <div key={inv.id} onClick={()=>setSelectedInvoice(inv)} style={{background:C.bg,border:`1px solid ${hasIssues?C.red+"66":C.border}`,borderRadius:10,padding:"15px 16px",marginBottom:10,cursor:"pointer"}}>
                         <div style={{display:"flex",justifyContent:"space-between",alignItems:"flex-start",marginBottom:10,flexWrap:"wrap",gap:8}}>
                           <div><span style={{fontWeight:800,fontSize:15}}>Invoice {inv.invoice_number||"—"}</span></div>
