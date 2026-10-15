@@ -483,6 +483,69 @@ function oceanBaseRateForMpa(value) {
   return OCEAN_BASE_RATES[strength] || null;
 }
 
+// ─── INVOICED COST INTELLIGENCE (reporting only; does not mutate records) ──
+function invoiceCostCategory(line) {
+  const d=String(line?.description||'').toLowerCase();
+  if(/hst|gst|\btax\b|invoice total|amount due|subtotal|total sale/.test(d)) return null;
+  if(/environmental recovery|recovery fee/.test(d)) return {key:'environmental',label:'Environmental recovery fees',kind:'fee'};
+  if(/waterproof|waterproofing|crystalline|xypex|kryton|krytonite|penetron/.test(d)) return {key:'waterproofing',label:'Integral waterproofing',kind:'specialty'};
+  if(/\bgrout\b|pump prim/.test(d) && !/pump(?:ing)?\s*(?:fee|service)/.test(d)) return {key:'grout',label:'Grout / pump priming',kind:'grout'};
+  if(/(?:\d+\s*mpa|\bconcrete\b|\bready.?mix\b)/.test(d) && /plain|concrete|mix|\d+\s*mpa/.test(d)) {
+    const m=d.match(/(\d+)\s*mpa/);
+    return {key:m?`mpa_${m[1]}`:'concrete_other',label:m?`${m[1]} MPa concrete`:'Concrete — unspecified',kind:'concrete'};
+  }
+  if(/retarder|retardant/.test(d)) return {key:'retarder',label:'Set retarder',kind:'hot'};
+  if(/accelerator|accelerating|\baccel\b/.test(d)) return {key:'accelerator',label:'Accelerator',kind:'cold'};
+  if(/hot water|heated water|winter heat|winter service|heat charge/.test(d)) return {key:'winter_heat',label:'Heated water / winter heat',kind:'cold'};
+  if(/\bice\b|chilled water|cooling/.test(d)) return {key:'cooling',label:'Cooling / ice',kind:'hot'};
+  if(/superplastic|plasticizer|plasticiser|\bsuper\s*\d/.test(d)) return {key:'plasticizer',label:'Superplasticizer',kind:'year'};
+  if(/water reduc|hrwr|high range/.test(d)) return {key:'water_reducer',label:'Water reducer',kind:'year'};
+  if(/fiber|fibre|tuf.strand/.test(d)) return {key:'fibre',label:'Fibre',kind:'year'};
+  if(/air entrain/.test(d)) return {key:'air',label:'Air entrainment',kind:'design'};
+  if(/corrosion inhibitor|shrinkage reduc|calcium|chloride|pigment|colou?r/.test(d)) return {key:'other_admixture',label:'Other admixtures',kind:'design'};
+  if(/pump|pumping/.test(d)) return {key:'pumping',label:'Pumping',kind:'service'};
+  if(/fuel|freight|delivery|standby|wait|small load|short load|weekend|overtime|after hours/.test(d)) return {key:'delivery_extras',label:'Delivery / service extras',kind:'service'};
+  return {key:'other',label:'Other / unclassified charges',kind:'other'};
+}
+function invoiceCostReport(activeInvoices) {
+  const rows=[];
+  const grossInvoices=activeInvoices.filter(inv=>!isCreditMemo(inv));
+  let gross=0, credits=0;
+  grossInvoices.forEach(inv=>{
+    const target=invoiceAmountBeforeHst(inv);
+    gross+=target;
+    const lines=(inv.line_items||[]).filter(line=>invoiceCostCategory(line)!=null && Number.isFinite(Number(line.amount)));
+    const extractedTotal=lines.reduce((a,l)=>a+Number(l.amount),0);
+    lines.forEach(line=>{
+      const category=invoiceCostCategory(line);
+      const amount=Number(line.amount)||0;
+      if(!amount) return;
+      rows.push({invoice:inv.invoice_number||'',date:String(inv.invoice_date||'').slice(0,10),description:String(line.description||''),category:category.key,label:category.label,kind:category.kind,quantity:Number(line.quantity)||0,unit:String(line.unit||''),amount,source:'invoice'});
+    });
+    const residual=Math.round((target-extractedTotal)*100)/100;
+    if(Math.abs(residual)>=0.01)rows.push({invoice:inv.invoice_number||'',date:String(inv.invoice_date||'').slice(0,10),description:'Invoice total not allocated to extracted line items',category:'unallocated',label:'Unallocated / extraction difference',kind:'other',quantity:0,unit:'',amount:residual,source:'reconciliation'});
+  });
+  activeInvoices.filter(isCreditMemo).forEach(inv=>{
+    const amount=creditNetAmount(inv);credits+=amount;
+    // Keep credits as a distinct adjustment unless their category allocation is explicitly established.
+    rows.push({invoice:inv.invoice_number||'',date:String(inv.invoice_date||'').slice(0,10),description:'Credit memo — category not independently allocated',category:'credits',label:'Credits — unallocated',kind:'credit',quantity:0,unit:'',amount:-amount,source:'credit'});
+  });
+  const categories=new Map(),months=new Map();
+  rows.forEach(r=>{
+    if(!categories.has(r.category))categories.set(r.category,{key:r.category,label:r.label,kind:r.kind,amount:0,quantities:{},count:0});
+    const c=categories.get(r.category);c.amount+=r.amount;c.count++;
+    if(r.quantity && r.unit && r.source==='invoice')c.quantities[r.unit]=(c.quantities[r.unit]||0)+r.quantity;
+    const month=/^\d{4}-\d{2}$/.test(r.date.slice(0,7))?r.date.slice(0,7):'Unknown';
+    if(!months.has(month))months.set(month,{month,total:0,extras:0,cold:0,hot:0,concreteM3:0});
+    const m=months.get(month);m.total+=r.amount;
+    if(['cold','hot','year','design','specialty'].includes(r.kind))m.extras+=r.amount;
+    if(r.kind==='cold')m.cold+=r.amount;
+    if(r.kind==='hot')m.hot+=r.amount;
+    if(r.kind==='concrete' && /m\s*(?:3|³)|cubic/i.test(r.unit||'m3'))m.concreteM3+=r.quantity;
+  });
+  return {rows,categories:[...categories.values()].sort((a,b)=>a.kind.localeCompare(b.kind)||a.label.localeCompare(b.label)),months:[...months.values()].sort((a,b)=>a.month.localeCompare(b.month)),gross,credits,net:gross-credits,reconciled:rows.reduce((s,r)=>s+r.amount,0)};
+}
+
 // ─── V20 TICKET-TO-INVOICE CHARGE AUDIT ────────────────────────────────────
 function normalizedChargeType(description) {
   const text=String(description||"").toLowerCase().replace(/[^a-z0-9]+/g," ").trim();
@@ -548,17 +611,48 @@ function auditLineItems(lines,{ticketSide=false}={}) {
   return totals;
 }
 
+// Fibre is sometimes present on physical Ocean slips but incompletely saved in
+// historical charge_items. Only infer missing fibre when *multiple distinct*
+// saved tickets provide consistent kg/m³ evidence AND the invoiced kg agrees.
+// The inferred quantity is explicitly labelled and does not create a fictional
+// ticket price/amount. Without this evidence, retain the original warning.
+function supportedFibreReconciliation(invoice, matchedTickets, invoiceFibre) {
+  const delivered=(matchedTickets||[]).filter(ticket=>
+    isStructuralTicket(ticket) && Number(ticket?.volume_m3)>0);
+  if (delivered.length<3 || !invoiceFibre?.hasQuantity || invoiceFibre.quantity<=0) return null;
+  const observations=delivered.map(ticket=>{
+    const fibre=(ticket?.charge_items||[]).filter(item=>normalizedChargeType(item?.description)?.key==='fibre');
+    const kg=fibre.reduce((sum,item)=>sum+(Number(item?.quantity)||0),0);
+    return {ticket,kg,volume:Number(ticket.volume_m3)};
+  });
+  const supported=observations.filter(row=>row.kg>0 && row.volume>0);
+  // At least two independent ticket quantities; one OCR error is insufficient.
+  if(supported.length<2) return null;
+  const dosages=supported.map(row=>row.kg/row.volume);
+  const dosage=dosages.reduce((sum,v)=>sum+v,0)/dosages.length;
+  if(!Number.isFinite(dosage)||dosage<=0 || dosages.some(v=>Math.abs(v-dosage)>Math.max(0.02,dosage*0.015))) return null;
+  const missing=observations.filter(row=>row.kg<=0);
+  if(!missing.length) return null;
+  const predicted=supported.reduce((sum,row)=>sum+row.kg,0)+missing.reduce((sum,row)=>sum+row.volume*dosage,0);
+  const tolerance=Math.max(0.10,invoiceFibre.quantity*0.005);
+  if(Math.abs(predicted-invoiceFibre.quantity)>tolerance) return null;
+  return {predicted,dosage,observed:supported.length,inferred:missing.length};
+}
+
 function invoiceChargeAudit(invoice,matchedTickets) {
   const currentAudit=Number(invoice?.audit_version)>=20&&(matchedTickets||[]).length>0&&(matchedTickets||[]).every(ticket=>Number(ticket?.audit_version)>=20);
   if(!currentAudit) return {comparisons:[],issues:[],warnings:[]};
   const invoiceTotals=auditLineItems(invoice?.line_items);
   const ticketTotals=auditLineItems((matchedTickets||[]).flatMap(ticket=>ticket?.charge_items||[]),{ticketSide:true});
   const keys=new Set([...Object.keys(invoiceTotals),...Object.keys(ticketTotals)]);
+  const fibreInference=supportedFibreReconciliation(invoice,matchedTickets,invoiceTotals.fibre);
   const comparisons=[...keys].map(key=>{
     const empty={key,label:key,quantity:0,amount:0,unit:"",unitPrices:[],hasQuantity:false,hasAmount:false,lines:[]};
     const inv=invoiceTotals[key]||{...empty,label:ticketTotals[key]?.label||key};
     const tkt=ticketTotals[key]||{...empty,label:inv.label};
-    const difference=inv.quantity-tkt.quantity;
+    const inferredFibre=key==='fibre'?fibreInference:null;
+    const effectiveTicketQuantity=inferredFibre?inferredFibre.predicted:tkt.quantity;
+    const difference=inv.quantity-effectiveTicketQuantity;
     const tolerance=Math.max(0.05,Math.abs(tkt.quantity)*0.005);
     const invoiceRate=inv.unitPrices.length?inv.unitPrices[0]:null;
     const ticketRate=tkt.unitPrices.length?tkt.unitPrices[0]:null;
@@ -566,9 +660,11 @@ function invoiceChargeAudit(invoice,matchedTickets) {
     // are intentionally not flagged.
     const quantityMismatch=inv.hasQuantity&&tkt.hasQuantity&&difference>tolerance;
     const rateMismatch=invoiceRate!=null&&ticketRate!=null&&(invoiceRate-ticketRate)>0.01;
-    const amountMismatch=inv.hasAmount&&tkt.hasAmount&&(inv.amount-tkt.amount)>0.02;
+    // Ticket-side amounts are incomplete for inferred fibre, so don't compare
+    // an entire invoice charge with a handful of OCR-extracted ticket amounts.
+    const amountMismatch=!inferredFibre&&inv.hasAmount&&tkt.hasAmount&&(inv.amount-tkt.amount)>0.02;
     const unsupportedInvoiceCharge=inv.lines.length>0&&tkt.lines.length===0;
-    return {key,label:inv.label,invoiceQuantity:inv.quantity,ticketQuantity:tkt.quantity,difference,unit:inv.unit||tkt.unit||"",unitPrice:invoiceRate,invoiceRate,ticketRate,invoiceAmount:inv.amount,ticketAmount:tkt.amount,hasInvoiceQuantity:inv.hasQuantity,hasTicketQuantity:tkt.hasQuantity,hasTicketData:tkt.lines.length>0,unsupportedInvoiceCharge,quantityMismatch,rateMismatch,amountMismatch,mismatch:quantityMismatch||rateMismatch||amountMismatch,needsSupport:unsupportedInvoiceCharge};
+    return {key,label:inv.label,invoiceQuantity:inv.quantity,ticketQuantity:effectiveTicketQuantity,recordedTicketQuantity:tkt.quantity,inferredFibre,difference,unit:inv.unit||tkt.unit||"",unitPrice:invoiceRate,invoiceRate,ticketRate,invoiceAmount:inv.amount,ticketAmount:tkt.amount,hasInvoiceQuantity:inv.hasQuantity,hasTicketQuantity:tkt.hasQuantity,hasTicketData:tkt.lines.length>0,unsupportedInvoiceCharge,quantityMismatch,rateMismatch,amountMismatch,mismatch:quantityMismatch||rateMismatch||amountMismatch,needsSupport:unsupportedInvoiceCharge};
   });
   // Only show rows with data on both sides. Missing historical extraction is
   // not an invoice condition and should never appear as a warning.
@@ -2276,6 +2372,7 @@ function ConcreteModule({ onBack }) {
   const [saveStatus, setSaveStatus] = useState("loading");
   const [ticketSearch, setTicketSearch] = useState("");
   const [invoiceSearch, setInvoiceSearch] = useState("");
+  const [costView, setCostView] = useState("categories");
   const [deletedRecords, setDeletedRecords] = useState([]);
   const [deletedOpen, setDeletedOpen] = useState(false);
   const [feedbackOpen, setFeedbackOpen] = useState(false);
@@ -2783,6 +2880,7 @@ Return ONLY valid JSON, no markdown:
   // invoice, because an overbilled invoice must not redefine the contract rate.
   const liveOceanContractRates={...OCEAN_CONTRACT_BASE_RATES};
   const liveOceanForecastRates={...OCEAN_BASE_RATES};
+  const costReport=invoiceCostReport(activeInvoices);
   const creditMemos=activeInvoices.filter(isCreditMemo);
   const billingInvoices=activeInvoices.filter(inv=>!isCreditMemo(inv));
   const findingsForInvoice=inv=>{
@@ -3086,6 +3184,7 @@ Return ONLY valid JSON, no markdown:
             const rowColor=row.mismatch?C.red:C.green;
             return <div key={row.key} style={{background:row.mismatch?"#450a0a":C.bg,border:`1px solid ${rowColor}`,borderRadius:9,padding:"11px 14px",marginBottom:8}}>
               <div style={{display:"flex",justifyContent:"space-between",gap:10,flexWrap:"wrap"}}><b>{row.label}</b><Badge color={rowColor}>{row.mismatch?"⚠ Possible overcharge":"✓ Match"}</Badge></div>
+              {row.inferredFibre&&<div style={{fontSize:11,color:C.yellow,marginTop:7}}>Fibre dosage cross-check: {fmt(row.recordedTicketQuantity)} kg recorded on {row.inferredFibre.observed} tickets; {row.inferredFibre.inferred} more loads estimated at {fmt(row.inferredFibre.dosage)} kg/m³. Total {fmt(row.inferredFibre.predicted)} kg agrees with invoice. Estimated from ticket data — verify against original slips if needed.</div>}
               <div style={{display:"flex",gap:16,flexWrap:"wrap",fontSize:12,color:C.sub,marginTop:6}}>{(row.hasTicketQuantity||row.hasInvoiceQuantity)&&<><span>Tickets: <b style={{color:C.text}}>{row.hasTicketQuantity?`${fmt(row.ticketQuantity)} ${row.unit}`:"not shown"}</b></span><span>Invoice: <b style={{color:C.text}}>{row.hasInvoiceQuantity?`${fmt(row.invoiceQuantity)} ${row.unit}`:"not shown"}</b></span>{row.hasTicketQuantity&&row.hasInvoiceQuantity&&<span>Difference: <b style={{color:row.quantityMismatch?C.red:C.green}}>{row.difference>0?"+":""}{fmt(row.difference)} {row.unit}</b></span>}</>}{row.ticketRate!=null&&row.invoiceRate!=null&&<span>Rate: <b style={{color:row.rateMismatch?C.red:C.green}}>{money(row.ticketRate)} ticket / {money(row.invoiceRate)} invoice</b></span>}{row.ticketAmount>0&&row.invoiceAmount>0&&<span>Amount: <b style={{color:row.amountMismatch?C.red:C.green}}>{money(row.ticketAmount)} ticket / {money(row.invoiceAmount)} invoice</b></span>}{potential!=null&&<span>Potential excess: <b style={{color:C.red}}>{money(potential)}</b></span>}</div>
             </div>;
           })}
@@ -3172,6 +3271,7 @@ Screenshot attached: Yes / No`}</pre>
         {TAB("dashboard","📊 Dashboard")}
         {TAB("tickets",`🧾 Tickets (${tickets.length})${mpaMismatches.length>0?" ⚠":""}`)}
         {TAB("invoices",`💰 Invoices (${invoices.length})${invoicesWithIssues>0?` ⚠${invoicesWithIssues}`:""}`)}
+        {TAB("costs","📈 Invoiced Costs")}
         {TAB("remaining","🔮 Forecast & Remaining")}
         {TAB("pumping","💧 Pumping")}
         {TAB("testing",`🔬 Testing (${tests.length})`)}
@@ -3431,6 +3531,35 @@ Screenshot attached: Yes / No`}</pre>
                 </div>;
               })}</div>;
             })()}
+          </div>
+        )}
+
+        {tab==="costs"&&(
+          <div>
+            <div style={{display:'flex',justifyContent:'space-between',gap:12,alignItems:'center',flexWrap:'wrap',marginBottom:18}}>
+              <div><div style={{fontSize:20,fontWeight:800}}>Invoiced Cost Breakdown</div><div style={{color:C.sub,fontSize:12}}>Actual invoice lines · Before HST · Not a payment ledger</div></div>
+              <button onClick={()=>{
+                const wb=XLSX.utils.book_new();
+                const add=(name,data)=>XLSX.utils.book_append_sheet(wb,XLSX.utils.json_to_sheet(data.length?data:[{Note:'No data'}]),name);
+                add('Categories',costReport.categories.map(c=>({Category:c.label,Type:c.kind,'Invoiced Before HST':Math.round(c.amount*100)/100,Quantities:Object.entries(c.quantities).map(([unit,qty])=>`${qty.toFixed(2)} ${unit}`).join('; ')})));
+                add('Monthly',costReport.months.map(m=>({Month:m.month,'Net Invoiced':Math.round(m.total*100)/100,'Admixture and Weather Extras':Math.round(m.extras*100)/100,'Cold Associated':Math.round(m.cold*100)/100,'Hot Associated':Math.round(m.hot*100)/100,'Concrete m3':Math.round(m.concreteM3*100)/100,'Extras per Concrete m3':m.concreteM3?Math.round(m.extras/m.concreteM3*100)/100:''})));
+                add('Invoice Lines',costReport.rows.map(r=>({Invoice:r.invoice,'Invoice Date':r.date,Description:r.description,Category:r.label,Quantity:r.quantity||'',Unit:r.unit,'Amount Before HST':Math.round(r.amount*100)/100,Source:r.source})));
+                XLSX.writeFile(wb,`Fortuna_Invoiced_Costs_${new Date().toISOString().slice(0,10)}.xlsx`);
+              }} style={{background:C.green,color:'#052e16',border:0,borderRadius:9,padding:'10px 16px',cursor:'pointer',fontWeight:800}}>⬇ Export Cost Breakdown</button>
+            </div>
+            <div style={{display:'flex',gap:12,flexWrap:'wrap',marginBottom:16}}>
+              <Stat label="Gross invoiced · pre-HST" value={money(costReport.gross)} color={C.blue}/>
+              <Stat label="Credit memos · pre-HST" value={money(costReport.credits)} color={C.green}/>
+              <Stat label="Net invoiced · pre-HST" value={money(costReport.net)} color={C.teal}/>
+            </div>
+            <div style={{background:C.card,border:`1px solid ${C.border}`,padding:16,borderRadius:12,marginBottom:15}}>
+              <div style={{fontSize:12,color:C.sub,marginBottom:12}}>Costs are grouped from Ocean's saved invoice line descriptions. Waterproofing is tracked across every level. Grout is included in billed costs but excluded from structural poured volume. Credits are shown separately rather than assigned to a material without supporting details.</div>
+              <div style={{display:'flex',gap:8,flexWrap:'wrap'}}>{[['categories','By Category'],['monthly','Monthly / Seasonal'],['details','Invoice Lines']].map(([key,label])=><button key={key} onClick={()=>setCostView(key)} style={{background:costView===key?C.blue:C.card2,color:C.text,border:`1px solid ${C.border}`,padding:'8px 12px',borderRadius:8,cursor:'pointer',fontWeight:700}}>{label}</button>)}</div>
+            </div>
+            {costView==='categories'&&<div style={{background:C.card,border:`1px solid ${C.border}`,borderRadius:12,padding:18,overflowX:'auto'}}><div style={{fontWeight:800,marginBottom:12}}>Cost categories</div><table style={{width:'100%',borderCollapse:'collapse',fontSize:13}}><thead><tr style={{textAlign:'left',color:C.sub}}><th style={{padding:10}}>Category</th><th style={{padding:10}}>Invoiced quantity (from invoice)</th><th style={{padding:10,textAlign:'right'}}>Amount before HST</th></tr></thead><tbody>{costReport.categories.map(c=><tr key={c.key} style={{borderTop:`1px solid ${C.border}`}}><td style={{padding:10}}>{c.label}</td><td style={{padding:10,color:C.sub}}>{Object.entries(c.quantities).map(([unit,qty])=>`${qty.toFixed(2)} ${unit}`).join(' · ')||'—'}</td><td style={{padding:10,textAlign:'right',fontWeight:700,color:c.amount<0?C.green:C.text}}>{c.amount<0?'-':''}{money(Math.abs(c.amount))}</td></tr>)}</tbody><tfoot><tr style={{borderTop:`2px solid ${C.blue}`}}><td style={{padding:12,fontWeight:800}}>Net invoiced</td><td></td><td style={{padding:12,textAlign:'right',fontWeight:800}}>{money(costReport.reconciled)}</td></tr></tfoot></table></div>}
+            {costView==='monthly'&&<div style={{background:C.card,border:`1px solid ${C.border}`,borderRadius:12,padding:18,overflowX:'auto'}}><div style={{fontWeight:800,marginBottom:6}}>Monthly admixture & weather-related costs</div><div style={{fontSize:12,color:C.sub,marginBottom:12}}>Grouped by invoice month (delivery date may differ). Cold/hot describes typical product use, not proven weather causation. The per-m³ measure is indicative only when concrete and extras appear on invoices in the same month.</div><table style={{width:'100%',borderCollapse:'collapse',fontSize:12}}><thead><tr style={{color:C.sub,textAlign:'right'}}>{['Month','Net billed','Additives / specialty','Cold-associated','Hot-associated','Concrete m³','Extras / m³'].map(x=><th key={x} style={{padding:9}}>{x}</th>)}</tr></thead><tbody>{costReport.months.map(m=><tr key={m.month} style={{borderTop:`1px solid ${C.border}`,textAlign:'right'}}><td style={{padding:9}}>{m.month}</td><td style={{padding:9}}>{money(m.total)}</td><td style={{padding:9}}>{money(m.extras)}</td><td style={{padding:9}}>{money(m.cold)}</td><td style={{padding:9}}>{money(m.hot)}</td><td style={{padding:9}}>{m.concreteM3.toFixed(2)}</td><td style={{padding:9}}>{m.concreteM3?money(m.extras/m.concreteM3):'—'}</td></tr>)}</tbody></table></div>}
+            {costView==='details'&&<div style={{background:C.card,border:`1px solid ${C.border}`,borderRadius:12,padding:18,overflowX:'auto'}}><div style={{fontWeight:800,marginBottom:12}}>Supporting invoice charges</div><table style={{width:'100%',borderCollapse:'collapse',fontSize:12}}><thead><tr style={{color:C.sub,textAlign:'left'}}>{['Invoice','Date','Description','Category','Quantity','Amount'].map(t=><th key={t} style={{padding:8}}>{t}</th>)}</tr></thead><tbody>{costReport.rows.map((r,i)=><tr key={i} style={{borderTop:`1px solid ${C.border}`}}><td style={{padding:8}}>{r.invoice}</td><td style={{padding:8}}>{r.date}</td><td style={{padding:8}}>{r.description}</td><td style={{padding:8}}>{r.label}</td><td style={{padding:8}}>{r.quantity?`${r.quantity} ${r.unit}`:'—'}</td><td style={{padding:8,textAlign:'right'}}>{money(r.amount)}</td></tr>)}</tbody></table></div>}
+            <div style={{color:Math.abs(costReport.net-costReport.reconciled)<0.02?C.green:C.yellow,fontSize:12,marginTop:12}}>Reconciliation: category total {money(costReport.reconciled)} / net invoiced {money(costReport.net)} {Math.abs(costReport.net-costReport.reconciled)<0.02?'✓ Balanced':'⚠ Review extraction or rounding'}</div>
           </div>
         )}
 
