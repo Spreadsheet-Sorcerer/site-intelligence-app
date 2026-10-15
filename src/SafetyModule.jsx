@@ -8,7 +8,7 @@ const secondary={...btn,background:'#233246',color:UI.text};
 const initial={workers:[],orientations:[]};
 const stamp=()=>new Date().toISOString();
 const id=()=>globalThis.crypto?.randomUUID?.()||`${Date.now()}-${Math.random().toString(36).slice(2)}`;
-const shuffle=arr=>[...arr].sort(()=>Math.random()-.5);
+const shuffle=arr=>{const out=[...arr];for(let i=out.length-1;i>0;i--){const j=Math.floor(Math.random()*(i+1));[out[i],out[j]]=[out[j],out[i]];}return out;};
 // Source: Southwest Site Orientation & Specific Guidelines, pages 1-3.
 // Content must be reviewed by the safety manager before external deployment.
 export const SECTIONS=[
@@ -111,11 +111,499 @@ const EXTRA_QUESTIONS = [
  ]
 ];
 EXTRA_QUESTIONS.forEach((newQs,i)=>{newQs.forEach(([topic,prompt,options,correct])=>SECTIONS[i].questions.push([prompt,options,correct,topic]));});
+
+// v21.6: additional original, site-orientation-specific questions.
+// The worker answers only TWO different topics after each of the six sections.
+const FORTUNA_QUESTION_ADDITIONS = [
+  [
+    [
+      "The new guy shows up in shorts because it is hot. What should he do?",
+      [
+        "Change into clothing that meets the site rules before starting.",
+        "Tell the foreman shorts count as ventilation.",
+        "Keep them on until someone from the office shows up."
+      ],
+      0,
+      "work-clothes"
+    ],
+    [
+      "Your high-vis vest is in the truck. What do you do?",
+      [
+        "Get the required high-visibility clothing before entering the work area.",
+        "Stand beside someone wearing two vests.",
+        "Tell the new guy to wave whenever equipment comes by."
+      ],
+      0,
+      "high-vis"
+    ],
+    [
+      "You can see the steel toe through a worn-out boot. What is the move?",
+      [
+        "Replace the damaged safety footwear before working.",
+        "Paint the steel the same colour as the boot.",
+        "Tell everyone they were expensive, so they must still be good."
+      ],
+      0,
+      "footwear"
+    ],
+    [
+      "A worker says his hard hat is fine even though it is visibly damaged. What should happen?",
+      [
+        "Remove it from service and replace it.",
+        "Trust him; he has worn that one since 2004.",
+        "Turn it around so nobody sees the damage."
+      ],
+      0,
+      "hard-hat"
+    ],
+    [
+      "You are handling sharp material but only have unsuitable gloves. What should you do?",
+      [
+        "Get gloves appropriate for the material and task.",
+        "Use the gloves you found in the lunchroom.",
+        "Ask the new guy to carry the sharp end."
+      ],
+      0,
+      "gloves"
+    ],
+    [
+      "The crew is about to make a chop-saw cut. What protection is needed?",
+      [
+        "The appropriate eye protection and face shield.",
+        "Stand behind the guy who owns the saw.",
+        "Squint; the other trade has been doing it for years."
+      ],
+      0,
+      "eye"
+    ]
+  ],
+  [
+    [
+      "Someone lights a dart in an unfinished suite. What is the rule?",
+      [
+        "Smoking is only allowed in the permitted areas.",
+        "If the drywall is not up yet, it counts as outdoors.",
+        "It is fine if the foreman wants one too."
+      ],
+      0,
+      "smoking"
+    ],
+    [
+      "A worker says an unfinished suite toilet is closer than the site facilities. What do you tell him?",
+      [
+        "Use the designated site toilet facilities.",
+        "Put a handwritten RESERVED sign on the suite door.",
+        "Ask the new guy whether the plumbing works yet."
+      ],
+      0,
+      "toilets"
+    ],
+    [
+      "The lunch table is covered in garbage and used PPE. What should happen?",
+      [
+        "Clean the eating area and remove the waste and PPE.",
+        "Leave it; someone always cleans up after the concrete crew.",
+        "Stack the garbage neatly so it looks intentional."
+      ],
+      0,
+      "eating"
+    ],
+    [
+      "A posted sign says the area is restricted. What do you do?",
+      [
+        "Follow the sign and obtain authorization before entering.",
+        "Walk in backward so the sign cannot see you.",
+        "Follow the guy who says he has been going through there all week."
+      ],
+      0,
+      "signs"
+    ],
+    [
+      "The shortest route crosses red danger tape. What is the correct move?",
+      [
+        "Stay out unless you are authorized to enter.",
+        "Duck under; you only need to grab one thing.",
+        "Send the new guy through to see what is happening."
+      ],
+      0,
+      "red-tape"
+    ],
+    [
+      "Your trade has made a floor opening. What is your responsibility?",
+      [
+        "Make sure it is properly secured and marked under site procedures.",
+        "Put your toolbox next to it so people know.",
+        "Assume the next trade will notice it."
+      ],
+      0,
+      "openings"
+    ],
+    [
+      "The hazard is resolved but yesterday’s caution tape is still up. What should happen?",
+      [
+        "Have it removed when authorized and safe to do so.",
+        "Leave it until someone eventually gets curious.",
+        "Move the tape to an unrelated area."
+      ],
+      0,
+      "tape-removal"
+    ]
+  ],
+  [
+    [
+      "A worker says a small cut is too minor to report. What is required?",
+      [
+        "Report every site injury to the safety advisor as soon as possible that day.",
+        "Wait until there are at least three injuries to report together.",
+        "Tell the foreman only if it ruins your shirt."
+      ],
+      0,
+      "injury-report"
+    ],
+    [
+      "You find unsecured material beside an open edge. What should you do?",
+      [
+        "Keep clear and report the hazard and exact location.",
+        "Kick it a little farther from where you are standing.",
+        "Say nothing because the material belongs to another trade."
+      ],
+      0,
+      "unsafe-condition"
+    ],
+    [
+      "You have not been told the hazards of a new task. What should you do?",
+      [
+        "Ask for the hazards and safe work procedure before starting.",
+        "Watch the first person do it and copy whatever happens.",
+        "Tell the foreman you have done something similar once."
+      ],
+      0,
+      "know"
+    ],
+    [
+      "A foreman insists you do work you believe is unsafe. What is your next step?",
+      [
+        "Use the right-to-refuse process and raise the safety concern.",
+        "Do it; the foreman said it will only take five minutes.",
+        "Send the new guy first and see how it goes."
+      ],
+      0,
+      "refuse"
+    ],
+    [
+      "Someone tells you safety concerns are management’s problem. What is true?",
+      [
+        "Workers have the right to participate in workplace health and safety.",
+        "Only the person holding the clipboard gets an opinion.",
+        "It becomes your problem only after something falls."
+      ],
+      0,
+      "participate"
+    ],
+    [
+      "You want to raise a safety concern about an ongoing practice. How do you do it?",
+      [
+        "Use the established reporting process and safety contacts.",
+        "Write it on a piece of plywood and leave it by the trailer.",
+        "Wait until the crew has stopped talking about the last complaint."
+      ],
+      0,
+      "complaints"
+    ],
+    [
+      "Your supervisor asks where an unsafe condition is. What should you provide?",
+      [
+        "The location and a clear description of the hazard.",
+        "Just say somewhere on P2 and hang up.",
+        "Tell them which trade you think caused it, but not where it is."
+      ],
+      0,
+      "hazard-location"
+    ],
+    [
+      "Who must be notified about a minor injury sustained on site?",
+      [
+        "The site safety advisor as soon as possible that same day.",
+        "Only the guy who drives the lunch truck.",
+        "The new guy when he returns from the supply run."
+      ],
+      0,
+      "site-advisor"
+    ]
+  ],
+  [
+    [
+      "You hear three short air-horn blasts. What does that signal?",
+      [
+        "First aid is being summoned.",
+        "The foreman is looking for his tape measure again.",
+        "The concrete truck has finally found the entrance."
+      ],
+      0,
+      "horn-firstaid"
+    ],
+    [
+      "One long air-horn blast sounds. What must workers do?",
+      [
+        "Follow the evacuation procedure.",
+        "Finish your cut; you are almost done.",
+        "Ask everyone whether the horn was meant for their trade."
+      ],
+      0,
+      "horn-evac"
+    ],
+    [
+      "You evacuate and see people heading straight to their cars. Where should you go?",
+      [
+        "Report to the designated off-site muster point.",
+        "Go home; your shift must be over.",
+        "Follow the guy with the cleanest truck."
+      ],
+      0,
+      "muster"
+    ],
+    [
+      "Before starting work, what should you confirm about first aid equipment?",
+      [
+        "Know where the current first aid kits are located.",
+        "Assume every foreman has one in his lunch box.",
+        "Ask the new guy whether he brought a bandage."
+      ],
+      0,
+      "firstaid-kit"
+    ],
+    [
+      "Where should you look for a fire extinguisher in an emergency?",
+      [
+        "At the locations identified during the site induction.",
+        "In whichever trade has the most expensive tools.",
+        "Behind the pile everyone has been walking around for a month."
+      ],
+      0,
+      "extinguishers"
+    ],
+    [
+      "A coworker asks where the emergency eyewash is. What should you know?",
+      [
+        "Its current site location and how to get to it.",
+        "Tell him to try the water cooler.",
+        "Say the electrician probably moved it."
+      ],
+      0,
+      "eyewash"
+    ],
+    [
+      "What should workers understand about the site trailer radio?",
+      [
+        "It is one of the ways to summon emergency assistance.",
+        "It is only for asking where the coffee run went.",
+        "It belongs to whoever gets there first."
+      ],
+      0,
+      "radio"
+    ],
+    [
+      "What first-aid arrangement is required of each trade under the site form?",
+      [
+        "A designated first-aid-trained person on site as required.",
+        "The oldest person automatically becomes the first aider.",
+        "The new guy gets the job because he watches medical shows."
+      ],
+      0,
+      "firstaid-trained"
+    ]
+  ],
+  [
+    [
+      "Your harness was last used by someone else. What do you do first?",
+      [
+        "Inspect it and confirm it is suitable before using it.",
+        "Ask whether the other guy made it home yesterday.",
+        "Use it; he has been in the trade for twenty years."
+      ],
+      0,
+      "fall-inspect"
+    ],
+    [
+      "The required fall protection is missing, but the foreman wants the work done. What do you do?",
+      [
+        "Stop until the proper fall protection is in place.",
+        "Tell him you have been doing this for twenty years.",
+        "Send the new guy first; if he makes it, you are probably good."
+      ],
+      0,
+      "edge"
+    ],
+    [
+      "A crew removes a guardrail to bring materials through. What happens next?",
+      [
+        "Keep the area protected and restore the required guardrail as soon as safe.",
+        "Put a traffic cone where it used to be.",
+        "Leave it for the trade that comes after you."
+      ],
+      0,
+      "guardrail"
+    ],
+    [
+      "You find a step ladder being used half-folded against a wall. What is correct?",
+      [
+        "Use it fully open with spreaders locked, as required.",
+        "Keep using it; the guy says it has always worked.",
+        "Ask someone to lean on the bottom rung."
+      ],
+      0,
+      "stepladder"
+    ],
+    [
+      "An access ladder shifts when someone steps on it. What is needed?",
+      [
+        "Secure it against movement under the safe work procedure.",
+        "Wedge a loose piece of drywall under one leg.",
+        "Tell people to climb it gently."
+      ],
+      0,
+      "ladder-tie"
+    ],
+    [
+      "A machine operator has not acknowledged you. What do you do?",
+      [
+        "Stay clear until you make eye contact and can move safely.",
+        "Walk behind the machine; he probably heard you.",
+        "Wave at the other labourer and take your chances."
+      ],
+      0,
+      "equipment-eye"
+    ],
+    [
+      "A machine is reversing and the operator cannot see the route. What is required?",
+      [
+        "Use an appropriate spotter under the site procedure.",
+        "Shout louder and keep walking behind it.",
+        "Ask the new guy to stand where nobody can see him."
+      ],
+      0,
+      "spotter"
+    ]
+  ],
+  [
+    [
+      "You finish your work and leave offcuts blocking the walkway. What should you do?",
+      [
+        "Clean up the obstruction and keep the walkway clear.",
+        "Leave it; the labourers need something to do.",
+        "Push it over by the drywallers’ material."
+      ],
+      0,
+      "walkway"
+    ],
+    [
+      "You have a pile of jobsite garbage at the end of your shift. Where does it go?",
+      [
+        "In the designated waste bins, as required.",
+        "Behind the other trade’s material stack.",
+        "In the nearest empty room until someone complains."
+      ],
+      0,
+      "bins"
+    ],
+    [
+      "Your crew says the toolbox meeting is optional because everyone knows the rules. What applies?",
+      [
+        "Attend the required documented weekly toolbox meeting.",
+        "Skip it; the foreman can just tell everyone later.",
+        "Send the new guy to take notes for all twenty of you."
+      ],
+      0,
+      "toolbox"
+    ],
+    [
+      "A worker says his way of doing a task is faster than the site procedure. What matters?",
+      [
+        "Follow the current site-specific safe work procedure.",
+        "He has twenty years of experience, so rules no longer apply.",
+        "Let him finish before anyone asks questions."
+      ],
+      0,
+      "procedure"
+    ],
+    [
+      "You find a breaker switched off and want power back. What do you do?",
+      [
+        "Leave breakers to authorized personnel.",
+        "Flip switches until the lights come on.",
+        "Ask the drywall crew whether anyone knows which one it is."
+      ],
+      0,
+      "electrical"
+    ],
+    [
+      "A site heater stops working. What is the proper response?",
+      [
+        "Report it and leave repairs to authorized personnel.",
+        "Give it a kick; that fixed the last one.",
+        "Get the new guy to try a different plug."
+      ],
+      0,
+      "lights"
+    ],
+    [
+      "Someone says a harassing comment is fine because it was a joke. What is the rule?",
+      [
+        "Harassment is not tolerated on site.",
+        "It is fine as long as the foreman laughed.",
+        "It only counts if somebody puts it in writing."
+      ],
+      0,
+      "harassment"
+    ]
+  ]
+];
+FORTUNA_QUESTION_ADDITIONS.forEach((questions,i)=>SECTIONS[i].questions.push(...questions));
+
+// Retire forced punchlines; keep the actual safe answers and site procedures.
+const REPLACEMENTS = [
+  [/\bsmoko\b/gi,'the break'],
+  [/hope gravity takes a day off/gi,'tell the foreman you have done it for twenty years'],
+  [/experience beats gravity/gi,'twenty years of experience means the rule does not apply'],
+  [/Trust twenty-five years of experience over gravity/gi,'Trust the guy who says he has done it this way for twenty-five years'],
+  [/Have a Monster and hope for the best/gi,'Tell the foreman it has been fine for years'],
+  [/Put a Monster can beside it as a warning/gi,'Put a traffic cone beside it and call it done'],
+  [/have a dart and debate whose job it is/gi,'argue about which trade is responsible and leave it open'],
+  [/Go for a dart and see whether it fixes itself/gi,'leave it for the next trade'],
+  [/Go for a dart and see whether they move/gi,'leave it for the next trade'],
+  [/site pizza party/gi,'toolbox meeting'],
+  [/pizza party/gi,'toolbox meeting'],
+];
+SECTIONS.forEach(section=>{
+  section.questions=section.questions.map(q=>[
+    REPLACEMENTS.reduce((t,[rx,repl])=>t.replace(rx,repl),q[0]),
+    q[1].map(option=>REPLACEMENTS.reduce((t,[rx,repl])=>t.replace(rx,repl),option)),
+    q[2],q[3]
+  ]);
+  // Keep exactly twenty questions per section while retaining the original handout-based material.
+  section.questions=section.questions.slice(0,20);
+});
+
 // Group equivalent questions by hazard/topic, including earlier v21.2 questions.
 export function questionTopic(q){if(q[3])return q[3];const x=q[0].toLowerCase();if(/floor opening|unsecured opening/.test(x))return 'openings';if(/smok/.test(x))return 'smoking';if(/hard hat/.test(x))return 'hard-hat';if(/injur/.test(x))return 'injury-report';if(/air.horn|blasts/.test(x))return /three short|first aid/.test(x)?'horn-firstaid':'horn-evac';if(/guardrail/.test(x))return 'guardrail';if(/walkway/.test(x))return 'walkway';if(/fall.protection|unprotected edge/.test(x))return 'edge';if(/step ladder/.test(x))return 'stepladder';if(/eye|chop.saw/.test(x))return 'eye';if(/respirator/.test(x))return 'respirator';if(/footwear|boot/.test(x))return 'footwear';return x;}
-export function pickDistinctQuestions(index,count=2){const list=shuffle(SECTIONS[index].questions);const seen=new Set();return list.filter(q=>{const topic=questionTopic(q);if(seen.has(topic))return false;seen.add(topic);return true}).slice(0,count)}
+const previousQuestionPicks=new Map();
+export function pickDistinctQuestions(index,count=2){
+  const bank=SECTIONS[index].questions;
+  const previous=previousQuestionPicks.get(index)||[];
+  const unseen=shuffle(bank.filter(q=>!previous.includes(q[0])));
+  const candidates=[...unseen,...shuffle(bank.filter(q=>previous.includes(q[0])))];
+  const selected=[],seenTopics=new Set();
+  for(const q of candidates){
+    const topic=questionTopic(q);
+    if(seenTopics.has(topic))continue;
+    selected.push(q);seenTopics.add(topic);
+    if(selected.length===count)break;
+  }
+  previousQuestionPicks.set(index,selected.map(q=>q[0]));
+  return selected;
+}
 const QUESTIONS_PER_SECTION=2;
-function makeAttempt(workerId){return {id:id(),worker_id:workerId,version:'Southwest Orientation v21.3 draft',status:'in_progress',approval_status:'pending',started_at:stamp(),completed_at:null,sections:[],signature:'',acknowledged:false};}
+function makeAttempt(workerId){return {id:id(),worker_id:workerId,version:'Southwest Orientation v21.6 test',status:'in_progress',approval_status:'pending',started_at:stamp(),completed_at:null,sections:[],signature:'',acknowledged:false};}
 function daysTo(date){if(!date)return null;const due=new Date(date+'T12:00:00'),now=new Date();now.setHours(12,0,0,0);return Math.round((due-now)/86400000);}
 const cleanName=(s)=>String(s||'').trim().toLowerCase().replace(/\s+/g,' ');
 function formItem(label,value,onChange,opts){return <label style={{fontSize:12,color:UI.sub,display:'grid',gap:5}}>{label}{opts?<select value={value||''} onChange={e=>onChange(e.target.value)} style={field}><option value="">Select</option>{opts.map(o=><option key={o} value={o}>{o}</option>)}</select>:<input value={value||''} onChange={e=>onChange(e.target.value)} style={field}/>}</label>}
@@ -149,7 +637,7 @@ function exportSheet(){const wb=XLSX.utils.book_new();const rows=workers.map(w=>
 if(!role)return <div style={{minHeight:'100vh',background:UI.bg,color:UI.text,padding:'8vh 24px',fontFamily:'Segoe UI,sans-serif'}}><div style={{...card,maxWidth:470,margin:'auto'}}><button onClick={onBack} style={secondary}>← Back</button><h2>Southwest Safety & Orientations</h2><p style={{color:UI.sub}}>Internal staff sign-in. Public worker access is available only in this test environment.</p><form onSubmit={e=>{e.preventDefault();signIn()}}><label>Staff or manager access key<input type="password" autoComplete="off" value={login} onChange={e=>setLogin(e.target.value)} style={{...field,marginTop:8}}/></label><button disabled={busy||!login} style={{...btn,marginTop:15}}>Sign in</button></form>{error&&<p style={{color:UI.red}}>{error}</p>}</div></div>;
 const nav=[['dashboard','Overview'],['workers','Workers'],['reviews',`Orientations (${pending.length})`],['certificates',`Certificates (${pendingTickets.length})`],['expiry',`Expiry (${expiring.length})`]];
 return <div style={{minHeight:'100vh',background:UI.bg,color:UI.text,paddingBottom:60,fontFamily:'Segoe UI,sans-serif'}}>
-<div style={{padding:'20px 26px',borderBottom:`1px solid ${UI.border}`,display:'flex',justifyContent:'space-between',flexWrap:'wrap',gap:10}}><div><button style={secondary} onClick={onBack}>← Modules</button><h2 style={{margin:'12px 0 4px'}}>Worker Safety & Orientations <small style={{color:UI.teal}}>v21.5</small></h2><div style={{color:UI.sub,fontSize:12}}>Fortuna · {role==='manager'?'Safety manager':'Southwest staff'} · Internal testing</div></div><div style={{display:'flex',gap:8,alignItems:'center',flexWrap:'wrap'}}><button style={secondary} onClick={reload}>↻ Refresh</button><button style={secondary} onClick={onLegacy}>Existing Certificate Register</button><button style={secondary} onClick={()=>{setRole('');setKey('')}}>Sign out</button></div></div>
+<div style={{padding:'20px 26px',borderBottom:`1px solid ${UI.border}`,display:'flex',justifyContent:'space-between',flexWrap:'wrap',gap:10}}><div><button style={secondary} onClick={onBack}>← Modules</button><h2 style={{margin:'12px 0 4px'}}>Worker Safety & Orientations <small style={{color:UI.teal}}>v21.6</small></h2><div style={{color:UI.sub,fontSize:12}}>Fortuna · {role==='manager'?'Safety manager':'Southwest staff'} · Internal testing</div></div><div style={{display:'flex',gap:8,alignItems:'center',flexWrap:'wrap'}}><button style={secondary} onClick={reload}>↻ Refresh</button><button style={secondary} onClick={onLegacy}>Existing Certificate Register</button><button style={secondary} onClick={()=>{setRole('');setKey('')}}>Sign out</button></div></div>
 <div style={{display:'flex',gap:7,padding:'12px 24px',overflowX:'auto',borderBottom:`1px solid ${UI.border}`}}>{nav.map(([key,label])=><button key={key} onClick={()=>{setTab(key);setError('')}} style={tab===key?btn:secondary}>{label}</button>)}</div>
 {workerLink&&<div style={{margin:'10px 24px',color:UI.green}}>{workerLink}</div>}{error&&<div role="alert" style={{margin:'15px 24px',padding:12,background:'#461f26',color:'#fecaca',borderRadius:8}}>{error}</div>}{busy&&<div style={{margin:'12px 24px',color:UI.sub}}>Saving / loading…</div>}
 <main style={{padding:'24px',maxWidth:1200,margin:'auto'}}>
