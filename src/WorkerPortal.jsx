@@ -1,5 +1,5 @@
 import {useEffect,useRef,useState} from 'react';
-import {SECTIONS,pickDistinctQuestions} from './OrientationContent.js';
+import {SECTIONS,pickDistinctQuestions} from './SafetyModule.jsx';
 const bg='#0A0F1E',panel='#111827',teal='#14B8A6',light='#F9FAFB',muted='#AAB5C5';
 const input={width:'100%',boxSizing:'border-box',padding:13,borderRadius:9,background:'#0A0F1E',border:'1px solid #334155',color:light,fontSize:16};
 const button={background:teal,border:0,borderRadius:9,color:'#052722',fontWeight:800,padding:'13px 17px',cursor:'pointer',fontSize:15};
