@@ -8,10 +8,10 @@ export default async function handler(req,res){res.setHeader('Cache-Control','no
 try{const rows=await db('GET');if(rows.length!==1)return res.status(409).json({error:'Missing safety_data row. Run the included SQL migration.'});const record=rows[0];if(req.method==='GET')return res.status(200).json({...record,role:who});
 const {action,payload,revision,workerId,decision,reviewNote,ticketId,fields}=req.body||{};
 if(action==='worker_link'){
-  if(!process.env.SAFETY_PORTAL_SIGNING_KEY || process.env.SAFETY_PORTAL_SIGNING_KEY.length<32)return res.status(503).json({error:'Worker portal signing key not configured'});
+  if(!process.env.WORKER_LINK_SIGNING_KEY || process.env.WORKER_LINK_SIGNING_KEY.length<32)return res.status(503).json({error:'Worker return-link signing key not configured'});
   if(!(record.payload?.workers||[]).some(w=>String(w.id)===String(workerId)))return res.status(404).json({error:'Worker not found'});
   const p=Buffer.from(JSON.stringify({workerId:String(workerId),exp:Date.now()+12*60*60*1000})).toString('base64url');
-  const mac=createHmac('sha256',process.env.SAFETY_PORTAL_SIGNING_KEY).update(p).digest('base64url');
+  const mac=createHmac('sha256',process.env.WORKER_LINK_SIGNING_KEY).update(p).digest('base64url');
   return res.status(200).json({token:`${p}.${mac}`,expires_hours:12});
 }
 if(Number(revision)!==Number(record.revision))return res.status(409).json({error:'Someone updated these records. Refresh before saving.'});let next;
