@@ -33,7 +33,13 @@ if(action==='certificate_view'){
  if(!r.ok)return res.status(502).json({error:'Could not open original certificate'});
  const result=await r.json();
  if(!result.signedURL)return res.status(502).json({error:'Private certificate link unavailable'});
- return res.status(200).json({url:new URL(result.signedURL,`${base}/storage/v1/`).href});
+ // Supabase returns /object/sign/...; leading / would otherwise drop /storage/v1/.
+ const signedPath=String(result.signedURL).trim();
+ const signedUrl=/^https?:\/\//i.test(signedPath)
+  ? new URL(signedPath)
+  : new URL(`${base}/storage/v1/${signedPath.replace(/^\/+/, '').replace(/^storage\/v1\//, '')}`);
+ if(signedUrl.origin!==base||!signedUrl.pathname.startsWith('/storage/v1/object/sign/'))return res.status(502).json({error:'Invalid private certificate link returned by storage'});
+ return res.status(200).json({url:signedUrl.href});
 }
 if(action==='worker_link'){
   if(!process.env.WORKER_LINK_SIGNING_KEY || process.env.WORKER_LINK_SIGNING_KEY.length<32)return res.status(503).json({error:'Worker return-link signing key not configured'});
