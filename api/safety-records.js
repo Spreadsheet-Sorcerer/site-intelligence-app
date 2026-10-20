@@ -7,6 +7,20 @@ async function db(method,body){const url=process.env.SUPABASE_URL,key=process.en
 export default async function handler(req,res){res.setHeader('Cache-Control','no-store');const who=role(req);if(!who)return res.status(401).json({error:'Safety staff sign-in required'});if(!['GET','POST'].includes(req.method))return res.status(405).json({error:'Unsupported method'});
 try{const rows=await db('GET');if(rows.length!==1)return res.status(409).json({error:'Missing safety_data row. Run the included SQL migration.'});const record=rows[0];if(req.method==='GET')return res.status(200).json({...record,role:who});
 const {action,payload,revision,workerId,decision,reviewNote,ticketId,fields}=req.body||{};
+if(action==='certificate_view'){
+ const w=(record.payload?.workers||[]).find(x=>String(x.id)===String(workerId));
+ const t=(w?.tickets||[]).find(x=>String(x.id)===String(ticketId));
+ if(!t)return res.status(404).json({error:'Certificate not found'});
+ const path=t.attachment?.storage_path;
+ if(typeof path!=='string'||!/^workers\/[0-9a-f-]{36}\/[0-9a-f-]{36}\.(pdf|jpg|png|webp)$/.test(path)||!path.startsWith(`workers/${workerId}/`))return res.status(400).json({error:'No private original attached'});
+ const base=new URL(process.env.SUPABASE_URL).origin,key=process.env.SUPABASE_SERVICE_KEY;
+ const bucket='fortuna-worker-certificates';
+ const r=await fetch(`${base}/storage/v1/object/sign/${bucket}/${path}`,{method:'POST',headers:{apikey:key,Authorization:`Bearer ${key}`,'Content-Type':'application/json'},body:JSON.stringify({expiresIn:120})});
+ if(!r.ok)return res.status(502).json({error:'Could not open original certificate'});
+ const result=await r.json();
+ if(!result.signedURL)return res.status(502).json({error:'Private certificate link unavailable'});
+ return res.status(200).json({url:new URL(result.signedURL,`${base}/storage/v1/`).href});
+}
 if(action==='worker_link'){
   if(!process.env.WORKER_LINK_SIGNING_KEY || process.env.WORKER_LINK_SIGNING_KEY.length<32)return res.status(503).json({error:'Worker return-link signing key not configured'});
   if(!(record.payload?.workers||[]).some(w=>String(w.id)===String(workerId)))return res.status(404).json({error:'Worker not found'});
