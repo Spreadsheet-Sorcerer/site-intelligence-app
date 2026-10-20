@@ -49,6 +49,31 @@ if(action==='worker_link'){
   return res.status(200).json({token:`${p}.${mac}`,expires_hours:12});
 }
 if(Number(revision)!==Number(record.revision))return res.status(409).json({error:'Someone updated these records. Refresh before saving.'});let next;
+if(action==='worker_delete'){
+ if(who!=='manager')return res.status(403).json({error:'Only the safety manager can delete workers'});
+ const w=(record.payload?.workers||[]).find(x=>String(x.id)===String(workerId));
+ if(!w)return res.status(404).json({error:'Worker no longer exists. Refresh the roster.'});
+ const normalize=v=>String(v||'').trim().replace(/\s+/g,' ').toLowerCase();
+ if(normalize(req.body?.confirmName)!==normalize(w.name))return res.status(400).json({error:'Worker name did not match. Nothing was deleted.'});
+ const allWorkers=record.payload.workers||[];
+ const allOrientations=record.payload.orientations||[];
+ const filtered={...record.payload,workers:allWorkers.filter(x=>String(x.id)!==String(workerId)),orientations:allOrientations.filter(x=>String(x.worker_id)!==String(workerId))};
+ const updated=await db('PATCH',{payload:filtered,revision:Number(record.revision)+1});
+ if(updated.length!==1)return res.status(409).json({error:'Worker could not be deleted'});
+ // The database change is authoritative; any storage failure is reported for manual cleanup.
+ const bucket='fortuna-worker-certificates';
+ const files=[...new Set((w.tickets||[]).map(t=>t.attachment?.storage_path).filter(p=>typeof p==='string'&&p.startsWith(`workers/${workerId}/`)&&/^workers\/[0-9a-f-]{36}\/[0-9a-f-]{36}\.(pdf|jpg|png|webp)$/.test(p)))];
+ let warning='';
+ if(files.length){
+  try{
+   const base=new URL(process.env.SUPABASE_URL).origin,serviceKey=process.env.SUPABASE_SERVICE_KEY;
+   const resp=await fetch(`${base}/storage/v1/object/${bucket}`,{method:'DELETE',headers:{apikey:serviceKey,Authorization:`Bearer ${serviceKey}`,'Content-Type':'application/json'},body:JSON.stringify({prefixes:files})});
+   if(!resp.ok)throw Error(`Storage returned ${resp.status}`);
+  }catch(err){console.error('Worker certificate cleanup:',err);warning='Worker removed from the roster, but some original certificate files may remain in private storage. Ask an administrator to review storage cleanup.';}
+ }
+ return res.status(200).json({...updated[0],role:who,warning});
+}
+
 if(action==='save'){
 if(!payload||!Array.isArray(payload.workers)||!Array.isArray(payload.orientations))return res.status(400).json({error:'Invalid record format'});
 // Only a safety manager can change verification fields. Staff may maintain worker and orientation records.
@@ -56,6 +81,7 @@ const old=new Map((record.payload?.orientations||[]).map(o=>[String(o.id),o]));
 for(const entry of payload.orientations){const previous=old.get(String(entry.id));if(previous&&(entry.approval_status!==previous.approval_status||entry.approved_by!==previous.approved_by||entry.approved_at!==previous.approved_at))return res.status(403).json({error:'Use the manager approval action to change orientation verification'});if(!previous&&entry.approval_status==='approved')return res.status(403).json({error:'New orientations cannot start approved'});}
 // Ticket approvals are manager-only and must use the dedicated review action.
 const oldWorkers=new Map((record.payload?.workers||[]).map(w=>[String(w.id),w]));
+for(const previous of oldWorkers.values())if(!payload.workers.some(w=>String(w.id)===String(previous.id)))return res.status(403).json({error:'Use the safety-manager Delete Worker button to remove a worker'});
 for(const w of payload.workers){const oldWorker=oldWorkers.get(String(w.id));const oldTickets=new Map((oldWorker?.tickets||[]).map(t=>[String(t.id),t]));for(const t of w.tickets||[]){const before=oldTickets.get(String(t.id));if(t.status==='verified'&&(!before||before.status!=='verified'))return res.status(403).json({error:'Use manager certificate verification to approve tickets'});if(before?.status==='verified'&&JSON.stringify(before)!==JSON.stringify(t))return res.status(403).json({error:'Verified tickets cannot be changed by an ordinary save'});}}
 // Protect approved records from being removed by ordinary staff.
 for(const p of old.values())if(p.approval_status==='approved'&&!payload.orientations.some(o=>String(o.id)===String(p.id)))return res.status(403).json({error:'Approved orientations cannot be deleted'});
