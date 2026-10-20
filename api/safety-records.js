@@ -7,6 +7,20 @@ async function db(method,body){const url=process.env.SUPABASE_URL,key=process.en
 export default async function handler(req,res){res.setHeader('Cache-Control','no-store');const who=role(req);if(!who)return res.status(401).json({error:'Safety staff sign-in required'});if(!['GET','POST'].includes(req.method))return res.status(405).json({error:'Unsupported method'});
 try{const rows=await db('GET');if(rows.length!==1)return res.status(409).json({error:'Missing safety_data row. Run the included SQL migration.'});const record=rows[0];if(req.method==='GET')return res.status(200).json({...record,role:who});
 const {action,payload,revision,workerId,decision,reviewNote,ticketId,fields}=req.body||{};
+if(action==='certificate_upload_url'){
+ const w=(record.payload?.workers||[]).find(x=>String(x.id)===String(workerId));
+ if(!w)return res.status(404).json({error:'Worker not found'});
+ const allowed={'application/pdf':'pdf','image/jpeg':'jpg','image/png':'png','image/webp':'webp'};
+ const mime=String(req.body?.mime||''),size=Number(req.body?.size);
+ if(!allowed[mime]||!Number.isSafeInteger(size)||size<1||size>10*1024*1024)return res.status(400).json({error:'Select a PDF or photo up to 10 MB'});
+ const {randomUUID}=await import('node:crypto');
+ const storagePath=`workers/${workerId}/${randomUUID()}.${allowed[mime]}`;
+ const base=new URL(process.env.SUPABASE_URL).origin,key=process.env.SUPABASE_SERVICE_KEY;
+ const r=await fetch(`${base}/storage/v1/object/upload/sign/fortuna-worker-certificates/${storagePath}`,{method:'POST',headers:{apikey:key,Authorization:`Bearer ${key}`,'Content-Type':'application/json'},body:'{}'});
+ if(!r.ok)return res.status(502).json({error:'Could not prepare private certificate upload'});
+ const d=await r.json();if(!d.token)return res.status(502).json({error:'Private upload token unavailable'});
+ return res.status(200).json({storagePath,uploadUrl:`${base}/storage/v1/object/upload/sign/fortuna-worker-certificates/${storagePath}?token=${encodeURIComponent(d.token)}`});
+}
 if(action==='certificate_view'){
  const w=(record.payload?.workers||[]).find(x=>String(x.id)===String(workerId));
  const t=(w?.tickets||[]).find(x=>String(x.id)===String(ticketId));
@@ -42,9 +56,9 @@ for(const p of old.values())if(p.approval_status==='approved'&&!payload.orientat
 next={workers:payload.workers,orientations:payload.orientations};
 }else if(action==='ticket_review'){
 if(who!=='manager')return res.status(403).json({error:'Safety manager credentials required'});
-const type=String(fields?.type||'').trim().slice(0,160),holder=String(fields?.holder_name||'').trim().slice(0,160),expiry=String(fields?.expiry_date||'').trim();
+const type=String(fields?.type||'').trim().slice(0,160),holder=String(fields?.holder_name||'').trim().slice(0,160),expiry=String(fields?.expiry_date||'').trim(),issue=String(fields?.issued_date||'').trim();
 if(!type||!holder||!/^\d{4}-\d{2}-\d{2}$/.test(expiry)||Number.isNaN(Date.parse(expiry)))return res.status(400).json({error:'Certificate type, printed name and a valid expiry date are required'});
-let found=false;const workers=(record.payload?.workers||[]).map(w=>String(w.id)===String(workerId)?{...w,tickets:(w.tickets||[]).map(t=>{if(String(t.id)!==String(ticketId))return t;found=true;if(t.status==='verified')throw new Error('Certificate is already verified');return {...t,type,holder_name:holder,expiry_date:expiry,status:'verified',verified_at:new Date().toISOString(),verified_by:'Safety manager'};})}:w);
+let found=false;const workers=(record.payload?.workers||[]).map(w=>String(w.id)===String(workerId)?{...w,tickets:(w.tickets||[]).map(t=>{if(String(t.id)!==String(ticketId))return t;found=true;if(t.status==='verified')throw new Error('Certificate is already verified');return {...t,type,holder_name:holder,issued_date:issue,expiry_date:expiry,status:'verified',verified_at:new Date().toISOString(),verified_by:'Safety manager'};})}:w);
 if(!found)return res.status(404).json({error:'Certificate not found'});
 next={...(record.payload||{}),workers};
 }else if(action==='review'){
