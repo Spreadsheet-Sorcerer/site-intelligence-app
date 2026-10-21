@@ -1,0 +1,105 @@
+import {createHmac} from 'node:crypto';
+// v21.0: separate, protected safety records. QR/public access intentionally not enabled.
+import { timingSafeEqual } from 'node:crypto';
+const equal=(a,b)=>{const x=Buffer.from(String(a||'')),y=Buffer.from(String(b||''));return x.length===y.length&&timingSafeEqual(x,y);};
+function role(req){const secret=String(req.headers.authorization||'').replace(/^Bearer\s+/i,'');if(process.env.SAFETY_MANAGER_KEY&&equal(secret,process.env.SAFETY_MANAGER_KEY))return 'manager';if(process.env.SAFETY_STAFF_KEY&&equal(secret,process.env.SAFETY_STAFF_KEY))return 'staff';return null;}
+async function db(method,body){const url=process.env.SUPABASE_URL,key=process.env.SUPABASE_SERVICE_KEY;if(!url||!key)throw new Error('Supabase is not configured');const res=await fetch(`${url}/rest/v1/safety_data?id=eq.1${method==='GET'?'&select=id,payload,revision':''}`,{method,headers:{apikey:key,Authorization:`Bearer ${key}`,'Content-Type':'application/json',Prefer:'return=representation'},body:body?JSON.stringify(body):undefined});const txt=await res.text();if(!res.ok)throw new Error(`Safety storage request failed (${res.status}): ${txt.slice(0,300)}`);return txt?JSON.parse(txt):[];}
+export default async function handler(req,res){res.setHeader('Cache-Control','no-store');const who=role(req);if(!who)return res.status(401).json({error:'Safety staff sign-in required'});if(!['GET','POST'].includes(req.method))return res.status(405).json({error:'Unsupported method'});
+try{const rows=await db('GET');if(rows.length!==1)return res.status(409).json({error:'Missing safety_data row. Run the included SQL migration.'});const record=rows[0];if(req.method==='GET')return res.status(200).json({...record,role:who});
+const {action,payload,revision,workerId,decision,reviewNote,ticketId,fields}=req.body||{};
+if(action==='certificate_upload_url'){
+ const w=(record.payload?.workers||[]).find(x=>String(x.id)===String(workerId));
+ if(!w)return res.status(404).json({error:'Worker not found'});
+ const allowed={'application/pdf':'pdf','image/jpeg':'jpg','image/png':'png','image/webp':'webp'};
+ const mime=String(req.body?.mime||''),size=Number(req.body?.size);
+ if(!allowed[mime]||!Number.isSafeInteger(size)||size<1||size>10*1024*1024)return res.status(400).json({error:'Select a PDF or photo up to 10 MB'});
+ const {randomUUID}=await import('node:crypto');
+ const storagePath=`workers/${workerId}/${randomUUID()}.${allowed[mime]}`;
+ const base=new URL(process.env.SUPABASE_URL).origin,key=process.env.SUPABASE_SERVICE_KEY;
+ const r=await fetch(`${base}/storage/v1/object/upload/sign/fortuna-worker-certificates/${storagePath}`,{method:'POST',headers:{apikey:key,Authorization:`Bearer ${key}`,'Content-Type':'application/json'},body:'{}'});
+ if(!r.ok)return res.status(502).json({error:'Could not prepare private certificate upload'});
+ const d=await r.json();if(!d.token)return res.status(502).json({error:'Private upload token unavailable'});
+ return res.status(200).json({storagePath,uploadUrl:`${base}/storage/v1/object/upload/sign/fortuna-worker-certificates/${storagePath}?token=${encodeURIComponent(d.token)}`});
+}
+if(action==='certificate_view'){
+ const w=(record.payload?.workers||[]).find(x=>String(x.id)===String(workerId));
+ const t=(w?.tickets||[]).find(x=>String(x.id)===String(ticketId));
+ if(!t)return res.status(404).json({error:'Certificate not found'});
+ const path=t.attachment?.storage_path;
+ if(typeof path!=='string'||!/^workers\/[0-9a-f-]{36}\/[0-9a-f-]{36}\.(pdf|jpg|png|webp)$/.test(path)||!path.startsWith(`workers/${workerId}/`))return res.status(400).json({error:'No private original attached'});
+ const base=new URL(process.env.SUPABASE_URL).origin,key=process.env.SUPABASE_SERVICE_KEY;
+ const bucket='fortuna-worker-certificates';
+ const r=await fetch(`${base}/storage/v1/object/sign/${bucket}/${path}`,{method:'POST',headers:{apikey:key,Authorization:`Bearer ${key}`,'Content-Type':'application/json'},body:JSON.stringify({expiresIn:120})});
+ if(!r.ok)return res.status(502).json({error:'Could not open original certificate'});
+ const result=await r.json();
+ if(!result.signedURL)return res.status(502).json({error:'Private certificate link unavailable'});
+ // Supabase returns /object/sign/...; leading / would otherwise drop /storage/v1/.
+ const signedPath=String(result.signedURL).trim();
+ const signedUrl=/^https?:\/\//i.test(signedPath)
+  ? new URL(signedPath)
+  : new URL(`${base}/storage/v1/${signedPath.replace(/^\/+/, '').replace(/^storage\/v1\//, '')}`);
+ if(signedUrl.origin!==base||!signedUrl.pathname.startsWith('/storage/v1/object/sign/'))return res.status(502).json({error:'Invalid private certificate link returned by storage'});
+ return res.status(200).json({url:signedUrl.href});
+}
+if(action==='worker_link'){
+  if(!process.env.WORKER_LINK_SIGNING_KEY || process.env.WORKER_LINK_SIGNING_KEY.length<32)return res.status(503).json({error:'Worker return-link signing key not configured'});
+  if(!(record.payload?.workers||[]).some(w=>String(w.id)===String(workerId)))return res.status(404).json({error:'Worker not found'});
+  const p=Buffer.from(JSON.stringify({workerId:String(workerId),exp:Date.now()+12*60*60*1000})).toString('base64url');
+  const mac=createHmac('sha256',process.env.WORKER_LINK_SIGNING_KEY).update(p).digest('base64url');
+  return res.status(200).json({token:`${p}.${mac}`,expires_hours:12});
+}
+if(Number(revision)!==Number(record.revision))return res.status(409).json({error:'Someone updated these records. Refresh before saving.'});let next;
+if(action==='worker_delete'){
+ if(who!=='manager')return res.status(403).json({error:'Only the safety manager can delete workers'});
+ const w=(record.payload?.workers||[]).find(x=>String(x.id)===String(workerId));
+ if(!w)return res.status(404).json({error:'Worker no longer exists. Refresh the roster.'});
+ const normalize=v=>String(v||'').trim().replace(/\s+/g,' ').toLowerCase();
+ if(normalize(req.body?.confirmName)!==normalize(w.name))return res.status(400).json({error:'Worker name did not match. Nothing was deleted.'});
+ const allWorkers=record.payload.workers||[];
+ const allOrientations=record.payload.orientations||[];
+ const filtered={...record.payload,workers:allWorkers.filter(x=>String(x.id)!==String(workerId)),orientations:allOrientations.filter(x=>String(x.worker_id)!==String(workerId))};
+ const updated=await db('PATCH',{payload:filtered,revision:Number(record.revision)+1});
+ if(updated.length!==1)return res.status(409).json({error:'Worker could not be deleted'});
+ // The database change is authoritative; any storage failure is reported for manual cleanup.
+ const bucket='fortuna-worker-certificates';
+ const files=[...new Set((w.tickets||[]).map(t=>t.attachment?.storage_path).filter(p=>typeof p==='string'&&p.startsWith(`workers/${workerId}/`)&&/^workers\/[0-9a-f-]{36}\/[0-9a-f-]{36}\.(pdf|jpg|png|webp)$/.test(p)))];
+ let warning='';
+ if(files.length){
+  try{
+   const base=new URL(process.env.SUPABASE_URL).origin,serviceKey=process.env.SUPABASE_SERVICE_KEY;
+   const resp=await fetch(`${base}/storage/v1/object/${bucket}`,{method:'DELETE',headers:{apikey:serviceKey,Authorization:`Bearer ${serviceKey}`,'Content-Type':'application/json'},body:JSON.stringify({prefixes:files})});
+   if(!resp.ok)throw Error(`Storage returned ${resp.status}`);
+  }catch(err){console.error('Worker certificate cleanup:',err);warning='Worker removed from the roster, but some original certificate files may remain in private storage. Ask an administrator to review storage cleanup.';}
+ }
+ return res.status(200).json({...updated[0],role:who,warning});
+}
+
+if(action==='save'){
+if(!payload||!Array.isArray(payload.workers)||!Array.isArray(payload.orientations))return res.status(400).json({error:'Invalid record format'});
+// Only a safety manager can change verification fields. Staff may maintain worker and orientation records.
+const old=new Map((record.payload?.orientations||[]).map(o=>[String(o.id),o]));
+for(const entry of payload.orientations){const previous=old.get(String(entry.id));if(previous&&(entry.approval_status!==previous.approval_status||entry.approved_by!==previous.approved_by||entry.approved_at!==previous.approved_at))return res.status(403).json({error:'Use the manager approval action to change orientation verification'});if(!previous&&entry.approval_status==='approved')return res.status(403).json({error:'New orientations cannot start approved'});}
+// Ticket approvals are manager-only and must use the dedicated review action.
+const oldWorkers=new Map((record.payload?.workers||[]).map(w=>[String(w.id),w]));
+for(const previous of oldWorkers.values())if(!payload.workers.some(w=>String(w.id)===String(previous.id)))return res.status(403).json({error:'Use the safety-manager Delete Worker button to remove a worker'});
+for(const w of payload.workers){const oldWorker=oldWorkers.get(String(w.id));const oldTickets=new Map((oldWorker?.tickets||[]).map(t=>[String(t.id),t]));for(const t of w.tickets||[]){const before=oldTickets.get(String(t.id));if(t.status==='verified'&&(!before||before.status!=='verified'))return res.status(403).json({error:'Use manager certificate verification to approve tickets'});if(before?.status==='verified'&&JSON.stringify(before)!==JSON.stringify(t))return res.status(403).json({error:'Verified tickets cannot be changed by an ordinary save'});}}
+// Protect approved records from being removed by ordinary staff.
+for(const p of old.values())if(p.approval_status==='approved'&&!payload.orientations.some(o=>String(o.id)===String(p.id)))return res.status(403).json({error:'Approved orientations cannot be deleted'});
+next={workers:payload.workers,orientations:payload.orientations};
+}else if(action==='ticket_review'){
+if(who!=='manager')return res.status(403).json({error:'Safety manager credentials required'});
+const type=String(fields?.type||'').trim().slice(0,160),holder=String(fields?.holder_name||'').trim().slice(0,160),expiry=String(fields?.expiry_date||'').trim(),issue=String(fields?.issued_date||'').trim();
+if(!type||!holder||!/^\d{4}-\d{2}-\d{2}$/.test(expiry)||Number.isNaN(Date.parse(expiry)))return res.status(400).json({error:'Certificate type, printed name and a valid expiry date are required'});
+let found=false;const workers=(record.payload?.workers||[]).map(w=>String(w.id)===String(workerId)?{...w,tickets:(w.tickets||[]).map(t=>{if(String(t.id)!==String(ticketId))return t;found=true;if(t.status==='verified')throw new Error('Certificate is already verified');return {...t,type,holder_name:holder,issued_date:issue,expiry_date:expiry,status:'verified',verified_at:new Date().toISOString(),verified_by:'Safety manager'};})}:w);
+if(!found)return res.status(404).json({error:'Certificate not found'});
+next={...(record.payload||{}),workers};
+}else if(action==='review'){
+if(who!=='manager')return res.status(403).json({error:'Safety manager credentials required'});
+if(!['approve','return'].includes(decision))return res.status(400).json({error:'Invalid review decision'});
+const orientations=(record.payload?.orientations||[]).map(o=>{if(String(o.id)!==String(workerId))return o;if(decision==='approve'&&(o.status!=='completed'||!o.signature||!o.completed_at))throw new Error('Worker must complete and sign the orientation first');return {...o,approval_status:decision==='approve'?'approved':'returned',approved_at:decision==='approve'?new Date().toISOString():null,approved_by:decision==='approve'?'Safety manager':null,review_note:String(reviewNote||'').slice(0,1000),reviewed_at:new Date().toISOString()};});
+if(!orientations.some(o=>String(o.id)===String(workerId)))return res.status(404).json({error:'Orientation not found'});
+next={...(record.payload||{}),orientations};
+}else return res.status(400).json({error:'Invalid action'});
+// An optimistic version check; prevents most stale writes. For production-scale concurrency, move to a database RPC compare-and-swap.
+const updated=await db('PATCH',{payload:next,revision:Number(record.revision)+1});if(updated.length!==1)return res.status(409).json({error:'Safety data not updated'});return res.status(200).json({...updated[0],role:who});
+}catch(e){console.error('safety-records:',e);return res.status(500).json({error:e.message||'Safety records request failed'});}}
