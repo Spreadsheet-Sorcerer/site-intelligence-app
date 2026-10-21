@@ -7,6 +7,9 @@ async function db(method,body){const url=process.env.SUPABASE_URL,key=process.en
 export default async function handler(req,res){res.setHeader('Cache-Control','no-store');const who=role(req);if(!who)return res.status(401).json({error:'Safety staff sign-in required'});if(!['GET','POST'].includes(req.method))return res.status(405).json({error:'Unsupported method'});
 try{const rows=await db('GET');if(rows.length!==1)return res.status(409).json({error:'Missing safety_data row. Run the included SQL migration.'});const record=rows[0];if(req.method==='GET')return res.status(200).json({...record,role:who});
 const {action,payload,revision,workerId,decision,reviewNote,ticketId,fields}=req.body||{};
+// Southwest staff are strictly read-only. The only POST permitted is to view
+// a short-lived link to an existing private certificate.
+if(who==='staff'&&action!=='certificate_view')return res.status(403).json({error:'Southwest staff access is read-only. Safety-manager credentials are required to modify records.'});
 if(action==='certificate_upload_url'){
  const w=(record.payload?.workers||[]).find(x=>String(x.id)===String(workerId));
  if(!w)return res.status(404).json({error:'Worker not found'});
