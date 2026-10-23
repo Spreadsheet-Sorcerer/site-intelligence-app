@@ -1115,6 +1115,37 @@ function concreteTestSetKey(test) {
   return `fallback:${date}|${location}|${mix}`;
 }
 
+// Duplicate protection is per uploaded *report*, never per pour/date alone.
+// Multiple distinct samples on a pour and progressive 7/28/56-day reports stay valid.
+function concreteTestResultSignature(test) {
+  const results=(test?.results||[]).map(r=>{
+    const age=Number(r?.age_days);
+    const strength=r?.strength_mpa==null?null:Number(r.strength_mpa);
+    return [Number.isFinite(age)?age:null,Number.isFinite(strength)?strength:null,
+      String(r?.break_date||"").slice(0,10),String(r?.result||"").trim().toLowerCase()];
+  }).sort((a,b)=>JSON.stringify(a).localeCompare(JSON.stringify(b)));
+  return JSON.stringify(results);
+}
+function isDuplicateConcreteTest(existing, incoming) {
+  return (existing||[]).some(old=>{
+    // Strongest proof: same original bytes. OCR variations cannot bypass this.
+    if(incoming?.file_sha256 && old?.file_sha256 && incoming.file_sha256===old.file_sha256) return true;
+    const reportA=String(old?.report_number||"").trim().toLowerCase().replace(/\s+/g,"");
+    const reportB=String(incoming?.report_number||"").trim().toLowerCase().replace(/\s+/g,"");
+    if(!reportA || !reportB || reportA!==reportB) return false;
+    const dateA=String(old?.date_cast||old?.date_sampled||"").slice(0,10);
+    const dateB=String(incoming?.date_cast||incoming?.date_sampled||"").slice(0,10);
+    // Prevent a recycled lab number on a different pour from causing a rejection.
+    if(!dateA || !dateB || dateA!==dateB) return false;
+    const ticketA=String(old?.ticket_number||"").trim();
+    const ticketB=String(incoming?.ticket_number||"").trim();
+    if(ticketA && ticketB && ticketA!==ticketB) return false;
+    const resultsA=old?.results||[], resultsB=incoming?.results||[];
+    if(!resultsA.length || !resultsB.length) return false;
+    return concreteTestResultSignature(old)===concreteTestResultSignature(incoming);
+  });
+}
+
 function concreteTestProgressScore(test) {
   const results=(test?.results||[]).map(result=>({
     age:parseFloat(result?.age_days),
@@ -2817,23 +2848,40 @@ Return ONLY valid JSON, no markdown:
 
   async function handleTestFiles(files) {
     if (!files?.length) return;
+    if (!storageReady) { showToast("Concrete data is still loading. Please try again.", "err"); return; }
     setLoading(true);
-    let added = 0;
+    let added = 0, skipped = 0;
+    // Include both previously displayed reports and newly accepted reports
+    // from this same batch, so repeat selections cannot double-upload.
+    const seen = [...tests];
     for (const file of Array.from(files)) {
-      setLoadMsg(`Reading test report "${file.name}"…`);
+      setLoadMsg(`Checking test report "${file.name}"…`);
       try {
+        const bytes=await file.arrayBuffer();
+        const digest=await crypto.subtle.digest("SHA-256",bytes);
+        const fileHash=Array.from(new Uint8Array(digest),b=>b.toString(16).padStart(2,"0")).join("");
+        if(seen.some(t=>t.file_sha256===fileHash)) { skipped++; continue; }
+
+        setLoadMsg(`Reading test report "${file.name}"…`);
         const extracted = await extractTest(file);
+        const candidate={...extracted,file_sha256:fileHash};
+        if(isDuplicateConcreteTest(seen,candidate)) { skipped++; continue; }
+
         setLoadMsg(`Saving "${file.name}" to storage…`);
         const fileUrl = await uploadFile(file, "tests");
-        setTests(prev => [{ ...extracted, file_url: fileUrl }, ...prev]);
-        added += 1;
+        // Preserve the existing data rather than recording an inaccessible report.
+        if(!fileUrl) throw new Error("File storage did not return a link");
+        seen.unshift({...candidate,file_url:fileUrl});
+        added++;
       } catch(e) {
         showToast(`Failed to read ${file.name}: ${e.message}`, "err");
       }
     }
+    if(added) setTests(prev=>[...seen.slice(0,added),...prev]);
     setLoading(false);
     setLoadMsg("");
-    if (added) showToast(`${added} test report${added!==1?"s":""} uploaded ✓`);
+    if(skipped) showToast(`${skipped} duplicate test report${skipped===1?"":"s"} blocked${added?` · ${added} new added`:""}`, "err");
+    else if(added) showToast(`${added} test report${added!==1?"s":""} uploaded ✓`);
   }
 
   function editTestLocation(test) {
