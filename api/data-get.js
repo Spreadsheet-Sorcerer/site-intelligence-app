@@ -34,7 +34,7 @@ export default async function handler(req, res) {
 
   if (
     !table ||
-    !["concrete_data", "certs_data"].includes(table)
+    !["concrete_data", "certs_data", "tm_data"].includes(table)
   ) {
     return res.status(400).json({
       error: "Invalid table",
