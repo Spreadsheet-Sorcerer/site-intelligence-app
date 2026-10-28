@@ -29,6 +29,7 @@ export default async function handler(req, res) {
   const allowedTables = [
     "concrete_data",
     "certs_data",
+    "tm_data",
   ];
 
   if (!table || !allowedTables.includes(table)) {
@@ -56,6 +57,15 @@ export default async function handler(req, res) {
 
     if (data.tests !== undefined) {
       payload.tests = data.tests;
+    }
+  }
+
+  if (table === "tm_data") {
+    for (const field of ["items", "labourEntries", "submittedWeeks"]) {
+      if (data[field] !== undefined) {
+        if (!Array.isArray(data[field])) return res.status(400).json({ error: `${field} must be an array` });
+        payload[field] = data[field];
+      }
     }
   }
 
