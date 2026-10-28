@@ -416,6 +416,36 @@ function referencedCreditInvoices(credit,allInvoices){
   references.delete(normalizeInvoiceNumber(credit?.invoice_number));
   return (allInvoices||[]).filter(inv=>!isCreditMemo(inv)&&references.has(normalizeInvoiceNumber(inv.invoice_number)));
 }
+// A complete reversal of an already superseded invoice is accounting evidence,
+// not a second cost reduction. Require a UNIQUE original, identical supplier/date,
+// matching full gross amount, and compatible delivery references when available.
+// Standalone or ambiguous credit memos remain genuine deductions.
+function buildSupersededReversalMap(allInvoices, supersessionMap) {
+  const paired = new Map();
+  const originals = (allInvoices||[]).filter(inv =>
+    !isCreditMemo(inv) && supersessionMap.has(normalizeInvoiceNumber(inv.invoice_number)));
+  (allInvoices||[]).filter(isCreditMemo).forEach(credit => {
+    const supplier = String(credit.supplier||'').toLowerCase().replace(/[^a-z0-9]/g,'');
+    const date = String(credit.invoice_date||'').slice(0,10);
+    const amount = creditGrossAmount(credit);
+    if (!supplier || !date || !(amount > 0)) return;
+    const matches = originals.filter(original => {
+      const os = String(original.supplier||'').toLowerCase().replace(/[^a-z0-9]/g,'');
+      if (!os || os!==supplier || String(original.invoice_date||'').slice(0,10)!==date) return false;
+      if (Math.abs(Number(original.total_amount||0)-amount)>0.03) return false;
+      const ct=(credit.ticket_numbers||[]).map(ticketNumberKey).filter(Boolean);
+      const ot=(original.ticket_numbers||[]).map(ticketNumberKey).filter(Boolean);
+      if(ct.length && ot.length && !ct.some(t=>ot.includes(t))) return false;
+      const refs=(credit.credit_invoice_numbers||[]).map(normalizeInvoiceNumber).filter(Boolean);
+      if(refs.length && !refs.includes(normalizeInvoiceNumber(original.invoice_number))) return false;
+      return true;
+    });
+    if(matches.length===1) paired.set(normalizeInvoiceNumber(credit.invoice_number),{
+      original:matches[0],replacement:supersessionMap.get(normalizeInvoiceNumber(matches[0].invoice_number)).replacement
+    });
+  });
+  return paired;
+}
 function invoiceResolvedByCredit(inv,credits){
   return (credits||[]).some(credit=>isCreditMemo(credit)&&Array.isArray(credit?.confirmed_invoice_numbers)&&credit.confirmed_invoice_numbers.includes(normalizeInvoiceNumber(inv.invoice_number)));
 }
@@ -3047,8 +3077,11 @@ Return ONLY valid JSON, no markdown:
 
   const invoiceSupersessionMap=buildInvoiceSupersessionMap(invoices);
   const supersededInvoiceNumbers=new Set(invoiceSupersessionMap.keys());
-  const activeInvoices=invoices.filter(inv=>!supersededInvoiceNumbers.has(normalizeInvoiceNumber(inv.invoice_number)));
-  const supersededInvoiceCount=invoices.length-activeInvoices.length;
+  const supersededReversals=buildSupersededReversalMap(invoices,invoiceSupersessionMap);
+  // Financial calculations exclude both the replaced original and its complete
+  // credit reversal. Keep all credit documents visible in the credit memo register.
+  const activeInvoices=invoices.filter(inv=>!supersededInvoiceNumbers.has(normalizeInvoiceNumber(inv.invoice_number))&&!supersededReversals.has(normalizeInvoiceNumber(inv.invoice_number)));
+  const supersededInvoiceCount=supersededInvoiceNumbers.size;
 
   const structuralTickets=tickets.filter(isStructuralTicket);
   const ancillaryTickets=tickets.filter(t=>!isStructuralTicket(t));
@@ -3120,7 +3153,7 @@ Return ONLY valid JSON, no markdown:
   const groutRateBaselines=oceanGroutRateBaselines(activeInvoices);
   const liveOceanForecastRates={...OCEAN_BASE_RATES};
   const costReport=invoiceCostReport(activeInvoices);
-  const creditMemos=activeInvoices.filter(isCreditMemo);
+  const creditMemos=invoices.filter(isCreditMemo);
   const billingInvoices=activeInvoices.filter(inv=>!isCreditMemo(inv));
   const findingsForInvoice=inv=>{
     const m=matchInvoiceToTickets(inv,tickets);
@@ -3130,6 +3163,7 @@ Return ONLY valid JSON, no markdown:
   const outstandingForInvoice=inv=>invoiceSupersessionMap.has(normalizeInvoiceNumber(inv.invoice_number))?[]:findingsForInvoice(inv).filter(f=>!findingResolution(inv,f)&&!invoiceResolvedByCredit(inv,creditMemos));
   const invoicesWithIssues=billingInvoices.filter(inv=>outstandingForInvoice(inv).length>0).length;
   const creditReviewCount=creditMemos.filter(credit=>{
+    if(supersededReversals.has(normalizeInvoiceNumber(credit.invoice_number))) return false;
     const refs=referencedCreditInvoices(credit,invoices);
     return refs.length===0||refs.some(inv=>outstandingForInvoice(inv).length>0);
   }).length;
@@ -3354,7 +3388,8 @@ Return ONLY valid JSON, no markdown:
   function InvoiceModal({invoice,onClose}){
     const m=matchInvoiceToTickets(invoice,tickets);
     const isCredit=isCreditMemo(invoice);
-    const suggestedCreditLinks=isCredit?referencedCreditInvoices(invoice,invoices):[];
+    const fullReversal=isCredit?supersededReversals.get(normalizeInvoiceNumber(invoice.invoice_number)):null;
+    const suggestedCreditLinks=isCredit?(fullReversal?[fullReversal.original]:referencedCreditInvoices(invoice,invoices)):[];
     const confirmedCreditLinks=isCredit?(invoice.confirmed_invoice_numbers||[]):[];
     const linkedCredits=creditMemos.filter(credit=>invoiceResolvedByCredit(invoice,[credit]));
     const chargeAudit=invoiceChargeAudit(invoice,m.needsReconciliation?[]:m.ticketsOnInvoice);
@@ -3391,8 +3426,9 @@ Return ONLY valid JSON, no markdown:
         </div>
         {isCredit&&<section style={{padding:14,background:C.bg,border:`1px solid ${C.blue}66`,borderRadius:10,marginBottom:15}}>
           <h3 style={{margin:"0 0 8px"}}>Credit memo · {money(creditNetAmount(invoice))} before HST</h3>
-          <p style={{fontSize:12,color:C.sub}}>Original invoices detected from this credit. Tick an invoice ONLY if this credit resolves every outstanding issue on that invoice. For partial credits, use the individual discrepancy controls on the original invoice. The credit amount is deducted from totals only once.</p>
-          {suggestedCreditLinks.length===0?<p style={{color:C.yellow,fontSize:12}}>No matching original invoices found. Check the extracted references; no warnings have been cleared.</p>:suggestedCreditLinks.map(original=>{const number=normalizeInvoiceNumber(original.invoice_number);const checked=confirmedCreditLinks.includes(number);return <label key={number} style={{display:"flex",gap:9,alignItems:"center",padding:7,fontSize:13}}><input type="checkbox" checked={checked} onChange={e=>{const next=e.target.checked?[...new Set([...confirmedCreditLinks,number])]:confirmedCreditLinks.filter(n=>n!==number);setInvoices(prev=>prev.map(x=>x.id===invoice.id?{...x,confirmed_invoice_numbers:next}:x));setSelectedInvoice({...invoice,confirmed_invoice_numbers:next});}}/>Invoice {number} — {checked?"Resolved by confirmed credit":"Needs review"}</label>})}
+          {fullReversal&&<p style={{fontSize:12,color:C.green,fontWeight:700}}>✓ Full reversal matched to {fullReversal.original.invoice_number}; corrected rebill {fullReversal.replacement.invoice_number} is counted once in project totals. This credit is retained for audit and is NOT deducted again.</p>}
+          <p style={{fontSize:12,color:C.sub}}>{fullReversal?"Full credit and rebill detected automatically; no checkbox needed. The original invoice and fibre warning are retained in audit history.":"Original invoices detected from this credit. Tick an invoice ONLY if this credit resolves every outstanding issue on that invoice. For partial credits, use the individual discrepancy controls on the original invoice."}</p>
+          {suggestedCreditLinks.length===0?<p style={{color:C.yellow,fontSize:12}}>No matching original invoices found. Check the extracted references; no warnings have been cleared.</p>:suggestedCreditLinks.map(original=>{const number=normalizeInvoiceNumber(original.invoice_number);const checked=confirmedCreditLinks.includes(number);return <label key={number} style={{display:"flex",gap:9,alignItems:"center",padding:7,fontSize:13}}><input type="checkbox" disabled={!!fullReversal} checked={fullReversal?true:checked} onChange={e=>{const next=e.target.checked?[...new Set([...confirmedCreditLinks,number])]:confirmedCreditLinks.filter(n=>n!==number);setInvoices(prev=>prev.map(x=>x.id===invoice.id?{...x,confirmed_invoice_numbers:next}:x));setSelectedInvoice({...invoice,confirmed_invoice_numbers:next});}}/>Invoice {number} — {checked?"Resolved by confirmed credit":"Needs review"}</label>})}
           {invoice.file_url&&<a href={invoice.file_url} target="_blank" rel="noreferrer" style={{color:C.blue,fontSize:12}}>Open original credit memo</a>}
         </section>}
         {!isCredit&&linkedCredits.length>0&&<div style={{padding:12,background:C.green+"16",border:`1px solid ${C.green}55`,borderRadius:9,marginBottom:12}}>✓ Resolved by confirmed credit: {linkedCredits.map(x=>x.invoice_number).join(", ")}. Original audit findings retained below.</div>}
@@ -3833,7 +3869,7 @@ Screenshot attached: Yes / No`}</pre>
             <section style={{background:C.card,border:`1px solid ${C.blue}77`,borderRadius:12,padding:'16px 20px',marginBottom:18}}>
               <div style={{display:'flex',alignItems:'center',justifyContent:'space-between',marginBottom:10,flexWrap:'wrap',gap:8}}><b style={{fontSize:16}}>Credit Memos ({creditMemos.length})</b><Badge color={creditReviewCount?C.yellow:C.green}>{creditReviewCount?`${creditReviewCount} awaiting review`:'No outstanding credit links'}</Badge></div>
               <p style={{color:C.sub,fontSize:12,marginBottom:12}}>Credits stay visible here after uploading, even when they have no errors. Open one to confirm its original invoice references.</p>
-              {creditMemos.length===0?<div style={{color:C.muted,fontSize:12}}>No credit memos uploaded yet.</div>:[...creditMemos].sort((a,b)=>String(b.invoice_date||'').localeCompare(String(a.invoice_date||''))).map(credit=>{const refs=referencedCreditInvoices(credit,invoices);const pending=refs.filter(inv=>outstandingForInvoice(inv).length>0);return <button key={credit.id} onClick={()=>setSelectedInvoice(credit)} style={{display:'flex',alignItems:'center',justifyContent:'space-between',width:'100%',gap:10,background:C.bg,border:`1px solid ${C.border}`,borderRadius:8,color:C.text,padding:'12px',marginBottom:7,cursor:'pointer',textAlign:'left'}}><span><b>{credit.invoice_number||'Credit memo'}</b><span style={{display:'block',fontSize:11,color:C.sub}}>{credit.invoice_date||'No date'} · {refs.length} referenced invoice(s)</span></span><span style={{textAlign:'right'}}><b style={{color:C.green}}>-{money(creditNetAmount(credit))}</b><span style={{display:'block',fontSize:11,color:pending.length?C.yellow:C.green}}>{pending.length?`${pending.length} needing review`:'Links reviewed / no active warnings'}</span></span></button>})}
+              {creditMemos.length===0?<div style={{color:C.muted,fontSize:12}}>No credit memos uploaded yet.</div>:[...creditMemos].sort((a,b)=>String(b.invoice_date||'').localeCompare(String(a.invoice_date||''))).map(credit=>{const pair=supersededReversals.get(normalizeInvoiceNumber(credit.invoice_number));const refs=pair?[pair.original]:referencedCreditInvoices(credit,invoices);const pending=pair?[]:refs.filter(inv=>outstandingForInvoice(inv).length>0);return <button key={credit.id} onClick={()=>setSelectedInvoice(credit)} style={{display:'flex',alignItems:'center',justifyContent:'space-between',width:'100%',gap:10,background:C.bg,border:`1px solid ${C.border}`,borderRadius:8,color:C.text,padding:'12px',marginBottom:7,cursor:'pointer',textAlign:'left'}}><span><b>{credit.invoice_number||'Credit memo'}</b><span style={{display:'block',fontSize:11,color:C.sub}}>{credit.invoice_date||'No date'} · {refs.length} referenced invoice(s){pair?` · full reversal of ${pair.original.invoice_number}`:""}</span></span><span style={{textAlign:'right'}}><b style={{color:C.green}}>-{money(creditNetAmount(credit))}</b><span style={{display:'block',fontSize:11,color:pending.length?C.yellow:C.green}}>{pair?'Reversal linked · not deducted twice':pending.length?`${pending.length} needing review`:'Links reviewed / no active warnings'}</span></span></button>})}
             </section>
             {invoices.length===0?<div style={{color:C.muted,textAlign:"center",padding:"60px 0"}}>No invoices yet.</div>
             :filteredInvoices.length===0?<div style={{color:C.muted,textAlign:"center",padding:"60px 0"}}>No invoices match “{invoiceSearch}”.</div>
@@ -4467,6 +4503,8 @@ function exportSheet(rows,headers,widths){
 function TMModule({onBack}){
   const [items,setItems]=useState([]), [labourEntries,setLabourEntries]=useState([]), [submittedWeeks,setSubmittedWeeks]=useState([]);
   const [ready,setReady]=useState(false), [tab,setTab]=useState("dashboard"), [selected,setSelected]=useState(null);
+  const [saveState,setSaveState]=useState("loading");
+  const tmSaveVersion=useRef(0);
   const [newOpen,setNewOpen]=useState(false), [draft,setDraft]=useState(emptyTM());
   const [sheetDraft,setSheetDraft]=useState({date:"",sheet_number:"",description:"",labour:"",equipment:"",material:"",subcontractor:"",markup:"",total:"",signed:false,labour_entries:[],equipment_entries:[],material_entries:[]});
   const [invoiceDraft,setInvoiceDraft]=useState({invoice_number:"",date:"",amount:"",timesheet_refs:"",notes:""});
@@ -4524,8 +4562,26 @@ function TMModule({onBack}){
       direction_ref:existing.direction_ref||incoming.direction_ref,rco_number:existing.rco_number||incoming.rco_number,change_order_number:existing.change_order_number||incoming.change_order_number};
   };
 
-  useEffect(()=>{(async()=>{const saved=await storageGet("tm-data");setItems((saved?.items||[]).filter(x=>x.id!=="TM-TEST-DEXTER"));setLabourEntries(saved?.labourEntries||[]);setSubmittedWeeks(saved?.submittedWeeks||[]);setReady(true);})()},[]);
-  useEffect(()=>{if(!ready)return;const timer=setTimeout(()=>storageSet("tm-data",{items,labourEntries,submittedWeeks}),350);return()=>clearTimeout(timer)},[items,labourEntries,submittedWeeks,ready]);
+  useEffect(()=>{let active=true;(async()=>{
+    const saved=await storageGet("tm-data");if(!active)return;
+    if(!saved || !Array.isArray(saved.items)){
+      // A failed read must not initialize an empty register and overwrite existing data.
+      setSaveState("load-error");return;
+    }
+    setItems(saved.items.filter(x=>x.id!=="TM-TEST-DEXTER"));
+    setLabourEntries(Array.isArray(saved.labourEntries)?saved.labourEntries:[]);
+    setSubmittedWeeks(Array.isArray(saved.submittedWeeks)?saved.submittedWeeks:[]);
+    setReady(true);setSaveState("saved");
+  })();return()=>{active=false}},[]);
+  useEffect(()=>{
+    if(!ready)return;
+    const version=++tmSaveVersion.current;
+    setSaveState("saving");
+    // Persist promptly. A queued write also survives navigating away from the module.
+    storageSet("tm-data",{items,labourEntries,submittedWeeks}).then(ok=>{
+      if(version===tmSaveVersion.current)setSaveState(ok?"saved":"save-error");
+    });
+  },[items,labourEntries,submittedWeeks,ready]);
   useEffect(()=>{if(selected){const fresh=items.find(x=>x.id===selected.id);if(fresh)setSelected(fresh)}},[items]);
 
   const saveItem=updated=>setItems(prev=>prev.map(x=>x.id===updated.id?updated:x));
@@ -4601,16 +4657,18 @@ function TMModule({onBack}){
 
   return <div style={{minHeight:"100vh",background:C.bg,color:C.text,fontFamily:"'DM Sans','Segoe UI',sans-serif"}}>
     {toast&&<div style={{position:"fixed",top:20,right:20,zIndex:500,background:toast.type==="err"?"#450a0a":"#052e16",border:`1px solid ${toast.type==="err"?C.red:C.green}`,borderRadius:10,padding:"12px 18px",fontWeight:700}}>{toast.m}</div>}
-    <header style={{height:64,borderBottom:`1px solid ${C.border}`,display:"flex",alignItems:"center",padding:"0 24px",gap:15,background:C.card}}><button onClick={onBack} style={ghostBtn}>← Modules</button><div style={{width:38,height:38,borderRadius:10,background:C.yellow+"22",display:"grid",placeItems:"center",fontSize:21}}>⏱️</div><div><div style={{fontWeight:800,fontSize:18}}>Time & Materials <span style={{fontSize:10,color:C.muted}}>v{APP_VERSION}</span></div><div style={{fontSize:11,color:C.muted}}>Tracking, document relationships and reconciliation</div></div></header>
+    <header style={{height:64,borderBottom:`1px solid ${C.border}`,display:"flex",alignItems:"center",padding:"0 24px",gap:15,background:C.card}}><button onClick={onBack} style={ghostBtn}>← Modules</button><div style={{width:38,height:38,borderRadius:10,background:C.yellow+"22",display:"grid",placeItems:"center",fontSize:21}}>⏱️</div><div><div style={{fontWeight:800,fontSize:18}}>Time & Materials <span style={{fontSize:10,color:C.muted}}>v{APP_VERSION}</span></div><div style={{fontSize:11,color:C.muted}}>Tracking, document relationships and reconciliation</div><div role="status" style={{marginLeft:"auto",fontSize:12,fontWeight:700,color:saveState==="saved"?C.green:saveState==="saving"?C.yellow:C.red}}>{saveState==="saved"?"✓ Saved to database":saveState==="saving"?"Saving T&M…":saveState==="loading"?"Loading T&M…":"⚠ T&M database unavailable — changes cannot be saved"}</div></header>
+    {saveState==="load-error"&&<div style={{padding:"14px 25px",background:"#450a0a",color:"#fecaca",fontWeight:700}}>T&M records could not be loaded. Check the Supabase tm_data table and API configuration. Do not upload or enter new T&M until this is fixed. <button onClick={()=>window.location.reload()} style={ghostBtn}>Retry</button></div>}
+    {saveState==="save-error"&&<div style={{padding:"14px 25px",background:"#450a0a",color:"#fecaca",fontWeight:700}}>T&M changes were not saved to the database. Do not leave this page until the connection is fixed and the records are saved.</div>}
     <div style={{display:"flex",minHeight:"calc(100vh - 65px)"}}>
       <nav style={{width:210,borderRight:`1px solid ${C.border}`,padding:16,background:C.card}}>{[["dashboard","Dashboard"],["items","Trade T&M"],["labour","SW Labour Hours"]].map(([id,label])=><button key={id} onClick={()=>setTab(id)} style={{...navBtn,background:tab===id?C.yellow+"22":"transparent",color:tab===id?C.yellow:C.sub}}>{label}</button>)}</nav>
       <main style={{flex:1,padding:"28px 30px",minWidth:0}}>
-        {tab==="dashboard"&&<><div style={{display:"flex",justifyContent:"space-between",gap:15,alignItems:"center",marginBottom:18,flexWrap:"wrap"}}><div><h1 style={{margin:0,fontSize:25}}>T&M overview</h1><div style={{color:C.muted,fontSize:13,marginTop:5}}>Upload the trade's form, review what was read, then confirm it into the register.</div></div><div style={{display:"flex",gap:9,flexWrap:"wrap"}}><button onClick={exportTM} style={ghostBtn}>⬇ Export Register</button><button onClick={()=>setNewOpen(true)} style={ghostBtn}>Manual Entry</button><button onClick={()=>setIntakeOpen(true)} style={primaryBtn}>⬆ Upload T&M Form</button></div></div>
+        {tab==="dashboard"&&<><div style={{display:"flex",justifyContent:"space-between",gap:15,alignItems:"center",marginBottom:18,flexWrap:"wrap"}}><div><h1 style={{margin:0,fontSize:25}}>T&M overview</h1><div style={{color:C.muted,fontSize:13,marginTop:5}}>Upload the trade's form, review what was read, then confirm it into the register.</div></div><div style={{display:"flex",gap:9,flexWrap:"wrap"}}><button onClick={exportTM} style={ghostBtn}>⬇ Export Register</button><button disabled={!ready} onClick={()=>setNewOpen(true)} style={ghostBtn}>Manual Entry</button><button disabled={!ready} onClick={()=>setIntakeOpen(true)} style={primaryBtn}>⬆ Upload T&M Form</button></div></div>
           <div style={{display:"flex",gap:10,marginBottom:22,flexWrap:"wrap"}}><input aria-label="Search T&M records" value={search} onChange={e=>setSearch(e.target.value)} placeholder="Search trade, scope, sheet, progress invoice, RCO, CO…" style={{...inputStyle,maxWidth:480}}/><select aria-label="Filter by T&M stage" value={stageFilter} onChange={e=>setStageFilter(e.target.value)} style={{...inputStyle,width:210}}><option>All stages</option>{TM_STAGES.map(s=><option key={s}>{s}</option>)}</select>{(search||stageFilter!=="All stages")&&<button onClick={()=>{setSearch("");setStageFilter("All stages")}} style={ghostBtn}>Clear</button>}</div>
           <div style={{display:"flex",gap:12,flexWrap:"wrap",marginBottom:25}}><Stat label="Open items" value={openItems.length} color={C.yellow}/><Stat label="Supported T&M" value={money(supported)} color={C.blue}/><Stat label="Progress billed" value={money(invoiced)} color={C.teal}/><Stat label="Open flags" value={allFlags.length} color={allFlags.length?C.red:C.green}/></div>
           <div style={{display:"grid",gridTemplateColumns:"minmax(0,1.4fr) minmax(280px,.8fr)",gap:18}}><section style={panel}><div style={panelTitle}>Current T&M items <span style={{color:C.muted,fontSize:11,fontWeight:600}}>({filtered.length})</span></div>{filtered.length?filtered.slice(0,20).map(i=><TMRow key={i.id} item={i} onOpen={()=>setSelected(i)}/>):<Empty text={items.length?"No T&M items match your search or stage filter.":"No T&M items yet. Create your first item when testing begins."}/>}</section><section style={panel}><div style={panelTitle}>Items needing attention</div>{allFlags.filter(f=>!search||[f.id,f.trade,f.title,f.flag].join(" ").toLowerCase().includes(search.toLowerCase())).length?allFlags.filter(f=>!search||[f.id,f.trade,f.title,f.flag].join(" ").toLowerCase().includes(search.toLowerCase())).slice(0,12).map((f,i)=><div key={i} style={{padding:"10px 0",borderBottom:`1px solid ${C.border}`,fontSize:12}}><div style={{color:C.red,fontWeight:700}}>{f.id} · {f.trade}</div><div style={{color:C.sub,marginTop:3}}>{f.flag}</div></div>):<div style={{color:C.green,padding:"18px 0"}}>✓ No matching reconciliation flags</div>}</section></div>
         </>}
-        {tab==="items"&&<><div style={{display:"flex",justifyContent:"space-between",gap:12,flexWrap:"wrap",marginBottom:20}}><div><h1 style={{margin:0,fontSize:24}}>Trade T&M register</h1><div style={{color:C.muted,fontSize:12,marginTop:4}}>Priced T&M support, signed slips, RCOs and change orders organized by scope. Progress billing is optional and linked later.</div></div><div style={{display:"flex",gap:8}}><button onClick={()=>setNewOpen(true)} style={ghostBtn}>Manual Entry</button><button onClick={()=>setIntakeOpen(true)} style={primaryBtn}>⬆ Upload T&M Form</button></div></div><div style={{display:"flex",gap:10,marginBottom:15,flexWrap:"wrap"}}><input aria-label="Search Trade T&M" value={search} onChange={e=>setSearch(e.target.value)} placeholder="Search trade, scope, sheet, progress invoice, RCO, CO…" style={{...inputStyle,maxWidth:480}}/><select aria-label="Filter Trade T&M by stage" value={stageFilter} onChange={e=>setStageFilter(e.target.value)} style={{...inputStyle,width:210}}><option>All stages</option>{TM_STAGES.map(s=><option key={s}>{s}</option>)}</select>{(search||stageFilter!=="All stages")&&<button onClick={()=>{setSearch("");setStageFilter("All stages")}} style={ghostBtn}>Clear</button>}</div><section style={panel}><div style={{color:C.muted,fontSize:11,marginBottom:7}}>{filtered.length} item{filtered.length===1?"":"s"}</div>{filtered.length?filtered.map(i=><TMRow key={i.id} item={i} onOpen={()=>setSelected(i)}/>):<Empty text={(search||stageFilter!=="All stages")?"No matching T&M items.":"No T&M items yet. Upload a trade form to begin."}/>}</section></>}
+        {tab==="items"&&<><div style={{display:"flex",justifyContent:"space-between",gap:12,flexWrap:"wrap",marginBottom:20}}><div><h1 style={{margin:0,fontSize:24}}>Trade T&M register</h1><div style={{color:C.muted,fontSize:12,marginTop:4}}>Priced T&M support, signed slips, RCOs and change orders organized by scope. Progress billing is optional and linked later.</div></div><div style={{display:"flex",gap:8}}><button disabled={!ready} onClick={()=>setNewOpen(true)} style={ghostBtn}>Manual Entry</button><button disabled={!ready} onClick={()=>setIntakeOpen(true)} style={primaryBtn}>⬆ Upload T&M Form</button></div></div><div style={{display:"flex",gap:10,marginBottom:15,flexWrap:"wrap"}}><input aria-label="Search Trade T&M" value={search} onChange={e=>setSearch(e.target.value)} placeholder="Search trade, scope, sheet, progress invoice, RCO, CO…" style={{...inputStyle,maxWidth:480}}/><select aria-label="Filter Trade T&M by stage" value={stageFilter} onChange={e=>setStageFilter(e.target.value)} style={{...inputStyle,width:210}}><option>All stages</option>{TM_STAGES.map(s=><option key={s}>{s}</option>)}</select>{(search||stageFilter!=="All stages")&&<button onClick={()=>{setSearch("");setStageFilter("All stages")}} style={ghostBtn}>Clear</button>}</div><section style={panel}><div style={{color:C.muted,fontSize:11,marginBottom:7}}>{filtered.length} item{filtered.length===1?"":"s"}</div>{filtered.length?filtered.map(i=><TMRow key={i.id} item={i} onOpen={()=>setSelected(i)}/>):<Empty text={(search||stageFilter!=="All stages")?"No matching T&M items.":"No T&M items yet. Upload a trade form to begin."}/>}</section></>}
         {tab==="labour"&&<><div style={{display:"flex",justifyContent:"space-between",gap:12,alignItems:"center",flexWrap:"wrap"}}><div><h1 style={{margin:0,fontSize:24}}>Southwest labour hours</h1><div style={{color:C.muted,fontSize:12,marginTop:4}}>Weekly union labourer hours only — no payroll calculations.</div></div><button onClick={exportLabour} style={ghostBtn}>⬇ Export Labour Hours</button></div><div style={{display:"grid",gridTemplateColumns:"minmax(320px,.8fr) minmax(0,1.3fr)",gap:18,marginTop:20}}><section style={panel}><div style={panelTitle}>Add hours</div><LabourForm draft={labourDraft} setDraft={setLabourDraft} items={items} onAdd={addLabour}/></section><section style={panel}><div style={{display:"flex",justifyContent:"space-between",alignItems:"center",gap:10,flexWrap:"wrap"}}><div style={panelTitle}>Weekly summary</div><div style={{display:"flex",gap:8,flexWrap:"wrap"}}><input aria-label="Search labour hours" value={labourSearch} onChange={e=>setLabourSearch(e.target.value)} placeholder="Search labourer, task, location, T&M…" style={{...inputStyle,width:300}}/><select aria-label="Filter labour hours by week" value={currentWeek} onChange={e=>setLabourDraft({...labourDraft,week_ending:e.target.value})} style={{...inputStyle,width:170}}><option value="">All entries</option>{weekOptions.map(w=><option key={w}>{w}</option>)}</select>{labourSearch&&<button onClick={()=>setLabourSearch("")} style={ghostBtn}>Clear</button>}</div></div><table style={tableStyle}><thead><tr>{["Labourer","Regular","Overtime","Total"].map(h=><th key={h} style={thStyle}>{h}</th>)}</tr></thead><tbody>{labourSummary.map(r=><tr key={r.name}><td style={tdStyle}>{r.name}</td><td style={tdNum}>{r.regular}</td><td style={tdNum}>{r.ot}</td><td style={{...tdNum,fontWeight:800,color:C.yellow}}>{r.regular+r.ot}</td></tr>)}</tbody></table>{!labourSummary.length&&<div style={{color:C.muted,padding:"25px 0"}}>{labourSearch?"No labour hours match your search.":"No labour hours entered for this week."}</div>}</section></div><section style={{...panel,marginTop:18}}><div style={panelTitle}>Hour entries <span style={{color:C.muted,fontSize:11,fontWeight:600}}>({visibleLabour.length})</span></div>{visibleLabour.length?visibleLabour.map(e=><div key={e.id} style={{display:"grid",gridTemplateColumns:"110px 1fr 90px 90px 1.4fr 145px",gap:10,padding:"9px 0",borderBottom:`1px solid ${C.border}`,fontSize:12}}><span>{e.date}</span><b>{e.labourer}</b><span>{e.regular_hours||0} reg</span><span>{e.overtime_hours||0} OT</span><span style={{color:C.sub}}>{e.task||"—"}{e.tm_id?` · ${e.tm_id}`:""}</span><span style={{display:"flex",gap:5}}><button onClick={()=>setEditingLabour({...e})} style={miniEdit}>Edit</button><button onClick={()=>{if(window.confirm(`Delete hours for ${e.labourer} on ${e.date}?`))setLabourEntries(labourEntries.filter(x=>x.id!==e.id))}} style={miniDanger}>Delete</button></span></div>):<div style={{color:C.muted,padding:"24px 0"}}>{labourSearch?"No hour entries match your search.":"No hour entries yet."}</div>}</section></>}
       </main>
     </div>
