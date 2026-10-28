@@ -436,6 +436,8 @@ function invoiceFindings(invoice, matching, audit, fees, rates) {
   matching.unmatched.forEach(num=>add(`ticket:${num}`,`Ticket ${num} not found`,[num]));
   if (matching.needsReconciliation) add('tickets:reconciliation','Delivery ticket reconciliation requires review',[matching.invoiceVolume,matching.ticketVolume,matching.materialBreakdown?.map(x=>[x.strength,x.grout,x.qty,x.ticketQty])]);
   if (matching.volumeOverbilled) add('tickets:volume','Possible volume overbilling',[matching.invoiceVolume,matching.ticketVolume]);
+  const fibreDesign=fibreMixReferenceForInvoice(invoice,matching);
+  if(fibreDesign?.mismatch) add(`mix:fibre:${fibreDesign.mix}`,`${fibreDesign.mix} — billed fibre exceeds reviewed dosage`,[fibreDesign.volume,fibreDesign.billedKg,fibreDesign.expectedKg],fibreDesign.potentialExcess);
   audit.issues.forEach(row=>add(`charge:${row.key}`,`${row.label} — extra charge`,[row.invoiceQuantity,row.ticketQuantity,row.invoiceRate,row.ticketRate,row.invoiceAmount,row.ticketAmount],row.invoiceAmount-row.ticketAmount));
   fees.filter(row=>row.mismatch).forEach((row,index)=>add(`fee:${index}:${row.label}`,row.label,[row.expected,row.billed],row.difference));
   rates.filter(row=>row.mismatch).forEach((row,index)=>add(`rate:${index}:${row.strength}`,`${row.label} — contract rate`,[row.quantity,row.contractRate,row.billedRate,row.expectedAmount,row.amount],row.difference));
@@ -656,6 +658,36 @@ function supportedFibreReconciliation(invoice, matchedTickets, invoiceFibre) {
   return {predicted,dosage,observed:supported.length,inferred:missing.length};
 }
 
+// Reviewed mix references are intentionally conservative. Add additional mixes
+// only after their reviewed design and effective date are independently verified.
+const REVIEWED_FIBRE_MIXES = Object.freeze({
+  S25P20: {supplier:"Ocean",kgPerM3:1.8,effectiveFrom:"2026-10-05",reference:"Reviewed S25P20 mix design (CBCL, Oct 2026)"}
+});
+function fibreMixReferenceForInvoice(invoice,matching){
+  if(isCreditMemo(invoice)||matching?.needsReconciliation) return null;
+  if(!/ocean/i.test(String(invoice?.supplier||""))) return null;
+  if(String(invoice?.invoice_date||"").slice(0,10)<REVIEWED_FIBRE_MIXES.S25P20.effectiveFrom) return null;
+  const materials=invoiceMaterialLines(invoice).filter(row=>!row.grout);
+  if(materials.length!==1||materials[0].strength!==25) return null;
+  const tickets=(matching?.ticketsOnInvoice||[]).filter(t=>isStructuralTicket(t)&&!ticketIsGrout(t));
+  if(!tickets.length||tickets.some(t=>!Number.isFinite(Number(t.volume_m3))||Number(t.volume_m3)<=0)) return null;
+  const mixed=tickets.some(t=>!/(?:^|\W)S25P20(?:\W|$)/i.test(String(t.mix_design||"")));
+  if(mixed) return null; // 25 MPa alone is not sufficient to identify a reviewed mix.
+  const delivered=tickets.reduce((sum,t)=>sum+Number(t.volume_m3),0);
+  if(Math.abs(delivered-materials[0].qty)>0.06) return null;
+  const fibre=auditLineItems(invoice?.line_items).fibre;
+  if(!fibre?.hasQuantity||fibre.quantity<=0||fibre.lines.length!==1) return null;
+  const ref=REVIEWED_FIBRE_MIXES.S25P20;
+  const billed=fibre.quantity/materials[0].qty;
+  const expected=materials[0].qty*ref.kgPerM3;
+  const excessKg=fibre.quantity-expected;
+  const unitPrice=fibre.unitPrices.length===1?fibre.unitPrices[0]:null;
+  return {mix:"S25P20",reference:ref.reference,volume:materials[0].qty,expectedDosage:ref.kgPerM3,billedDosage:billed,expectedKg:expected,billedKg:fibre.quantity,excessKg,
+    potentialExcess:excessKg>0&&unitPrice!=null?excessKg*unitPrice:null,
+    mismatch:excessKg>Math.max(0.10,expected*0.005),
+    belowReference:excessKg< -Math.max(0.10,expected*0.005)};
+}
+
 function invoiceChargeAudit(invoice,matchedTickets) {
   const currentAudit=Number(invoice?.audit_version)>=20&&(matchedTickets||[]).length>0&&(matchedTickets||[]).every(ticket=>Number(ticket?.audit_version)>=20);
   if(!currentAudit) return {comparisons:[],issues:[],warnings:[]};
@@ -668,6 +700,8 @@ function invoiceChargeAudit(invoice,matchedTickets) {
     const inv=invoiceTotals[key]||{...empty,label:ticketTotals[key]?.label||key};
     const tkt=ticketTotals[key]||{...empty,label:inv.label};
     const inferredFibre=key==='fibre'?fibreInference:null;
+    const fibreTicketRows=key==='fibre'?(matchedTickets||[]).filter(t=>isStructuralTicket(t)&&!ticketIsGrout(t)&&Number(t.volume_m3)>0):[];
+    const missingFibreTickets=key==='fibre'&&fibreTicketRows.some(t=>!(t.charge_items||[]).some(c=>normalizedChargeType(c.description)?.key==='fibre'&&Number(c.quantity)>0));
     const effectiveTicketQuantity=inferredFibre?inferredFibre.predicted:tkt.quantity;
     const difference=inv.quantity-effectiveTicketQuantity;
     const tolerance=Math.max(0.05,Math.abs(tkt.quantity)*0.005);
@@ -675,13 +709,13 @@ function invoiceChargeAudit(invoice,matchedTickets) {
     const ticketRate=tkt.unitPrices.length?tkt.unitPrices[0]:null;
     // This is an overbilling audit. Lower invoice quantities, rates or amounts
     // are intentionally not flagged.
-    const quantityMismatch=inv.hasQuantity&&tkt.hasQuantity&&difference>tolerance;
+    const quantityMismatch=!missingFibreTickets&&inv.hasQuantity&&tkt.hasQuantity&&difference>tolerance;
     const rateMismatch=invoiceRate!=null&&ticketRate!=null&&(invoiceRate-ticketRate)>0.01;
     // Ticket-side amounts are incomplete for inferred fibre, so don't compare
     // an entire invoice charge with a handful of OCR-extracted ticket amounts.
-    const amountMismatch=!inferredFibre&&inv.hasAmount&&tkt.hasAmount&&(inv.amount-tkt.amount)>0.02;
+    const amountMismatch=!missingFibreTickets&&!inferredFibre&&inv.hasAmount&&tkt.hasAmount&&(inv.amount-tkt.amount)>0.02;
     const unsupportedInvoiceCharge=inv.lines.length>0&&tkt.lines.length===0;
-    return {key,label:inv.label,invoiceQuantity:inv.quantity,ticketQuantity:effectiveTicketQuantity,recordedTicketQuantity:tkt.quantity,inferredFibre,difference,unit:inv.unit||tkt.unit||"",unitPrice:invoiceRate,invoiceRate,ticketRate,invoiceAmount:inv.amount,ticketAmount:tkt.amount,hasInvoiceQuantity:inv.hasQuantity,hasTicketQuantity:tkt.hasQuantity,hasTicketData:tkt.lines.length>0,unsupportedInvoiceCharge,quantityMismatch,rateMismatch,amountMismatch,mismatch:quantityMismatch||rateMismatch||amountMismatch,needsSupport:unsupportedInvoiceCharge};
+    return {key,label:inv.label,invoiceQuantity:inv.quantity,ticketQuantity:effectiveTicketQuantity,recordedTicketQuantity:tkt.quantity,inferredFibre,missingFibreTickets,difference,unit:inv.unit||tkt.unit||"",unitPrice:invoiceRate,invoiceRate,ticketRate,invoiceAmount:inv.amount,ticketAmount:tkt.amount,hasInvoiceQuantity:inv.hasQuantity,hasTicketQuantity:tkt.hasQuantity,hasTicketData:tkt.lines.length>0,unsupportedInvoiceCharge,quantityMismatch,rateMismatch,amountMismatch,mismatch:quantityMismatch||rateMismatch||amountMismatch,needsSupport:unsupportedInvoiceCharge};
   });
   // Only show rows with data on both sides. Missing historical extraction is
   // not an invoice condition and should never appear as a warning.
@@ -3305,6 +3339,7 @@ Return ONLY valid JSON, no markdown:
     const confirmedCreditLinks=isCredit?(invoice.confirmed_invoice_numbers||[]):[];
     const linkedCredits=creditMemos.filter(credit=>invoiceResolvedByCredit(invoice,[credit]));
     const chargeAudit=invoiceChargeAudit(invoice,m.needsReconciliation?[]:m.ticketsOnInvoice);
+    const fibreDesign=fibreMixReferenceForInvoice(invoice,m);
     const calculatedChecks=invoiceCalculatedChecks(invoice);
     const contractRateChecks=invoiceContractRateChecks(invoice,m.needsReconciliation?[]:m.ticketsOnInvoice,liveOceanContractRates,groutRateBaselines);
     const invoiceNumber=normalizeInvoiceNumber(invoice.invoice_number);
@@ -3364,15 +3399,22 @@ Return ONLY valid JSON, no markdown:
         {m.usesConsolidatedBatch&&<div style={{background:"#082f49",border:`1px solid ${C.blue}`,borderRadius:10,padding:"12px 16px",marginBottom:14,color:"#bae6fd",fontSize:13}}>✓ Ocean consolidated invoice — reconciled against {m.matched.length} delivery tickets (concrete and grout separately) dated {invoice.invoice_date}. Ocean does not print every delivery ticket number on its invoice.</div>}
         {m.referenceCorrections?.length>0&&<div style={{background:"#082f49",border:`1px solid ${C.blue}`,borderRadius:10,padding:"10px 14px",marginBottom:12,fontSize:12,color:"#bae6fd"}}>ℹ Probable invoice-reference OCR typo (quantity independently reconciled): {m.referenceCorrections.map(x=>`${x.printed} → ${x.actual}`).join(", ")}. Original invoice reference retained.</div>}
         {m.unmatched.length>0&&<div style={{background:"#451a03",border:`1px solid ${C.yellow}`,borderRadius:10,padding:"12px 16px",marginBottom:14,color:"#fde68a",fontSize:13}}>⚠ {m.unmatched.length} ticket{m.unmatched.length>1?"s":""} on invoice not in system: <b>{m.unmatched.join(", ")}</b></div>}
+        {fibreDesign&&<div style={{background:fibreDesign.mismatch?"#450a0a":C.bg,border:`1px solid ${fibreDesign.mismatch?C.red:C.green}66`,borderRadius:9,padding:"12px 16px",marginBottom:14,fontSize:12}}>
+          <b style={{color:fibreDesign.mismatch?C.red:C.green}}>{fibreDesign.mismatch?"⚠ Reviewed mix fibre dosage mismatch":fibreDesign.belowReference?"ⓘ Fibre below reviewed mix reference":"✓ Invoice fibre matches reviewed mix"}</b>
+          <div style={{color:C.sub,marginTop:6}}>Mix {fibreDesign.mix}: {fmt(fibreDesign.volume)} m³ × {fmt(fibreDesign.expectedDosage)} kg/m³ = {fmt(fibreDesign.expectedKg)} kg expected; invoice: {fmt(fibreDesign.billedKg)} kg ({fmt(fibreDesign.billedDosage)} kg/m³).</div>
+          <div style={{color:C.muted,marginTop:5}}>{fibreDesign.reference}. This confirms billed dosage only, not what the batch plant physically added.</div>
+          {fibreDesign.mismatch&&fibreDesign.potentialExcess!=null&&<div style={{color:C.red,marginTop:5}}>Potential excess before tax/fees: {money(fibreDesign.potentialExcess)}</div>}
+        </div>}
         {chargeAudit.comparisons.length>0&&<div style={{marginBottom:16}}>
           <div style={{color:C.muted,fontSize:11,fontWeight:700,textTransform:"uppercase",letterSpacing:1,marginBottom:10}}>Admixture & Extra-Charge Audit</div>
           {chargeAudit.comparisons.map(row=>{
             const potential=row.quantityMismatch&&row.difference>0&&row.unitPrice?row.difference*row.unitPrice:null;
             const rowColor=row.mismatch?C.red:C.green;
             return <div key={row.key} style={{background:row.mismatch?"#450a0a":C.bg,border:`1px solid ${rowColor}`,borderRadius:9,padding:"11px 14px",marginBottom:8}}>
-              <div style={{display:"flex",justifyContent:"space-between",gap:10,flexWrap:"wrap"}}><b>{row.label}</b><Badge color={rowColor}>{row.mismatch?"⚠ Possible overcharge":"✓ Match"}</Badge></div>
+              <div style={{display:"flex",justifyContent:"space-between",gap:10,flexWrap:"wrap"}}><b>{row.label}</b><Badge color={rowColor}>{row.mismatch?"⚠ Possible overcharge":row.missingFibreTickets?"ⓘ Ticket fibre incomplete":"✓ Match"}</Badge></div>
+              {row.missingFibreTickets&&<div style={{fontSize:11,color:C.yellow,marginTop:7}}>Some ticket fibre fields are blank or zero-filled. These are unverified quantities, not evidence that fibre was omitted. Use the reviewed-mix invoice check above where available.</div>}
               {row.inferredFibre&&<div style={{fontSize:11,color:C.yellow,marginTop:7}}>Fibre dosage cross-check: {fmt(row.recordedTicketQuantity)} kg recorded on {row.inferredFibre.observed} tickets; {row.inferredFibre.inferred} more loads estimated at {fmt(row.inferredFibre.dosage)} kg/m³. Total {fmt(row.inferredFibre.predicted)} kg agrees with invoice. Estimated from ticket data — verify against original slips if needed.</div>}
-              <div style={{display:"flex",gap:16,flexWrap:"wrap",fontSize:12,color:C.sub,marginTop:6}}>{(row.hasTicketQuantity||row.hasInvoiceQuantity)&&<><span>Tickets: <b style={{color:C.text}}>{row.hasTicketQuantity?`${fmt(row.ticketQuantity)} ${row.unit}`:"not shown"}</b></span><span>Invoice: <b style={{color:C.text}}>{row.hasInvoiceQuantity?`${fmt(row.invoiceQuantity)} ${row.unit}`:"not shown"}</b></span>{row.hasTicketQuantity&&row.hasInvoiceQuantity&&<span>Difference: <b style={{color:row.quantityMismatch?C.red:C.green}}>{row.difference>0?"+":""}{fmt(row.difference)} {row.unit}</b></span>}</>}{row.ticketRate!=null&&row.invoiceRate!=null&&<span>Rate: <b style={{color:row.rateMismatch?C.red:C.green}}>{money(row.ticketRate)} ticket / {money(row.invoiceRate)} invoice</b></span>}{row.ticketAmount>0&&row.invoiceAmount>0&&<span>Amount: <b style={{color:row.amountMismatch?C.red:C.green}}>{money(row.ticketAmount)} ticket / {money(row.invoiceAmount)} invoice</b></span>}{potential!=null&&<span>Potential excess: <b style={{color:C.red}}>{money(potential)}</b></span>}</div>
+              {!row.missingFibreTickets&&<div style={{display:"flex",gap:16,flexWrap:"wrap",fontSize:12,color:C.sub,marginTop:6}}>{(row.hasTicketQuantity||row.hasInvoiceQuantity)&&<><span>Tickets: <b style={{color:C.text}}>{row.hasTicketQuantity?`${fmt(row.ticketQuantity)} ${row.unit}`:"not shown"}</b></span><span>Invoice: <b style={{color:C.text}}>{row.hasInvoiceQuantity?`${fmt(row.invoiceQuantity)} ${row.unit}`:"not shown"}</b></span>{row.hasTicketQuantity&&row.hasInvoiceQuantity&&<span>Difference: <b style={{color:row.quantityMismatch?C.red:C.green}}>{row.difference>0?"+":""}{fmt(row.difference)} {row.unit}</b></span>}</>}{row.ticketRate!=null&&row.invoiceRate!=null&&<span>Rate: <b style={{color:row.rateMismatch?C.red:C.green}}>{money(row.ticketRate)} ticket / {money(row.invoiceRate)} invoice</b></span>}{row.ticketAmount>0&&row.invoiceAmount>0&&<span>Amount: <b style={{color:row.amountMismatch?C.red:C.green}}>{money(row.ticketAmount)} ticket / {money(row.invoiceAmount)} invoice</b></span>}{potential!=null&&<span>Potential excess: <b style={{color:C.red}}>{money(potential)}</b></span>}</div>}
             </div>;
           })}
         </div>}
