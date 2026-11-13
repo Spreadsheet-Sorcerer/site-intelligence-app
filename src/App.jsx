@@ -468,7 +468,7 @@ function invoiceFindings(invoice, matching, audit, fees, rates) {
   if (matching.volumeOverbilled) add('tickets:volume','Possible volume overbilling',[matching.invoiceVolume,matching.ticketVolume]);
   const fibreDesign=fibreMixReferenceForInvoice(invoice,matching);
   if(fibreDesign?.mismatch) add(`mix:fibre:${fibreDesign.mix}`,`${fibreDesign.mix} — billed fibre exceeds reviewed dosage${fibreDesign.needsMixConfirmation?" (confirm mix)":""}`,[fibreDesign.volume,fibreDesign.billedKg,fibreDesign.expectedKg,fibreDesign.needsMixConfirmation],fibreDesign.potentialExcess);
-  audit.issues.forEach(row=>add(`charge:${row.key}`,`${row.label} — extra charge`,[row.invoiceQuantity,row.ticketQuantity,row.invoiceRate,row.ticketRate,row.invoiceAmount,row.ticketAmount],row.invoiceAmount-row.ticketAmount));
+  audit.issues.forEach(row=>add(`charge:${row.key}`,row.acceleratorNeedsDosage?`${row.label} — verify ticket dosage`:`${row.label} — extra charge`,[row.invoiceQuantity,row.ticketQuantity,row.invoiceRate,row.ticketRate,row.invoiceAmount,row.ticketAmount,row.acceleratorNeedsDosage],row.acceleratorNeedsDosage?null:row.invoiceAmount-row.ticketAmount));
   fees.filter(row=>row.mismatch).forEach((row,index)=>add(`fee:${index}:${row.label}`,row.label,[row.expected,row.billed],row.difference));
   rates.filter(row=>row.mismatch).forEach((row,index)=>add(`rate:${index}:${row.strength}`,`${row.label} — contract rate`,[row.quantity,row.contractRate,row.billedRate,row.expectedAmount,row.amount],row.difference));
   return findings;
@@ -633,6 +633,22 @@ function normalizedChargeType(description) {
   return generic?{key:`other_${generic.replace(/\s+/g,"_")}`,label:String(description||"Other charge").trim()}:null;
 }
 
+// Ocean delivery slips list the m³ receiving a specified accelerator dose
+// (for example "2L NON CHLORIDE ACCELERATOR" at 7.65 m³). Invoices bill
+// litres, so convert ticket m³ x L/m³ before comparing quantities.
+function acceleratorTicketLitres(line) {
+  const unit=String(line?.unit||"").toLowerCase().replace(/\s+/g,"");
+  const qty=Number(line?.quantity);
+  if(!Number.isFinite(qty)) return null;
+  if(/^(?:l|lt|ltr|litre|litres|liter|liters)$/.test(unit)) return qty;
+  if(!/(?:m3|m³|cu\.?m|cubicmet(?:er|re)s?)/.test(unit)) return null;
+  const description=String(line?.description||"");
+  // Supplier markings: "2L NON CHLORIDE ACCELERATOR", "4 L/M3 accelerator".
+  const dose=description.match(/(?:^|[^\d])([0-9]+(?:\.[0-9]+)?)\s*(?:l|lt|litres?|liters?)(?:\s*\/\s*(?:m3|m³))?/i);
+  const litresPerM3=dose?Number(dose[1]):null;
+  return Number.isFinite(litresPerM3)&&litresPerM3>0&&litresPerM3<=30?qty*litresPerM3:null;
+}
+
 function auditLineItems(lines,{ticketSide=false}={}) {
   const totals={};
   (lines||[]).forEach(line=>{
@@ -641,7 +657,7 @@ function auditLineItems(lines,{ticketSide=false}={}) {
     const quantity=parseFloat(line?.quantity);
     const unitPrice=parseFloat(line?.unit_price);
     const amount=parseFloat(line?.amount);
-    if(!totals[type.key]) totals[type.key]={...type,quantity:0,amount:0,unit:String(line?.unit||"").trim(),unitPrices:[],hasQuantity:false,hasAmount:false,lines:[]};
+    if(!totals[type.key]) totals[type.key]={...type,quantity:0,amount:0,unit:String(line?.unit||"").trim(),unitPrices:[],hasQuantity:false,hasAmount:false,unverifiedDosage:false,lines:[]};
     if(Number.isFinite(quantity)){
       // Ocean bills set retarder in metre-hours: 1-hour retarder uses the
       // delivered metres once; 2-hour retarder uses them twice, etc. Invoice
@@ -649,8 +665,14 @@ function auditLineItems(lines,{ticketSide=false}={}) {
       // delivery-ticket rows.
       const hourMatch=String(line?.description||"").match(/(\d+(?:\.\d+)?)\s*(?:hour|hr)\b/i);
       const billingMultiplier=ticketSide&&type.key==="set_retarder"&&hourMatch?parseFloat(hourMatch[1]):1;
-      totals[type.key].quantity+=quantity*(Number.isFinite(billingMultiplier)&&billingMultiplier>0?billingMultiplier:1);
-      totals[type.key].hasQuantity=true;
+      if(ticketSide&&type.key==="accelerator") {
+        const litres=acceleratorTicketLitres(line);
+        if(litres==null) totals[type.key].unverifiedDosage=true;
+        else {totals[type.key].quantity+=litres;totals[type.key].hasQuantity=true;totals[type.key].unit="LT";}
+      } else {
+        totals[type.key].quantity+=quantity*(Number.isFinite(billingMultiplier)&&billingMultiplier>0?billingMultiplier:1);
+        totals[type.key].hasQuantity=true;
+      }
     }
     if(Number.isFinite(unitPrice)) totals[type.key].unitPrices.push(unitPrice);
     if(Number.isFinite(amount)){totals[type.key].amount+=amount;totals[type.key].hasAmount=true;}
@@ -758,18 +780,19 @@ function invoiceChargeAudit(invoice,matchedTickets) {
     const ticketRate=tkt.unitPrices.length?tkt.unitPrices[0]:null;
     // This is an overbilling audit. Lower invoice quantities, rates or amounts
     // are intentionally not flagged.
-    const quantityMismatch=!missingFibreTickets&&inv.hasQuantity&&tkt.hasQuantity&&difference>tolerance;
+    const acceleratorNeedsDosage=key==='accelerator'&&tkt.unverifiedDosage;
+    const quantityMismatch=!missingFibreTickets&&!acceleratorNeedsDosage&&inv.hasQuantity&&tkt.hasQuantity&&difference>tolerance;
     const rateMismatch=invoiceRate!=null&&ticketRate!=null&&(invoiceRate-ticketRate)>0.01;
     // Ticket-side amounts are incomplete for inferred fibre, so don't compare
     // an entire invoice charge with a handful of OCR-extracted ticket amounts.
-    const amountMismatch=!missingFibreTickets&&!inferredFibre&&inv.hasAmount&&tkt.hasAmount&&(inv.amount-tkt.amount)>0.02;
+    const amountMismatch=!missingFibreTickets&&!inferredFibre&&!acceleratorNeedsDosage&&inv.hasAmount&&tkt.hasAmount&&(inv.amount-tkt.amount)>0.02;
     const unsupportedInvoiceCharge=inv.lines.length>0&&tkt.lines.length===0;
-    return {key,label:inv.label,invoiceQuantity:inv.quantity,ticketQuantity:effectiveTicketQuantity,recordedTicketQuantity:tkt.quantity,inferredFibre,missingFibreTickets,difference,unit:inv.unit||tkt.unit||"",unitPrice:invoiceRate,invoiceRate,ticketRate,invoiceAmount:inv.amount,ticketAmount:tkt.amount,hasInvoiceQuantity:inv.hasQuantity,hasTicketQuantity:tkt.hasQuantity,hasTicketData:tkt.lines.length>0,unsupportedInvoiceCharge,quantityMismatch,rateMismatch,amountMismatch,mismatch:quantityMismatch||rateMismatch||amountMismatch,needsSupport:unsupportedInvoiceCharge};
+    return {key,label:inv.label,invoiceQuantity:inv.quantity,ticketQuantity:effectiveTicketQuantity,recordedTicketQuantity:tkt.quantity,inferredFibre,missingFibreTickets,acceleratorNeedsDosage,difference,unit:key==='accelerator'?'LT':(inv.unit||tkt.unit||""),unitPrice:invoiceRate,invoiceRate,ticketRate,invoiceAmount:inv.amount,ticketAmount:tkt.amount,hasInvoiceQuantity:inv.hasQuantity,hasTicketQuantity:tkt.hasQuantity,hasTicketData:tkt.lines.length>0,unsupportedInvoiceCharge,quantityMismatch,rateMismatch,amountMismatch,mismatch:quantityMismatch||rateMismatch||amountMismatch,needsSupport:unsupportedInvoiceCharge};
   });
   // Only show rows with data on both sides. Missing historical extraction is
   // not an invoice condition and should never appear as a warning.
   const comparable=comparisons.filter(row=>row.hasTicketData&&invoiceTotals[row.key]?.lines?.length>0);
-  return {comparisons:comparable,issues:comparable.filter(row=>row.mismatch),warnings:[]};
+  return {comparisons:comparable,issues:comparable.filter(row=>row.mismatch||row.acceleratorNeedsDosage),warnings:[]};
 }
 
 function invoiceCalculatedChecks(invoice) {
@@ -3472,12 +3495,13 @@ Return ONLY valid JSON, no markdown:
           <div style={{color:C.muted,fontSize:11,fontWeight:700,textTransform:"uppercase",letterSpacing:1,marginBottom:10}}>Admixture & Extra-Charge Audit</div>
           {chargeAudit.comparisons.map(row=>{
             const potential=row.quantityMismatch&&row.difference>0&&row.unitPrice?row.difference*row.unitPrice:null;
-            const rowColor=row.mismatch?C.red:C.green;
-            return <div key={row.key} style={{background:row.mismatch?"#450a0a":C.bg,border:`1px solid ${rowColor}`,borderRadius:9,padding:"11px 14px",marginBottom:8}}>
-              <div style={{display:"flex",justifyContent:"space-between",gap:10,flexWrap:"wrap"}}><b>{row.label}</b><Badge color={rowColor}>{row.mismatch?"⚠ Possible overcharge":row.missingFibreTickets?"ⓘ Ticket fibre incomplete":"✓ Match"}</Badge></div>
+            const rowColor=row.acceleratorNeedsDosage?C.yellow:row.mismatch?C.red:C.green;
+            return <div key={row.key} style={{background:row.acceleratorNeedsDosage?"#451a03":row.mismatch?"#450a0a":C.bg,border:`1px solid ${rowColor}`,borderRadius:9,padding:"11px 14px",marginBottom:8}}>
+              <div style={{display:"flex",justifyContent:"space-between",gap:10,flexWrap:"wrap"}}><b>{row.label}</b><Badge color={rowColor}>{row.acceleratorNeedsDosage?"⚠ Verify ticket dosage":row.mismatch?"⚠ Possible overcharge":row.missingFibreTickets?"ⓘ Ticket fibre incomplete":"✓ Match"}</Badge></div>
+              {row.acceleratorNeedsDosage&&<div style={{fontSize:11,color:C.yellow,marginTop:7}}>One or more accelerator ticket lines are missing a readable dosage or unit. Verify the original slips before reconciling billed litres; this is not a confirmed overcharge.</div>}
               {row.missingFibreTickets&&<div style={{fontSize:11,color:C.yellow,marginTop:7}}>Some ticket fibre fields are blank or zero-filled. These are unverified quantities, not evidence that fibre was omitted. Use the reviewed-mix invoice check above where available.</div>}
               {row.inferredFibre&&<div style={{fontSize:11,color:C.yellow,marginTop:7}}>Fibre dosage cross-check: {fmt(row.recordedTicketQuantity)} kg recorded on {row.inferredFibre.observed} tickets; {row.inferredFibre.inferred} more loads estimated at {fmt(row.inferredFibre.dosage)} kg/m³. Total {fmt(row.inferredFibre.predicted)} kg agrees with invoice. Estimated from ticket data — verify against original slips if needed.</div>}
-              {!row.missingFibreTickets&&<div style={{display:"flex",gap:16,flexWrap:"wrap",fontSize:12,color:C.sub,marginTop:6}}>{(row.hasTicketQuantity||row.hasInvoiceQuantity)&&<><span>Tickets: <b style={{color:C.text}}>{row.hasTicketQuantity?`${fmt(row.ticketQuantity)} ${row.unit}`:"not shown"}</b></span><span>Invoice: <b style={{color:C.text}}>{row.hasInvoiceQuantity?`${fmt(row.invoiceQuantity)} ${row.unit}`:"not shown"}</b></span>{row.hasTicketQuantity&&row.hasInvoiceQuantity&&<span>Difference: <b style={{color:row.quantityMismatch?C.red:C.green}}>{row.difference>0?"+":""}{fmt(row.difference)} {row.unit}</b></span>}</>}{row.ticketRate!=null&&row.invoiceRate!=null&&<span>Rate: <b style={{color:row.rateMismatch?C.red:C.green}}>{money(row.ticketRate)} ticket / {money(row.invoiceRate)} invoice</b></span>}{row.ticketAmount>0&&row.invoiceAmount>0&&<span>Amount: <b style={{color:row.amountMismatch?C.red:C.green}}>{money(row.ticketAmount)} ticket / {money(row.invoiceAmount)} invoice</b></span>}{potential!=null&&<span>Potential excess: <b style={{color:C.red}}>{money(potential)}</b></span>}</div>}
+              {!row.missingFibreTickets&&<div style={{display:"flex",gap:16,flexWrap:"wrap",fontSize:12,color:C.sub,marginTop:6}}>{(row.hasTicketQuantity||row.hasInvoiceQuantity)&&<><span>Tickets: <b style={{color:C.text}}>{row.hasTicketQuantity?`${fmt(row.ticketQuantity)} ${row.unit}`:"not shown"}</b></span><span>Invoice: <b style={{color:C.text}}>{row.hasInvoiceQuantity?`${fmt(row.invoiceQuantity)} ${row.unit}`:"not shown"}</b></span>{!row.acceleratorNeedsDosage&&row.hasTicketQuantity&&row.hasInvoiceQuantity&&<span>Difference: <b style={{color:row.quantityMismatch?C.red:C.green}}>{row.difference>0?"+":""}{fmt(row.difference)} {row.unit}</b></span>}</>}{row.ticketRate!=null&&row.invoiceRate!=null&&<span>Rate: <b style={{color:row.rateMismatch?C.red:C.green}}>{money(row.ticketRate)} ticket / {money(row.invoiceRate)} invoice</b></span>}{row.ticketAmount>0&&row.invoiceAmount>0&&<span>Amount: <b style={{color:row.amountMismatch?C.red:C.green}}>{money(row.ticketAmount)} ticket / {money(row.invoiceAmount)} invoice</b></span>}{potential!=null&&<span>Potential excess: <b style={{color:C.red}}>{money(potential)}</b></span>}</div>}
             </div>;
           })}
         </div>}
