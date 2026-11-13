@@ -163,7 +163,7 @@ const SCOPE = [
   { area:"Foundations", item:"Slabs",                m3:276.9,  mpa:"25 MPa/N-CF" },
   { area:"P2",          item:"Wall",                 m3:239.6,  mpa:"25 MPa/N-CF" },
   { area:"P2",          item:"Columns",              m3:29.9,   mpa:"40 MPa/N-CF" },
-  { area:"P2",          item:"Slabs",                m3:495.5,  mpa:"25 MPa/N-CF" },
+  { area:"P2",          item:"Slabs",                m3:495.5,  mpa:"35 MPa/N-CF" },
   { area:"P1",          item:"Wall",                 m3:290.2,  mpa:"35 MPa/N-CF" },
   { area:"P1",          item:"Columns",              m3:38.9,   mpa:"40 MPa/N-CF" },
   { area:"P1",          item:"Slabs",                m3:534.6,  mpa:"35 MPa/N-CF" },
