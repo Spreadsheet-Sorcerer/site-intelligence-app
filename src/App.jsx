@@ -1135,7 +1135,15 @@ function normalizeTicketDate(value, fileName) {
   return (fallback && Math.abs(year-currentYear) > 1) ? fallback : normalized;
 }
 function ticketNumberKey(value) {
-  return String(value || "").trim().replace(/\s+/g, "").toLowerCase();
+  // Normalize OCR/typing variants such as "Ticket #253760", "253 760",
+  // "253,760" and "253760" to the same delivery-ticket reference.
+  // Do not fuzzy-match different numbers: a missing delivery still requires review.
+  const raw = String(value ?? "").trim().toLowerCase();
+  const withoutLabel = raw.replace(/^(?:delivery\s*)?(?:ticket|tkt|tk|no\.?|#)\s*(?:number|no\.?|#|:|-)?\s*/i, "").trim();
+  if (/^[#\s\d,._-]+$/.test(withoutLabel)) {
+    return withoutLabel.replace(/[^\d]/g, "");
+  }
+  return withoutLabel.replace(/\s+/g, "");
 }
 
 // Determine the report-level status from tested cylinder averages rather than
